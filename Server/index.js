@@ -1,4 +1,5 @@
 // --- Initialization: Fastify, dotenv, uuid ---
+require('dotenv').config();
 const fastify = require('fastify')({
   // NOTE: Safety: enforce a global payload ceiling to deter oversized bodies.
   bodyLimit: 10 * 1024 * 1024, // 10MB
@@ -13,7 +14,6 @@ const fastify = require('fastify')({
   },
   disableRequestLogging: true,
 });
-require('dotenv').config();
 const { v4: uuidv4 } = require('uuid');
 
 // --- Upload limits ---
@@ -35,6 +35,9 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { pipeline } = require('stream/promises');
+
+const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
 
 // ...existing code...
 // All await statements must be inside async functions or route handlers.
@@ -560,11 +563,11 @@ fastify.addHook('onError', (request, reply, error, done) => {
 const profanityFilter = new BadWordsFilter();
 
 // Server-side verification of Supabase JWTs.
-// Uses env vars when present, otherwise falls back to the same public project creds
-// used by the frontend (anon key is safe to embed).
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://frwkaysiysknenfthauo.supabase.co';
-const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY || 'sb_publishable_aV19W7-xDXF6zuPrBgayKQ_yB3qHPoB';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY environment variables');
+}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -2118,7 +2121,7 @@ fastify.post('/uploads', async (request, reply) => {
 
 fastify.get('/health', async (request, reply) => {
   // Simple healthcheck: no secrets, just basic status
-  return { ok: true, uptime: process.uptime() };
+  return { ok: true, status: 'healthy', uptime: process.uptime() };
 });
 
 // Platform role declaration acknowledgment
@@ -5951,7 +5954,6 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
 
 const start = async () => {
   try {
-    const port = process.env.PORT || 3001;
     if (hasDatabaseUrl) {
       try {
         await ensureVotesTable();
@@ -5977,8 +5979,8 @@ const start = async () => {
         fastify.log.warn({ err: e }, 'Failed to ensure movement extras tables at startup');
       }
     }
-    await fastify.listen({ port, host: '127.0.0.1' });
-    fastify.log.info(`Server running on port ${port}`);
+    await fastify.listen({ port: PORT, host: HOST });
+    fastify.log.info(`Server running on ${HOST}:${PORT}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

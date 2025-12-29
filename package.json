@@ -13,6 +13,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "start": "node Server/index.js",
     "dev:cf": "wrangler pages dev dist --binding SUPABASE_URL=<your-supabase-url> --binding SUPABASE_ANON_KEY=<your-supabase-anon-key>",
     "deploy:cf": "npm run build && wrangler pages publish dist"
   },
