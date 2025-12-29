@@ -1,0 +1,11 @@
+name = "people-power-cloudflare"
+type = "javascript"
+# Use a compatibility date that is valid today.
+compatibility_date = "2024-05-01"
+
+[env.production]
+# Add your Cloudflare Pages/Workers bindings here
+# Example:
+# SUPABASE_URL = "<your-supabase-url>"
+# SUPABASE_ANON_KEY = "<your-supabase-anon-key>"
+# BACKEND_BASE_URL = "https://your-origin.example.com" # optional: proxy target for functions/api
