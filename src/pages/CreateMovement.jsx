@@ -1,7 +1,4 @@
 import { fetchMovementLocks } from '@/api/movementLocksClient';
-// ✅ REMOVE any of these (if present):
-
-
 import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { useNavigate } from 'react-router-dom';
@@ -19,9 +16,6 @@ import toast from 'react-hot-toast';
 import Filter from 'bad-words';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
-
-import ReactQuill from 'react-quill';
-import 'quill/dist/quill.snow.css';
 
 const TAG_OPTIONS = [
   // Movement-type categories requested
@@ -76,7 +70,7 @@ export default function CreateMovement() {
 
   // ✅ Define missing state to prevent runtime ReferenceErrors
   const [title, setTitle] = useState('');
-  const [descriptionHtml, setDescriptionHtml] = useState('');
+  const [descriptionText, setDescriptionText] = useState('');
   const [selectedTags, setSelectedTags] = useState([]);
   const [showTagOptions, setShowTagOptions] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -114,31 +108,6 @@ export default function CreateMovement() {
 
   const [ackAccepted, setAckAccepted] = useState(false);
   const [ackLoading, setAckLoading] = useState(false);
-
-  const quillModules = useMemo(
-    () => ({
-      toolbar: [
-        [{ header: [1, 2, false] }],
-        ['bold', 'italic', 'underline'],
-        [{ list: 'ordered' }, { list: 'bullet' }],
-        ['link'],
-        ['clean'],
-      ],
-    }),
-    []
-  );
-
-  const htmlToText = (html) => {
-    const raw = String(html ?? '');
-    if (!raw) return '';
-    return raw
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  };
 
   const normalizeHttpUrl = (value) => {
     const raw = String(value ?? '').trim();
@@ -196,7 +165,8 @@ export default function CreateMovement() {
     const s = String(text ?? '').trim();
     if (!s) return '';
     const escaped = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `<p>${escaped}</p>`;
+    const withBreaks = escaped.split('\n').map((line) => line.trim()).join('<br />');
+    return `<p>${withBreaks}</p>`;
   };
 
   useEffect(() => {
@@ -233,7 +203,7 @@ export default function CreateMovement() {
     return {
       id: 'preview',
       title: title || 'Your movement title',
-      description: descriptionHtml || 'Your movement description will appear here.',
+      description: descriptionText || 'Your movement description will appear here.',
       tags,
       author_email: user?.email ?? 'you@example.com',
       upvotes: 0,
@@ -244,7 +214,46 @@ export default function CreateMovement() {
       location_lat: includeMapLocation ? mapCoords?.lat : undefined,
       location_lon: includeMapLocation ? mapCoords?.lon : undefined,
     };
-  }, [title, descriptionHtml, selectedTags, user, locationCity, locationCountry, includeMapLocation, mapCoords]);
+  }, [title, descriptionText, selectedTags, user, locationCity, locationCountry, includeMapLocation, mapCoords]);
+
+  const updateMapPreview = async ({ silent = false } = {}) => {
+    if (!includeMapLocation) return;
+    const city = String(locationCity || '').trim();
+    const country = String(locationCountry || '').trim();
+    if (!city && !country) {
+      setMapCoords(null);
+      return;
+    }
+    setMapLoading(true);
+    try {
+      const coords = await geocodeCityLevel({ city, country });
+      setMapCoords(coords);
+      if (!coords && !silent) {
+        toast.error('Could not find that city-level location');
+      }
+    } catch {
+      setMapCoords(null);
+      if (!silent) {
+        toast.error('Failed to load map location');
+      }
+    } finally {
+      setMapLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!includeMapLocation) return;
+    const city = String(locationCity || '').trim();
+    const country = String(locationCountry || '').trim();
+    if (!city && !country) {
+      setMapCoords(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      updateMapPreview({ silent: true });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [includeMapLocation, locationCity, locationCountry]);
 
   const handleSubmit = async (e) => {
     e?.preventDefault?.();
@@ -268,37 +277,47 @@ export default function CreateMovement() {
         }
       };
 
+      const cleanedTitle = cleanText(title);
       const allowed = new Set(TAG_OPTIONS.map((t) => t.id));
       const tags = (Array.isArray(selectedTags) ? selectedTags : [])
         .map((t) => String(t).trim())
         .filter(Boolean)
         .filter((t) => allowed.has(t));
 
-      const descriptionText = htmlToText(descriptionHtml);
+      const rawDescription = String(descriptionText || '');
+      const cleanedDescription = cleanText(rawDescription);
+      const descriptionFallback = cleanedDescription || rawDescription.trim();
+      const descriptionHtmlPayload = descriptionFallback ? toSafeHtmlParagraph(descriptionFallback) : '';
 
-      const nextClaims = Array.isArray(claims) ? claims : [];
+      const nextClaims = (Array.isArray(claims) ? claims : [])
+        .map((claim) => ({
+          ...claim,
+          text: String(claim?.text || '').trim(),
+        }))
+        .filter((claim) => claim.text);
 
       const normalizedLinks = (Array.isArray(mediaLinks) ? mediaLinks : [])
         .map((u) => normalizeHttpUrl(u))
         .filter(Boolean);
 
       const payload = {
-        title: cleanText(title),
-        description: cleanText(descriptionText),
-        description_html: String(descriptionHtml || ''),
+        title: cleanedTitle,
+        description: descriptionFallback,
+        summary: descriptionFallback || undefined,
+        description_html: descriptionHtmlPayload || undefined,
         tags,
         author_email: user?.email ?? null,
         location_city: String(locationCity || '').trim() || undefined,
         location_country: String(locationCountry || '').trim() || undefined,
         location_lat: includeMapLocation ? mapCoords?.lat : undefined,
         location_lon: includeMapLocation ? mapCoords?.lon : undefined,
-        media_urls: undefined,
+        media_urls: normalizedLinks.length ? normalizedLinks : undefined,
         claims: nextClaims.length ? nextClaims : undefined,
       };
 
       const nextErrors = {
-        title: payload.title ? null : 'Title is required.',
-        description: payload.description ? null : 'Description is required.',
+        title: cleanedTitle ? null : 'Title is required.',
+        description: descriptionFallback ? null : 'Description is required.',
         claims: null,
       };
       setFieldErrors(nextErrors);
@@ -418,7 +437,7 @@ export default function CreateMovement() {
           return exists ? arr : [created, ...arr];
         });
       } catch (e) {
-        console.warn('[CreateMovement] failed to update movements cache (ignored)', e);
+        logError(e, 'Create movement cache update failed');
       }
 
       const successMessage = 'Movement created.';
@@ -464,7 +483,7 @@ export default function CreateMovement() {
     const viewUrl = newId ? `/movements/${encodeURIComponent(String(newId))}` : null;
 
     return (
-      <div className="max-w-2xl mx-auto px-4 py-12">
+      <div className="max-w-2xl mx-auto px-3 sm:px-4 py-8 sm:py-12">
         <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden">
           <div className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] px-6 py-8 text-slate-900">
             <h1 className="text-3xl font-black leading-tight">Congrats — your movement is created.</h1>
@@ -502,7 +521,7 @@ export default function CreateMovement() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-10">
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 sm:py-10">
       {!user ? (
         <div className="mb-6 p-4 rounded-2xl border border-yellow-200 bg-yellow-50 text-slate-900">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -540,7 +559,7 @@ export default function CreateMovement() {
         ) : null}
 
         <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden">
-          <div className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] px-6 py-6 sm:px-8 sm:py-8 text-slate-900">
+          <div className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] px-4 py-5 sm:px-8 sm:py-8 text-slate-900">
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/30 rounded-full text-xs font-black uppercase tracking-wide">
               <Sparkles className="w-4 h-4" />
               New Movement
@@ -551,7 +570,7 @@ export default function CreateMovement() {
             </p>
           </div>
 
-          <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6 bg-white">
+          <form onSubmit={handleSubmit} className="p-4 sm:p-8 space-y-6 bg-white">
             {/* AI assistant (opt-in only) */}
             {aiOptIn ? (
               <AIMovementAssistant
@@ -559,7 +578,7 @@ export default function CreateMovement() {
                 onApplySuggestion={(suggestion) => {
                   const next = suggestion && typeof suggestion === 'object' ? suggestion : {};
                   if (next.title && !title) setTitle(String(next.title));
-                  if (next.description) setDescriptionHtml(toSafeHtmlParagraph(next.description));
+                  if (next.description) setDescriptionText(String(next.description));
 
                   if (Array.isArray(next.tags) && next.tags.length) {
                     const byId = new Map(TAG_OPTIONS.map((t) => [String(t.id).toLowerCase(), t.id]));
@@ -624,15 +643,15 @@ export default function CreateMovement() {
             </div>
 
             <div className="space-y-2">
-              <label className="block text-sm font-bold text-slate-700">Description (rich text)</label>
+              <label className="block text-sm font-bold text-slate-700">Description</label>
               <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white">
-                <ReactQuill
-                  theme="snow"
-                  value={descriptionHtml}
-                  onChange={setDescriptionHtml}
-                  modules={quillModules}
+                <textarea
+                  value={descriptionText}
+                  onChange={(e) => setDescriptionText(e.target.value)}
                   placeholder="Summarize the purpose, who it’s for, and the impact you seek."
-                  readOnly={!!movementLocks.description && !isOwnerOrAdmin}
+                  rows={6}
+                  className="w-full min-h-32 p-4 text-slate-900 font-semibold outline-none"
+                  disabled={!!movementLocks.description && !isOwnerOrAdmin}
                 />
               </div>
               <div className="text-xs text-slate-500 font-semibold">
@@ -693,21 +712,7 @@ export default function CreateMovement() {
                     <button
                       type="button"
                       disabled={mapLoading}
-                      onClick={async () => {
-                        setMapLoading(true);
-                        try {
-                          const coords = await geocodeCityLevel({ city: locationCity, country: locationCountry });
-                          setMapCoords(coords);
-                          if (!coords) {
-                            toast.error('Could not find that city-level location');
-                          }
-                        } catch {
-                          setMapCoords(null);
-                          toast.error('Failed to load map location');
-                        } finally {
-                          setMapLoading(false);
-                        }
-                      }}
+                      onClick={updateMapPreview}
                       className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-white border border-slate-200 text-slate-900 font-black text-xs"
                     >
                       {mapLoading ? 'Loading…' : 'Preview map'}
@@ -729,7 +734,7 @@ export default function CreateMovement() {
                       />
                     ) : (
                       <div className="h-28 flex items-center justify-center text-xs text-slate-500 font-semibold">
-                        No map preview yet.
+                        Set a location to preview it on the map.
                       </div>
                     )}
                   </div>

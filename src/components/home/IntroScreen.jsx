@@ -44,7 +44,7 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
         />
         
         {/* Content Container */}
-        <div className="relative max-w-4xl mx-auto min-h-screen flex flex-col justify-center py-12 px-6">
+        <div className="relative max-w-4xl mx-auto min-h-screen flex flex-col justify-center py-8 sm:py-12 px-4 sm:px-6">
           {/* Logo */}
           <motion.div
             initial={{ scale: 0, rotate: -180 }}
@@ -66,9 +66,9 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
                       }
                 }
                 transition={reduceMotion ? { duration: 0 } : { duration: 3, repeat: Infinity }}
-                className="w-24 h-24 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-3xl flex items-center justify-center"
+                className="w-16 h-16 sm:w-24 sm:h-24 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-3xl flex items-center justify-center"
               >
-                <Zap className="w-14 h-14 text-[#FFC947]" fill="#FFC947" strokeWidth={3} />
+                <Zap className="w-10 h-10 sm:w-14 sm:h-14 text-[#FFC947]" fill="#FFC947" strokeWidth={3} />
               </motion.div>
             </div>
           </motion.div>
@@ -80,10 +80,10 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
             transition={{ delay: reduceMotion ? 0 : 0.3, duration: reduceMotion ? 0 : 0.8 }}
             className="text-center mb-12"
           >
-            <h1 className="text-6xl sm:text-7xl font-black text-white mb-4 tracking-tight leading-none">
+            <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black text-white mb-3 sm:mb-4 tracking-tight leading-none">
               PEOPLE
             </h1>
-            <h1 className="text-6xl sm:text-7xl font-black bg-gradient-to-r from-[#FFC947] to-[#FFD666] bg-clip-text text-transparent mb-6 tracking-tight leading-none">
+            <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black bg-gradient-to-r from-[#FFC947] to-[#FFD666] bg-clip-text text-transparent mb-4 sm:mb-6 tracking-tight leading-none">
               POWER
             </h1>
             <motion.div
@@ -99,7 +99,7 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: reduceMotion ? 0 : 0.6, duration: reduceMotion ? 0 : 0.8 }}
-            className="space-y-6 text-center text-slate-200 text-lg sm:text-xl leading-relaxed max-w-3xl mx-auto mb-12"
+            className="space-y-5 sm:space-y-6 text-center text-slate-200 text-base sm:text-xl leading-relaxed max-w-3xl mx-auto mb-10 sm:mb-12"
           >
             <p className="font-semibold">
               People Power exists because <span className="text-[#FFC947] font-bold">ordinary people are extraordinary</span> when they come together.
@@ -115,19 +115,19 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
               transition={{ delay: reduceMotion ? 0 : 1.2, duration: reduceMotion ? 0 : undefined }}
               className="py-6"
             >
-              <p className="text-2xl font-black text-white mb-4">
+              <p className="text-lg sm:text-2xl font-black text-white mb-3 sm:mb-4">
                 This platform is built on a simple belief:
               </p>
-              <p className="text-xl">
-                When everyday people unite around a shared purpose, they become <span className="text-[#3A3DFF] font-black text-2xl">the most powerful force on Earth</span> — stronger than any government, stronger than any single institution.
+              <p className="text-base sm:text-xl">
+                When everyday people unite around a shared purpose, they become <span className="text-[#3A3DFF] font-black text-lg sm:text-2xl">the most powerful force on Earth</span> — stronger than any government, stronger than any single institution.
               </p>
             </motion.div>
             
-            <p className="text-xl font-semibold">
+            <p className="text-base sm:text-xl font-semibold">
               Here, your actions — small or large — combine with others to create <span className="text-[#FFC947] font-bold">real, measurable impact</span>.
             </p>
             
-            <p className="text-2xl font-bold text-white">
+            <p className="text-lg sm:text-2xl font-bold text-white">
               You&apos;re not just watching change happen.<br />
               <span className="text-[#FFC947]">You are part of it.</span>
             </p>
@@ -141,10 +141,10 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
             className="text-center"
           >
             <div className="mb-8">
-              <p className="text-3xl font-black text-white mb-2">
+              <p className="text-2xl sm:text-3xl font-black text-white mb-2">
                 Welcome to People Power.
               </p>
-              <p className="text-xl font-bold text-slate-300 uppercase tracking-wider">
+              <p className="text-base sm:text-xl font-bold text-slate-300 uppercase tracking-wider">
                 Unite • Act • Transform
               </p>
             </div>
@@ -155,7 +155,7 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
             >
               <Button
                 onClick={onContinue}
-                className="h-16 px-12 bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-2xl font-black text-xl shadow-2xl shadow-yellow-400/40 uppercase tracking-wider"
+                className="h-12 sm:h-16 px-8 sm:px-12 bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-2xl font-black text-base sm:text-xl shadow-2xl shadow-yellow-400/40 uppercase tracking-wider"
               >
                 Continue
                 <ArrowRight className="w-6 h-6 ml-2" strokeWidth={3} />

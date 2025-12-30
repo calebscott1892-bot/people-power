@@ -36,12 +36,10 @@
  * @property {Object|null} reactions
  */
 
-const isDev = import.meta?.env?.DEV;
-const BASE_URL = isDev
-  ? (import.meta?.env?.VITE_SERVER_URL || 'http://localhost:3001')
-  : (import.meta?.env?.VITE_API_BASE_URL || '/api');
-
+import { getServerBaseUrl } from './serverBase';
 import { entities } from '@/api/appClient';
+
+const BASE_URL = getServerBaseUrl();
 
 function normalizeId(value) {
   if (value == null) return null;

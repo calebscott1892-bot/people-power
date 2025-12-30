@@ -7,21 +7,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     allowedHosts: true,
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
-      },
-      '/health': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
-      },
-      '/ws': {
-        target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
-        ws: true,
-      },
-    },
+    proxy: {},
   },
   resolve: {
     alias: {
@@ -57,7 +43,6 @@ export default defineConfig({
             'next-themes',
           ],
           forms: ['react-hook-form', '@hookform/resolvers', 'zod'],
-          editor: ['react-quill', 'quill'],
           dates: ['date-fns', 'react-day-picker'],
           nacl: ['tweetnacl'],
           html2canvas: ['html2canvas'],

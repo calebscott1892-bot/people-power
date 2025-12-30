@@ -17,6 +17,7 @@ import { entities } from '@/api/appClient';
 import { fetchMyFollowers, fetchMyFollowingUsers } from '@/api/userFollowsClient';
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
 import { sanitizePublicLocation } from '@/utils/locationPrivacy';
+import { logError } from '@/utils/logError';
 
 function parseAdminEmails(raw) {
   return String(raw || '')
@@ -123,7 +124,7 @@ export default function Profile() {
       await signOut();
       navigate('/');
     } catch (e) {
-      console.warn('signOut failed', e);
+      logError(e, 'Sign out failed');
     }
   };
 

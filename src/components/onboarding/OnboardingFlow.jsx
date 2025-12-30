@@ -297,7 +297,7 @@ export default function OnboardingFlow({ user, onComplete }) {
       transition={{ duration: reduceMotion ? 0 : undefined }}
       role="presentation"
       onKeyDown={handleKeyDown}
-      className="fixed inset-0 z-[100] bg-slate-900/90 backdrop-blur-sm flex items-center justify-center p-4"
+      className="fixed inset-0 z-[100] bg-slate-900/90 backdrop-blur-sm flex items-start sm:items-center justify-center p-4 py-6 overflow-y-auto"
     >
       <motion.div
         ref={dialogRef}
@@ -309,10 +309,10 @@ export default function OnboardingFlow({ user, onComplete }) {
         aria-labelledby={titleId}
         aria-describedby={descId}
         tabIndex={-1}
-        className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col"
+        className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full max-h-[calc(100vh-3rem)] sm:max-h-[90vh] overflow-hidden flex flex-col"
       >
             {/* Header */}
-            <div className="bg-gradient-to-r from-[#3A3DFF] to-[#5B5EFF] p-6 text-white">
+            <div className="bg-gradient-to-r from-[#3A3DFF] to-[#5B5EFF] p-5 sm:p-6 text-white">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
@@ -343,7 +343,7 @@ export default function OnboardingFlow({ user, onComplete }) {
             </div>
 
             {/* Content */}
-            <div className="p-8 flex-1 overflow-y-auto overscroll-contain">
+            <div className="p-5 sm:p-8 flex-1 overflow-y-auto overscroll-contain">
               <AnimatePresence mode="wait">
                 <motion.div
                   key={currentStep}
@@ -367,12 +367,12 @@ export default function OnboardingFlow({ user, onComplete }) {
             </div>
 
             {/* Footer */}
-            <div className="border-t-2 border-slate-200 p-6 flex items-center justify-between bg-white">
+            <div className="border-t-2 border-slate-200 p-4 sm:p-6 flex flex-col sm:flex-row items-center gap-3 sm:gap-4 sm:justify-between bg-white">
               <Button
                 onClick={prevStep}
                 disabled={currentStep === 0}
                 variant="outline"
-                className="rounded-xl font-bold"
+                className="rounded-xl font-bold w-full sm:w-auto"
               >
                 <ArrowLeft className="w-4 h-4 mr-2" />
                 {t('onboarding.nav.back')}
@@ -382,7 +382,7 @@ export default function OnboardingFlow({ user, onComplete }) {
                 variant="ghost"
                 onClick={completeOnboarding}
                 disabled={!legalAccepted || !platformAckAccepted || !ageConfirmed || !safetyAckAccepted}
-                className="font-bold text-slate-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="font-bold text-slate-500 disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto"
               >
                 {t('onboarding.nav.skip_tour')}
               </Button>
@@ -393,7 +393,7 @@ export default function OnboardingFlow({ user, onComplete }) {
                   (currentStep === 1 && (!legalAccepted || !platformAckAccepted || !ageConfirmed || !safetyAckAccepted)) ||
                   (currentStep === 2 && selectedInterests.length === 0)
                 }
-                className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-xl font-bold"
+                className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-xl font-bold w-full sm:w-auto"
               >
                 {currentStep === steps.length - 1 ? (
                   <>
@@ -553,6 +553,7 @@ function LegalAcknowledgmentStep({
   setPlatformAckAccepted,
   platformAckLoading,
 }) {
+  const canRecordAck = !!(accessToken || userEmail);
   return (
     <div className="space-y-4">
       <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
@@ -633,17 +634,20 @@ function LegalAcknowledgmentStep({
             type="checkbox"
             className="mt-1 h-4 w-4 rounded border-slate-300"
             checked={platformAckAccepted}
-            disabled={platformAckLoading || !userEmail}
+            disabled={platformAckLoading}
             onChange={async (e) => {
               const next = e.target.checked;
               setPlatformAckAccepted(next);
-              if (next && userEmail) {
+              if (next && canRecordAck) {
                 try {
                   await acceptPlatformAcknowledgment({ accessToken, userEmail });
                 } catch (err) {
                   setPlatformAckAccepted(false);
                   toast.error(err?.message || 'Failed to record acknowledgment');
                 }
+              } else if (next && !canRecordAck) {
+                setPlatformAckAccepted(false);
+                toast.error('Log in to record this acknowledgment.');
               }
             }}
           />
@@ -652,7 +656,7 @@ function LegalAcknowledgmentStep({
           </span>
         </label>
 
-        {!userEmail ? (
+        {!canRecordAck ? (
           <div className="text-xs text-slate-600 font-semibold">
             Log in to record this acknowledgment.
           </div>

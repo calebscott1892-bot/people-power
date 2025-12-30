@@ -21,10 +21,9 @@
  * @property {string|null} author_email
  */
 
-const isDev = import.meta?.env?.DEV;
-const BASE_URL = isDev
-  ? (import.meta?.env?.VITE_SERVER_URL || 'http://localhost:3001')
-  : (import.meta?.env?.VITE_API_BASE_URL || '/api');
+import { getServerBaseUrl } from './serverBase';
+
+const BASE_URL = getServerBaseUrl();
 
 function normalizeMovements(payload) {
   if (Array.isArray(payload)) return payload;
@@ -51,23 +50,11 @@ async function safeReadJson(res) {
   }
 }
 
-function toFieldsParam(fields) {
-  if (!fields) return null;
-  if (Array.isArray(fields)) {
-    const joined = fields.map((f) => String(f || '').trim()).filter(Boolean).join(',');
-    return joined || null;
-  }
-  const s = String(fields || '').trim();
-  return s || null;
-}
-
-export async function fetchMovementsPage({ limit = 20, offset = 0, fields } = {}) {
+export async function fetchMovementsPage({ limit = 20, offset = 0 } = {}) {
   const base = BASE_URL.replace(/\/$/, '');
   const params = new URLSearchParams();
   if (limit != null) params.set('limit', String(limit));
   if (offset != null) params.set('offset', String(offset));
-  const fieldsParam = toFieldsParam(fields);
-  if (fieldsParam) params.set('fields', fieldsParam);
 
   const url = `${base}/movements${params.toString() ? `?${params.toString()}` : ''}`;
   const res = await fetch(url, { headers: { Accept: 'application/json' } });

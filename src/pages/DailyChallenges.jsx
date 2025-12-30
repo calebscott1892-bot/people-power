@@ -8,6 +8,7 @@ import ChallengeCard from '@/components/challenges/ChallengeCard';
 import CompletionModal from '@/components/challenges/CompletionModal';
 import StreakTracker from '@/components/challenges/StreakTracker';
 import { fetchOrCreateUserChallengeStats, listChallengeCompletions, recordChallengeCompletion } from '@/api/userChallengeStatsClient';
+import { logError } from '@/utils/logError';
 
 const CHALLENGES = [
   {
@@ -113,15 +114,15 @@ export default function DailyChallenges() {
   const anyLoadError = userStatsError || allCompletionsError || myCompletionsError;
 
   useEffect(() => {
-    if (userStatsErrorObj) console.warn('[DailyChallenges] failed to load user stats', userStatsErrorObj);
+    if (userStatsErrorObj) logError(userStatsErrorObj, 'Daily challenges user stats load failed');
   }, [userStatsErrorObj]);
 
   useEffect(() => {
-    if (allCompletionsErrorObj) console.warn('[DailyChallenges] failed to load community completions', allCompletionsErrorObj);
+    if (allCompletionsErrorObj) logError(allCompletionsErrorObj, 'Daily challenges community completions load failed');
   }, [allCompletionsErrorObj]);
 
   useEffect(() => {
-    if (myCompletionsErrorObj) console.warn('[DailyChallenges] failed to load my completions', myCompletionsErrorObj);
+    if (myCompletionsErrorObj) logError(myCompletionsErrorObj, 'Daily challenges user completions load failed');
   }, [myCompletionsErrorObj]);
 
   const completionsToday = useMemo(() => {

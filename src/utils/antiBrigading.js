@@ -184,6 +184,13 @@ function limitsFor(action, trustScore) {
     };
   }
 
+  if (action === 'movement_evidence_submit') {
+    return {
+      windowMs: 60 * 60 * 1000,
+      max: t >= 0.75 ? 12 : t >= 0.45 ? 6 : 3,
+    };
+  }
+
   return {
     windowMs: 60 * 1000,
     max: t >= 0.75 ? 20 : t >= 0.45 ? 10 : 5,

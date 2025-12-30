@@ -19,10 +19,9 @@
  * @property {string|null} created_at
  */
 
-const isDev = import.meta?.env?.DEV;
-const BASE_URL = isDev
-  ? (import.meta?.env?.VITE_SERVER_URL || 'http://localhost:3001')
-  : (import.meta?.env?.VITE_API_BASE_URL || '/api');
+import { getServerBaseUrl } from './serverBase';
+
+const BASE_URL = getServerBaseUrl();
 
 function normalizeId(value) {
   if (value == null) return null;
@@ -89,11 +88,12 @@ export async function createMovementResource(movementId, payload, { accessToken 
   return data?.resource ?? data;
 }
 
-export async function incrementResourceDownload(resourceId) {
+export async function incrementResourceDownload(resourceId, { accessToken } = {}) {
   const id = normalizeId(resourceId);
   if (!id) throw new Error('Resource ID is required');
+  if (!accessToken) throw new Error('Authentication required');
   const url = `${base()}/resources/${encodeURIComponent(id)}/download`;
-  const data = await authedFetch(url, { method: 'POST' });
+  const data = await authedFetch(url, { method: 'POST', accessToken });
   return data?.resource ?? data;
 }
 

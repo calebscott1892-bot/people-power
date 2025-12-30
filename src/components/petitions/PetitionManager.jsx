@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import CreatePetitionModal from './CreatePetitionModal';
 import PetitionCard from './PetitionCard';
+import { logError } from '@/utils/logError';
 
 export default function PetitionManager({ movementId, movement, className = '' }) {
   const safeMovementId = useMemo(
@@ -43,7 +44,7 @@ export default function PetitionManager({ movementId, movement, className = '' }
   });
 
   if (isError && error) {
-    console.warn('[PetitionManager] failed to load petitions', error);
+    logError(error, 'Petition manager load failed', { movementId: safeMovementId });
   }
 
   return (

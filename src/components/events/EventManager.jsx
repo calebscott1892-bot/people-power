@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import CreateEventModal from './CreateEventModal';
 import EventCard from './EventCard';
+import { logError } from '@/utils/logError';
 
 export default function EventManager({ movementId, movement, className = '' }) {
   const safeMovementId = useMemo(
@@ -48,7 +49,7 @@ export default function EventManager({ movementId, movement, className = '' }) {
   });
 
   if (isError && error) {
-    console.warn('[EventManager] failed to load events', error);
+    logError(error, 'Event manager load failed', { movementId: safeMovementId });
   }
 
   return (

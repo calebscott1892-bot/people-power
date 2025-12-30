@@ -11,6 +11,7 @@ import {
   incrementAICounter,
   hashPayload,
 } from '@/utils/aiGuardrail';
+import { logError } from '@/utils/logError';
 
 export default function AITrendingSection({ movements }) {
   const [trending, setTrending] = useState([]);
@@ -98,7 +99,7 @@ Return the 3 movement IDs that are genuinely trending right now.`;
       setLimitReached(false);
       cacheAIResult('aiTrending', payloadHash, { trending: picked, reason: response?.reason || null });
     } catch (error) {
-      console.error('Trending analysis failed:', error);
+      logError(error, 'AI trending analysis failed');
       // Fallback to momentum score
       setTrending(movements.slice(0, 3));
       setLimitReached(false);

@@ -26,7 +26,7 @@ export default function SafetyModal({ onAccept }) {
   );
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[100] flex items-start sm:items-center justify-center p-4 py-6 bg-slate-900/80 backdrop-blur-sm overflow-y-auto">
       <div
         ref={dialogRef}
         role="dialog"
@@ -34,7 +34,7 @@ export default function SafetyModal({ onAccept }) {
         aria-labelledby="safety_modal_title"
         aria-describedby="safety_modal_desc"
         tabIndex={-1}
-        className="bg-white rounded-3xl shadow-2xl max-w-lg w-full border-4 border-slate-300 overflow-hidden"
+        className="bg-white rounded-3xl shadow-2xl max-w-lg w-full border-4 border-slate-300 max-h-[calc(100vh-3rem)] overflow-y-auto"
       >
         <div className="p-6 bg-gradient-to-r from-[#3A3DFF] to-[#5B5EFF] text-white">
           <div className="flex items-start gap-3">

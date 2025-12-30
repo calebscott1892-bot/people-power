@@ -5,6 +5,7 @@ import { entities } from '@/api/appClient';
 import { acceptPlatformAcknowledgment, fetchMyPlatformAcknowledgment } from '@/api/platformAckClient';
 import { checkLeadershipCap, registerLeadershipRole } from '@/components/governance/PowerConcentrationLimiter';
 import { focusFirstInteractive, trapFocusKeyDown } from '@/components/utils/focusTrap';
+import { logError } from '@/utils/logError';
 
 export default function CreateEventModal({ open, onOpenChange, movementId, onCreated }) {
   const { session, user } = useAuth();
@@ -105,7 +106,7 @@ export default function CreateEventModal({ open, onOpenChange, movementId, onCre
 
         onCreated?.(created || null);
       } catch (e) {
-        console.warn('[CreateEventModal] Event.create failed', e);
+        logError(e, 'Create event failed', { movementId: safeMovementId });
         toast.error("Couldn't create event right now");
         return;
       }

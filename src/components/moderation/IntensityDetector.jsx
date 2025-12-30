@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { entities } from '@/api/appClient';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { logError } from '@/utils/logError';
 
 /**
  * Emotional Temperature / Intensity Detection
@@ -97,7 +98,7 @@ export class IntensityDetector {
       
       return intensities[0].requires_friction;
     } catch (error) {
-      console.error('Error checking warning requirement:', error);
+      logError(error, 'IntensityDetector warning requirement check failed');
       return false;
     }
   }
@@ -173,7 +174,7 @@ export class IntensityDetector {
       
       return signals;
     } catch (error) {
-      console.error('Error detecting harassment:', error);
+      logError(error, 'IntensityDetector harassment detection failed');
       return 0;
     }
   }

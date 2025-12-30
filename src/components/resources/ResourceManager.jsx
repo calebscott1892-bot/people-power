@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import UploadResourceModal from './UploadResourceModal';
 import ResourceCard from './ResourceCard';
+import { logError } from '@/utils/logError';
 
 export default function ResourceManager({ movementId, movement, className = '' }) {
   const safeMovementId = useMemo(
@@ -33,7 +34,7 @@ export default function ResourceManager({ movementId, movement, className = '' }
   });
 
   if (isError && error) {
-    console.warn('[ResourceManager] failed to load resources', error);
+    logError(error, 'Resource manager load failed', { movementId: safeMovementId });
   }
 
   return (

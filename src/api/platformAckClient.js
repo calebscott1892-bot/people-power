@@ -1,9 +1,7 @@
 import { entities } from '@/api/appClient';
+import { getServerBaseUrl } from './serverBase';
 
-const isDev = import.meta?.env?.DEV;
-const BASE_URL = isDev
-  ? (import.meta?.env?.VITE_SERVER_URL && String(import.meta.env.VITE_SERVER_URL)) || 'http://localhost:3001'
-  : (import.meta?.env?.VITE_API_BASE_URL && String(import.meta.env.VITE_API_BASE_URL)) || '/api';
+const BASE_URL = getServerBaseUrl();
 
 async function safeReadJson(res) {
   try {

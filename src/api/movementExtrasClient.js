@@ -10,10 +10,9 @@
  *   impact updates, tasks, and discussions.
  */
 
-const isDev = import.meta?.env?.DEV;
-const BASE_URL = isDev
-  ? (import.meta?.env?.VITE_SERVER_URL && String(import.meta.env.VITE_SERVER_URL)) || 'http://localhost:3001'
-  : (import.meta?.env?.VITE_API_BASE_URL && String(import.meta.env.VITE_API_BASE_URL)) || '/api';
+import { getServerBaseUrl } from './serverBase';
+
+const BASE_URL = getServerBaseUrl();
 
 function normalizeId(value) {
   if (value == null) return null;
@@ -77,11 +76,12 @@ export async function createMovementResource(movementId, payload, { accessToken 
   return data?.resource ?? data;
 }
 
-export async function incrementResourceDownload(resourceId) {
+export async function incrementResourceDownload(resourceId, { accessToken } = {}) {
   const id = normalizeId(resourceId);
   if (!id) throw new Error('Resource ID is required');
+  if (!accessToken) throw new Error('Authentication required');
   const url = `${base()}/resources/${encodeURIComponent(id)}/download`;
-  const data = await authedFetch(url, { method: 'POST' });
+  const data = await authedFetch(url, { method: 'POST', accessToken });
   return data?.resource ?? data;
 }
 
@@ -210,4 +210,42 @@ export async function createMovementDiscussionMessage(movementId, payload, { acc
   const url = `${base()}/movements/${encodeURIComponent(id)}/discussions`;
   const data = await authedFetch(url, { method: 'POST', body: payload, accessToken });
   return data?.message ?? data;
+}
+
+export async function fetchMovementEvidencePage(
+  movementId,
+  { limit = 20, offset = 0, status = 'approved', fields, accessToken } = {}
+) {
+  const id = normalizeId(movementId);
+  if (!id) throw new Error('Movement ID is required');
+
+  const params = new URLSearchParams();
+  if (typeof limit === 'number') params.set('limit', String(limit));
+  if (typeof offset === 'number') params.set('offset', String(offset));
+  if (status) params.set('status', String(status));
+  if (Array.isArray(fields) && fields.length) params.set('fields', fields.join(','));
+
+  const url = `${base()}/movements/${encodeURIComponent(id)}/evidence${params.toString() ? `?${params.toString()}` : ''}`;
+  const data = await authedFetch(url, { accessToken });
+  return Array.isArray(data?.evidence) ? data.evidence : [];
+}
+
+export async function createMovementEvidence(movementId, payload, { accessToken } = {}) {
+  const id = normalizeId(movementId);
+  if (!id) throw new Error('Movement ID is required');
+  if (!accessToken) throw new Error('Authentication required');
+  const url = `${base()}/movements/${encodeURIComponent(id)}/evidence`;
+  const data = await authedFetch(url, { method: 'POST', body: payload, accessToken });
+  return data?.evidence ?? data;
+}
+
+export async function verifyMovementEvidence(movementId, evidenceId, payload, { accessToken } = {}) {
+  const id = normalizeId(movementId);
+  const evidence = normalizeId(evidenceId);
+  if (!id) throw new Error('Movement ID is required');
+  if (!evidence) throw new Error('Evidence ID is required');
+  if (!accessToken) throw new Error('Authentication required');
+  const url = `${base()}/movements/${encodeURIComponent(id)}/evidence/${encodeURIComponent(evidence)}/verify`;
+  const data = await authedFetch(url, { method: 'POST', body: payload, accessToken });
+  return data?.evidence ?? data;
 }

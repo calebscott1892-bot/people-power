@@ -159,12 +159,12 @@ export default function MovementCard({ movement }) {
   if (!movement) return null;
 
   return (
-    <motion.div whileHover={reduceMotion ? undefined : { y: -4 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <Link to={to} className="block p-4 space-y-3">
-        <div className="flex items-center justify-between gap-2">
+    <motion.div whileHover={reduceMotion ? undefined : { y: -4 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm w-full">
+      <Link to={to} className="block p-3 sm:p-4 space-y-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="text-lg font-black text-slate-900 truncate">{String(title)}</h3>
+              <h3 className="text-base sm:text-lg font-black text-slate-900 truncate">{String(title)}</h3>
               {isTrending ? (
                 <span className="inline-flex items-center gap-1 text-xs font-black text-[#FFC947]">
                   <Flame className="w-4 h-4" fill="#FFC947" strokeWidth={2.5} />
@@ -177,7 +177,7 @@ export default function MovementCard({ movement }) {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 self-start sm:self-auto">
             <div className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-black">
               <TrendingUp className="w-4 h-4" />
               {score}
@@ -188,17 +188,17 @@ export default function MovementCard({ movement }) {
         {tags.length ? (
           <div className="flex flex-wrap gap-2">
             {tags.slice(0, 4).map((t) => (
-              <span key={t} className="text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-full">
+              <span key={t} className="text-[11px] sm:text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-full">
                 {formatTagLabel(t)}
               </span>
             ))}
             {tags.length > 4 ? (
-              <span className="text-xs font-bold text-slate-500">+{tags.length - 4} more</span>
+              <span className="text-[11px] sm:text-xs font-bold text-slate-500">+{tags.length - 4} more</span>
             ) : null}
           </div>
         ) : null}
 
-        <p className="text-sm text-slate-600 line-clamp-2">{String(description)}</p>
+        <p className="text-sm text-slate-600 line-clamp-3 sm:line-clamp-2">{String(description)}</p>
 
         {locationLabel ? (
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
@@ -215,7 +215,7 @@ export default function MovementCard({ movement }) {
                 <img
                   alt="City-level map preview"
                   loading="lazy"
-                  className="w-full h-24 object-cover"
+                  className="w-full h-20 sm:h-24 object-cover"
                   src={`https://staticmap.openstreetmap.de/staticmap.php?center=${coords.lat},${coords.lon}&zoom=11&size=640x220&maptype=mapnik&markers=${coords.lat},${coords.lon},lightblue1`}
                 />
               ) : (

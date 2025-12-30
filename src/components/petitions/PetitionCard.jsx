@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { entities } from "@/api/appClient";
 import { focusFirstInteractive, trapFocusKeyDown } from '@/components/utils/focusTrap';
+import { logError } from '@/utils/logError';
 
 export default function PetitionCard({ petition, currentUser, isPast = false }) {
   const [showSignModal, setShowSignModal] = useState(false);
@@ -63,7 +64,7 @@ export default function PetitionCard({ petition, currentUser, isPast = false }) 
       toast.success('Petition signed!');
     },
     onError: (e) => {
-      console.warn('[PetitionCard] sign failed', e);
+      logError(e, 'Petition sign failed', { petitionId: petition?.id });
       toast.error('Could not sign petition. Please try again.');
     },
   });

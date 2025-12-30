@@ -22,11 +22,13 @@ import { useAuth } from '@/auth/AuthProvider';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { fetchMyMovementFollow, setMyMovementFollow } from '@/api/movementFollowsClient';
+import { listMovementCollaborators } from '@/api/collaboratorsClient';
 
 import CommentSection from '@/components/details/CommentSection';
 import BoostButtons from '@/components/shared/BoostButtons';
 import ShareButton from '@/components/shared/ShareButton';
 import ReportButton from '@/components/safety/ReportButton';
+import ErrorBoundary from '@/components/shared/ErrorBoundary';
 const PublicImpactReport = React.lazy(() => import('@/components/impact/PublicImpactReport'));
 const CreatorDashboard = React.lazy(() => import('@/components/analytics/CreatorDashboard'));
 import CollaboratorsList from '@/components/collaboration/CollaboratorsList';
@@ -35,12 +37,15 @@ import PollManager from '@/components/collaboration/PollManager';
 
 import {
   createMovementDiscussionMessage,
+  createMovementEvidence,
   createMovementImpactUpdate,
   createMovementTask,
   fetchMovementDiscussionsPage,
+  fetchMovementEvidencePage,
   fetchMovementImpactUpdatesPage,
   fetchMovementTasksPage,
   updateTask,
+  verifyMovementEvidence,
 } from '@/api/movementExtrasClient';
 
 import {
@@ -149,7 +154,7 @@ function EventRsvpControls({ event, movementId, accessToken, myEmail }) {
             });
           }
         } catch (e) {
-          console.warn('[EventRsvpControls] failed to create reminder notification', e);
+          logError(e, 'Event RSVP reminder notification failed', { movementId });
         }
       }
     },
@@ -357,6 +362,28 @@ function normalizeId(v) {
   if (v == null) return null;
   const s = String(v).trim();
   return s ? s : null;
+}
+
+function normalizeEvidenceUrlInput(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const protocol = url.protocol.toLowerCase();
+    if (protocol !== 'http:' && protocol !== 'https:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isEvidenceImage(evidence) {
+  const type = String(evidence?.media_type || '').toLowerCase();
+  if (type === 'image') return true;
+  const mime = String(evidence?.mime_type || '').toLowerCase();
+  if (mime.startsWith('image/')) return true;
+  const url = String(evidence?.url || '').toLowerCase();
+  return /\.(png|jpg|jpeg|gif)$/.test(url);
 }
 
 function SectionCard({ title, children }) {
@@ -731,6 +758,82 @@ export default function MovementDetails() {
     const pages = Array.isArray(resourcesPages?.pages) ? resourcesPages.pages : [];
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
   }, [resourcesPages]);
+
+  const {
+    data: evidencePages,
+    isLoading: evidenceLoading,
+    isError: evidenceError,
+    error: evidenceErrorObj,
+    refetch: refetchEvidence,
+    fetchNextPage: fetchNextEvidencePage,
+    hasNextPage: hasNextEvidencePage,
+    isFetchingNextPage: isFetchingNextEvidencePage,
+  } = useInfiniteQuery({
+    queryKey: ['movementEvidence', movementId],
+    enabled: !!movementId,
+    initialPageParam: 0,
+    queryFn: ({ pageParam = 0 }) =>
+      fetchMovementEvidencePage(movementId, {
+        limit: 8,
+        offset: pageParam,
+        status: 'approved',
+      }),
+    getNextPageParam: (lastPage, pages) => {
+      const list = Array.isArray(lastPage) ? lastPage : [];
+      if (list.length < 8) return undefined;
+      return pages.length * 8;
+    },
+    retry: 1,
+  });
+
+  const evidence = useMemo(() => {
+    const pages = Array.isArray(evidencePages?.pages) ? evidencePages.pages : [];
+    return pages.flatMap((p) => (Array.isArray(p) ? p : []));
+  }, [evidencePages]);
+
+  const { data: collaboratorRecords = [] } = useQuery({
+    queryKey: ['movementCollaborators', movementId, myEmail],
+    enabled: !!movementId && !!accessToken,
+    queryFn: async () => {
+      try {
+        return await listMovementCollaborators(movementId, { accessToken });
+      } catch {
+        return [];
+      }
+    },
+    retry: 1,
+  });
+
+  const myCollaboratorRole = useMemo(() => {
+    if (!myEmail) return null;
+    const record = Array.isArray(collaboratorRecords)
+      ? collaboratorRecords.find((c) => String(c?.user_email || '').trim().toLowerCase() === myEmail)
+      : null;
+    return record?.role ? String(record.role).toLowerCase() : null;
+  }, [collaboratorRecords, myEmail]);
+
+  const canReviewEvidence =
+    isOwner || isAdmin || myCollaboratorRole === 'admin' || myCollaboratorRole === 'editor';
+
+  const {
+    data: pendingEvidence = [],
+    isLoading: pendingEvidenceLoading,
+    isError: pendingEvidenceError,
+    error: pendingEvidenceErrorObj,
+    refetch: refetchPendingEvidence,
+  } = useQuery({
+    queryKey: ['movementEvidencePending', movementId],
+    enabled: !!movementId && !!accessToken && canReviewEvidence,
+    queryFn: async () =>
+      fetchMovementEvidencePage(movementId, {
+        limit: 50,
+        offset: 0,
+        status: 'pending',
+        accessToken,
+      }),
+    retry: 1,
+  });
+
   const {
     data: eventsPages,
     isLoading: eventsLoading,
@@ -843,19 +946,29 @@ export default function MovementDetails() {
   }, [isMovementError, movementError, movementId]);
 
   useEffect(() => {
-    if (resourcesError && resourcesErrorObj) console.warn('[MovementDetails] resources load failed', resourcesErrorObj);
+    if (resourcesError && resourcesErrorObj) logError(resourcesErrorObj, 'Movement resources load failed', { movementId });
   }, [resourcesError, resourcesErrorObj]);
 
   useEffect(() => {
-    if (eventsError && eventsErrorObj) console.warn('[MovementDetails] events load failed', eventsErrorObj);
+    if (evidenceError && evidenceErrorObj) logError(evidenceErrorObj, 'Movement evidence load failed', { movementId });
+  }, [evidenceError, evidenceErrorObj, movementId]);
+
+  useEffect(() => {
+    if (pendingEvidenceError && pendingEvidenceErrorObj) {
+      logError(pendingEvidenceErrorObj, 'Movement evidence pending load failed', { movementId });
+    }
+  }, [pendingEvidenceError, pendingEvidenceErrorObj, movementId]);
+
+  useEffect(() => {
+    if (eventsError && eventsErrorObj) logError(eventsErrorObj, 'Movement events load failed', { movementId });
   }, [eventsError, eventsErrorObj]);
 
   useEffect(() => {
-    if (petitionsError && petitionsErrorObj) console.warn('[MovementDetails] petitions load failed', petitionsErrorObj);
+    if (petitionsError && petitionsErrorObj) logError(petitionsErrorObj, 'Movement petitions load failed', { movementId });
   }, [petitionsError, petitionsErrorObj]);
 
   useEffect(() => {
-    if (impactError && impactErrorObj) console.warn('[MovementDetails] impact updates load failed', impactErrorObj);
+    if (impactError && impactErrorObj) logError(impactErrorObj, 'Movement impact updates load failed', { movementId });
   }, [impactError, impactErrorObj]);
   const {
     data: tasksPages,
@@ -1069,9 +1182,123 @@ export default function MovementDetails() {
   });
 
   const downloadResourceMutation = useMutation({
-    mutationFn: async (resourceId) => incrementResourceDownload(resourceId),
+    mutationFn: async (resourceId) => {
+      if (!accessToken) return null;
+      return incrementResourceDownload(resourceId, { accessToken });
+    },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['resources', movementId] });
+    },
+  });
+
+  const MAX_EVIDENCE_MB = 5;
+  const ALLOWED_EVIDENCE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif'];
+  const [evidenceType, setEvidenceType] = useState('image');
+  const [evidenceUrlInput, setEvidenceUrlInput] = useState('');
+  const [evidenceCaption, setEvidenceCaption] = useState('');
+  const [evidenceFile, setEvidenceFile] = useState(null);
+  const [evidenceText, setEvidenceText] = useState('');
+
+  const submitEvidenceMutation = useMutation({
+    mutationFn: async () => {
+      if (!accessToken) throw new Error('Please log in to submit evidence');
+      if (backendStatus === 'offline') throw new Error('Offline: evidence submissions are disabled');
+
+      const rateCheck = await checkActionAllowed({
+        email: myEmail ?? null,
+        action: 'movement_evidence_submit',
+        contextId: movementId,
+        accessToken,
+      });
+      if (!rateCheck?.ok) {
+        const wait = rateCheck?.retryAfterMs ? ` Try again in ${formatWaitMs(rateCheck.retryAfterMs)}.` : '';
+        throw new Error(String(rateCheck?.reason || 'Please slow down.') + wait);
+      }
+
+      const caption = String(evidenceCaption || '').trim() || undefined;
+      const mediaType = String(evidenceType || 'image');
+
+      if (mediaType === 'image') {
+        const file = evidenceFile;
+        if (!file) throw new Error('Please select an image');
+        if (file.size > MAX_EVIDENCE_MB * 1024 * 1024) {
+          throw new Error(`File too large. Max size is ${MAX_EVIDENCE_MB}MB.`);
+        }
+        if (!ALLOWED_EVIDENCE_MIME_TYPES.includes(file.type)) {
+          throw new Error('That file type isn’t supported. Please upload a JPG, PNG, or GIF.');
+        }
+
+        const uploaded = await uploadFile(file, { accessToken });
+        const url = uploaded?.url ? String(uploaded.url) : '';
+        if (!url) throw new Error('Upload succeeded but no URL returned');
+
+        return createMovementEvidence(
+          movementId,
+          {
+            media_type: 'image',
+            url,
+            caption,
+            file_name: file.name,
+            mime_type: file.type,
+            file_size: file.size,
+          },
+          { accessToken }
+        );
+      }
+
+      if (mediaType === 'text') {
+        const text = String(evidenceText || '').trim();
+        if (!text) throw new Error('Please add a short note');
+        return createMovementEvidence(
+          movementId,
+          {
+            media_type: 'text',
+            text,
+            caption,
+          },
+          { accessToken }
+        );
+      }
+
+      const normalizedUrl = normalizeEvidenceUrlInput(evidenceUrlInput);
+      if (!normalizedUrl) {
+        throw new Error('Enter a valid http(s) URL');
+      }
+
+      return createMovementEvidence(
+        movementId,
+        {
+          media_type: mediaType === 'video' ? 'video' : 'link',
+          url: normalizedUrl,
+          caption,
+        },
+        { accessToken }
+      );
+    },
+    onSuccess: async () => {
+      setEvidenceUrlInput('');
+      setEvidenceCaption('');
+      setEvidenceFile(null);
+      setEvidenceText('');
+      await queryClient.invalidateQueries({ queryKey: ['movementEvidence', movementId] });
+      await queryClient.invalidateQueries({ queryKey: ['movementEvidencePending', movementId] });
+    },
+    onError: (e) => {
+      toast.error(String(e?.message || 'Failed to submit evidence'));
+    },
+  });
+
+  const verifyEvidenceMutation = useMutation({
+    mutationFn: async ({ evidenceId, status }) => {
+      if (!accessToken) throw new Error('Please log in');
+      return verifyMovementEvidence(movementId, evidenceId, { status }, { accessToken });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['movementEvidence', movementId] });
+      await queryClient.invalidateQueries({ queryKey: ['movementEvidencePending', movementId] });
+    },
+    onError: (e) => {
+      toast.error(String(e?.message || 'Failed to verify evidence'));
     },
   });
 
@@ -1258,13 +1485,13 @@ export default function MovementDetails() {
   if (earlyView) return earlyView;
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-10 space-y-8">
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 sm:py-10 space-y-6 sm:space-y-8">
       <Link to="/" className="text-[#3A3DFF] font-bold">&larr; Back to home</Link>
 
-      <div className="p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-3">
+      <div className="p-4 sm:p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-3">
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <h1 className="text-3xl font-black text-slate-900">{title}</h1>
+            <h1 className="text-2xl sm:text-3xl font-black text-slate-900">{title}</h1>
             {isTitleLocked && (
               <span className="ml-2 px-2 py-1 rounded bg-yellow-100 text-yellow-800 text-xs font-bold" title="Locked by owner">Locked</span>
             )}
@@ -1432,6 +1659,12 @@ export default function MovementDetails() {
                 className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
               >
                 Petition
+              </a>
+              <a
+                href="#verified-activity"
+                className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
+              >
+                Verified activity
               </a>
               <a
                 href="#comments"
@@ -1744,6 +1977,275 @@ export default function MovementDetails() {
             )}
           </div>
         </SectionCard>
+
+        <div id="verified-activity">
+        <SectionCard title="Verified Activity">
+          <div className="space-y-4">
+            <div className="text-xs text-slate-600 font-semibold">
+              Evidence is user-submitted and only appears after the movement organizer verifies it. People Power does not verify authenticity.
+            </div>
+
+            {evidenceLoading ? (
+              <EmptyState>Loading verified evidence…</EmptyState>
+            ) : evidenceError ? (
+              <EmptyState>
+                <div className="space-y-3">
+                  <div>We couldn’t load verified evidence. Please try again.</div>
+                  <button
+                    type="button"
+                    onClick={() => refetchEvidence()}
+                    className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-[#3A3DFF] text-white font-black hover:opacity-90"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </EmptyState>
+            ) : evidence.length === 0 ? (
+              <EmptyState>No verified activity shared yet. Be the first to show how you joined this movement.</EmptyState>
+            ) : (
+              <div className="space-y-2">
+                {evidence.map((ev) => {
+                  const url = absolutizeMaybe(ev?.url || '');
+                  const caption = ev?.caption ? String(ev.caption) : '';
+                  const text = ev?.text ? String(ev.text) : '';
+                  const created = ev?.created_at ? formatDate(ev.created_at) : null;
+                  const isImage = isEvidenceImage(ev);
+                  const mediaType = String(ev?.media_type || '').toLowerCase();
+                  return (
+                    <div key={String(ev?.id || url)} className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
+                      <div className="flex items-center gap-2 text-xs font-black text-slate-600">
+                        <BadgeCheck className="w-4 h-4 text-[#3A3DFF]" />
+                        Verified by organizer
+                        {created ? <span className="text-slate-400">• {created}</span> : null}
+                      </div>
+                      {mediaType === 'text' ? (
+                        <div className="text-sm text-slate-700 font-semibold whitespace-pre-wrap">
+                          {text || caption}
+                        </div>
+                      ) : isImage && url ? (
+                        <img
+                          src={url}
+                          alt={caption || 'Verified evidence'}
+                          className="w-full max-h-80 object-contain rounded-xl border border-slate-200 bg-white"
+                        />
+                      ) : url ? (
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-sm font-bold text-[#3A3DFF] break-all"
+                        >
+                          {mediaType === 'video' ? 'Watch video evidence' : 'View evidence link'}
+                        </a>
+                      ) : null}
+                      {caption && mediaType !== 'text' ? (
+                        <div className="text-sm text-slate-700 font-semibold whitespace-pre-wrap">{caption}</div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+
+                {hasNextEvidencePage ? (
+                  <div className="pt-2 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() => fetchNextEvidencePage()}
+                      disabled={isFetchingNextEvidencePage}
+                      className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-white border-2 border-slate-200 text-slate-900 font-black hover:bg-slate-50"
+                    >
+                      {isFetchingNextEvidencePage ? 'Loading…' : 'Load more'}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            <div className="pt-3 border-t border-slate-200 space-y-3">
+              <div className="text-sm font-black text-slate-900">Submit evidence</div>
+              {accessToken ? (
+                backendStatus === 'offline' ? (
+                  <div className="text-xs text-red-500 font-bold">Offline: evidence submissions are disabled</div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <Label>Evidence type</Label>
+                        <select
+                          value={evidenceType}
+                          onChange={(e) => setEvidenceType(e.target.value)}
+                          className="w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold"
+                        >
+                          <option value="image">Photo (upload)</option>
+                          <option value="link">Link</option>
+                          <option value="video">Video link</option>
+                          <option value="text">Short text</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <Label>Caption (optional)</Label>
+                        <TextInput
+                          value={evidenceCaption}
+                          onChange={setEvidenceCaption}
+                          placeholder="Brief context for this evidence"
+                        />
+                      </div>
+                    </div>
+
+                    {evidenceType === 'image' ? (
+                      <div className="space-y-2">
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/jpg,image/gif"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0] ?? null;
+                            e.target.value = '';
+                            if (!file) return;
+                            if (file.size > MAX_EVIDENCE_MB * 1024 * 1024) {
+                              toast.error(`File too large. Max size is ${MAX_EVIDENCE_MB}MB.`);
+                              return;
+                            }
+                            if (!ALLOWED_EVIDENCE_MIME_TYPES.includes(file.type)) {
+                              toast.error('That file type isn’t supported. Please upload a JPG, PNG, or GIF.');
+                              return;
+                            }
+                            setEvidenceFile(file);
+                          }}
+                          className="text-sm font-semibold text-slate-700"
+                        />
+                        {evidenceFile ? (
+                          <div className="text-xs text-slate-600 font-semibold truncate">Selected: {evidenceFile.name}</div>
+                        ) : (
+                          <div className="text-xs text-slate-500 font-semibold">No file selected.</div>
+                        )}
+                      </div>
+                    ) : evidenceType === 'text' ? (
+                      <div className="space-y-1">
+                        <Label>Evidence note</Label>
+                        <textarea
+                          value={evidenceText}
+                          onChange={(e) => setEvidenceText(e.target.value)}
+                          rows={4}
+                          placeholder="Share a short note about how you participated."
+                          className="w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold"
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <Label>Evidence URL</Label>
+                        <TextInput
+                          value={evidenceUrlInput}
+                          onChange={setEvidenceUrlInput}
+                          placeholder="https://example.com"
+                          type="url"
+                        />
+                        <div className="text-xs text-slate-500 font-semibold">
+                          Use a direct link to a trusted source or video.
+                        </div>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => submitEvidenceMutation.mutate()}
+                      disabled={submitEvidenceMutation.isPending}
+                      className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black hover:opacity-90 disabled:opacity-60"
+                    >
+                      {submitEvidenceMutation.isPending ? 'Submitting…' : 'Submit evidence for verification'}
+                    </button>
+                  </div>
+                )
+              ) : (
+                <div className="text-xs text-slate-500 font-semibold">Log in to submit evidence.</div>
+              )}
+            </div>
+
+            {canReviewEvidence ? (
+              <div className="pt-3 border-t border-slate-200 space-y-3">
+                <div className="text-sm font-black text-slate-900">Pending submissions (organizer review)</div>
+                {pendingEvidenceLoading ? (
+                  <EmptyState>Loading pending submissions…</EmptyState>
+                ) : pendingEvidenceError ? (
+                  <EmptyState>
+                    <div className="space-y-3">
+                      <div>We couldn’t load pending submissions. Please try again.</div>
+                      <button
+                        type="button"
+                        onClick={() => refetchPendingEvidence()}
+                        className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-[#3A3DFF] text-white font-black hover:opacity-90"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  </EmptyState>
+                ) : pendingEvidence.length === 0 ? (
+                  <EmptyState>No pending evidence yet.</EmptyState>
+                ) : (
+                  <div className="space-y-2">
+                    {pendingEvidence.map((ev) => {
+                      const url = absolutizeMaybe(ev?.url || '');
+                      const caption = ev?.caption ? String(ev.caption) : '';
+                      const text = ev?.text ? String(ev.text) : '';
+                      const created = ev?.created_at ? formatDate(ev.created_at) : null;
+                      const submitter = ev?.submitter_email ? String(ev.submitter_email) : 'Unknown';
+                      const isImage = isEvidenceImage(ev);
+                      const mediaType = String(ev?.media_type || '').toLowerCase();
+                      return (
+                        <div key={String(ev?.id || url)} className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
+                          <div className="text-xs font-black text-slate-600">
+                            Submitted by {submitter}
+                            {created ? <span className="text-slate-400"> • {created}</span> : null}
+                          </div>
+                          {mediaType === 'text' ? (
+                            <div className="text-sm text-slate-700 font-semibold whitespace-pre-wrap">
+                              {text || caption}
+                            </div>
+                          ) : isImage && url ? (
+                            <img
+                              src={url}
+                              alt={caption || 'Pending evidence'}
+                              className="w-full max-h-72 object-contain rounded-xl border border-slate-200 bg-white"
+                            />
+                          ) : url ? (
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sm font-bold text-[#3A3DFF] break-all"
+                            >
+                              {mediaType === 'video' ? 'Open video evidence' : 'Open evidence link'}
+                            </a>
+                          ) : null}
+                          {caption && mediaType !== 'text' ? (
+                            <div className="text-sm text-slate-700 font-semibold whitespace-pre-wrap">{caption}</div>
+                          ) : null}
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => verifyEvidenceMutation.mutate({ evidenceId: String(ev?.id || ''), status: 'approved' })}
+                              disabled={verifyEvidenceMutation.isPending}
+                              className="px-3 py-2 rounded-xl bg-slate-900 text-white text-xs font-black hover:opacity-90 disabled:opacity-60"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => verifyEvidenceMutation.mutate({ evidenceId: String(ev?.id || ''), status: 'rejected' })}
+                              disabled={verifyEvidenceMutation.isPending}
+                              className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50 disabled:opacity-60"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </SectionCard>
+        </div>
 
         <SectionCard title="Impact Updates">
           <div className="space-y-3">
@@ -2391,9 +2893,11 @@ export default function MovementDetails() {
                     AI-generated insights — experimental, may be inaccurate.
                   </div>
                   <div className="mt-3">
-                    <Suspense fallback={<EmptyState>Loading dashboard…</EmptyState>}>
-                      <CreatorDashboard movement={movement} isOwner={isOwner} userProfile={userProfile} />
-                    </Suspense>
+                    <ErrorBoundary>
+                      <Suspense fallback={<EmptyState>Loading dashboard…</EmptyState>}>
+                        <CreatorDashboard movement={movement} isOwner={isOwner} userProfile={userProfile} />
+                      </Suspense>
+                    </ErrorBoundary>
                   </div>
                 </SectionCard>
               ) : null}

@@ -1,4 +1,5 @@
 import React from 'react';
+import { logError } from '@/utils/logError';
 
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -11,11 +12,13 @@ export default class ErrorBoundary extends React.Component {
   }
 
   componentDidCatch(error, errorInfo) {
-    console.error('[ErrorBoundary]', error, errorInfo);
+    logError(error, 'ErrorBoundary caught error', { componentStack: errorInfo?.componentStack });
   }
 
   render() {
     if (!this.state.hasError) return this.props.children;
+
+    const showDetails = import.meta?.env?.DEV;
 
     return (
       <div className="max-w-2xl mx-auto p-6">
@@ -24,9 +27,11 @@ export default class ErrorBoundary extends React.Component {
           <div className="text-sm text-slate-600">
             This page hit an error while we’re migrating off the old backend. Try refreshing.
           </div>
-          <pre className="mt-4 text-xs overflow-auto whitespace-pre-wrap text-slate-500">
-            {String(this.state.error?.message || this.state.error || 'Unknown error')}
-          </pre>
+          {showDetails ? (
+            <pre className="mt-4 text-xs overflow-auto whitespace-pre-wrap text-slate-500">
+              {String(this.state.error?.message || this.state.error || 'Unknown error')}
+            </pre>
+          ) : null}
         </div>
       </div>
     );

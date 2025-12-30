@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { auth, entities } from '@/api/appClient';
 import { focusFirstInteractive, trapFocusKeyDown } from '@/components/utils/focusTrap';
+import { logError } from '@/utils/logError';
 
 export default function UploadResourceModal({ open, onOpenChange, movementId, onCreated }) {
   const [title, setTitle] = useState('');
@@ -39,7 +40,7 @@ export default function UploadResourceModal({ open, onOpenChange, movementId, on
         const isAuth = await auth.isAuthenticated();
         user = isAuth ? await auth.me() : null;
       } catch (e) {
-        console.warn('[UploadResourceModal] auth failed', e);
+        logError(e, 'Upload resource auth check failed');
         user = null;
       }
 
@@ -58,7 +59,7 @@ export default function UploadResourceModal({ open, onOpenChange, movementId, on
         });
         onCreated?.(created || null);
       } catch (e) {
-        console.warn('[UploadResourceModal] Resource.create failed', e);
+        logError(e, 'Upload resource failed', { movementId: safeMovementId });
         toast.error("Couldn't upload resource right now");
         return;
       }

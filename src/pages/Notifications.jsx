@@ -15,6 +15,7 @@ import { useAuth } from '@/auth/AuthProvider';
 import { updateReport } from '@/api/reportsClient';
 import { uploadFile } from '@/api/uploadsClient';
 import { toast } from 'sonner';
+import { logError } from '@/utils/logError';
 
 const EVIDENCE_MAX_MB = 5;
 const EVIDENCE_ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'];
@@ -90,7 +91,7 @@ export default function Notifications() {
 
   useEffect(() => {
     if (notificationsError && notificationsErrorObj) {
-      console.warn('[Notifications] failed to load notifications', notificationsErrorObj);
+      logError(notificationsErrorObj, 'Notifications load failed');
     }
   }, [notificationsError, notificationsErrorObj]);
 
@@ -192,8 +193,8 @@ export default function Notifications() {
       toast.success('Follow-up sent');
       setFollowupOpen(false);
     } catch (e) {
-      console.warn('[Notifications] follow-up failed', e);
-      toast.error(String(e?.message || 'Failed to send follow-up'));
+      logError(e, 'Notification follow-up failed', { reportId: String(reportId) });
+      toast.error('Failed to send follow-up');
     } finally {
       setSendingFollowup(false);
     }

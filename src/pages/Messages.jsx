@@ -53,6 +53,12 @@ function revealKey(messageId) {
   return `peoplepower_sensitive_reveal_${String(messageId || '')}`;
 }
 
+function looksLikeConnectivityError(error) {
+  const msg = String(error?.message || '').toLowerCase();
+  if (!msg) return false;
+  return msg.includes('failed to fetch') || msg.includes('network') || msg.includes('load failed') || msg.includes('econnrefused');
+}
+
 function MediaMessage({ payload, messageId }) {
   const url = String(payload?.url || '');
   const caption = payload?.caption ? String(payload.caption) : '';
@@ -333,7 +339,7 @@ export default function Messages() {
 
   useEffect(() => {
     if (conversationsError && conversationsErrorObj) {
-      console.warn('[Messages] failed to load conversations', conversationsErrorObj);
+      logError(conversationsErrorObj, 'Messages conversations load failed');
     }
   }, [conversationsError, conversationsErrorObj]);
 
@@ -341,6 +347,19 @@ export default function Messages() {
     () => conversations.find((c) => String(c?.id) === String(selectedId)) || null,
     [conversations, selectedId]
   );
+
+  useEffect(() => {
+    if (conversationsLoading) return;
+    const list = Array.isArray(conversations) ? conversations : [];
+    if (selectedId && !list.some((c) => String(c?.id) === String(selectedId))) {
+      setSelectedId(null);
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('conversationId');
+        return next;
+      });
+    }
+  }, [conversations, conversationsLoading, selectedId, setSearchParams]);
 
   const cannotReply = useMemo(() => {
     const status = String(selectedConversation?.request_status || '').toLowerCase();
@@ -395,7 +414,7 @@ export default function Messages() {
 
   useEffect(() => {
     if (otherKeyError && otherKeyErrorObj) {
-      console.warn('[Messages] failed to load recipient public key', otherKeyErrorObj);
+      logError(otherKeyErrorObj, 'Messages recipient public key load failed', { recipient: otherEmailNormalized });
       toast.error('Recipient has no encryption key yet');
     }
   }, [otherKeyError, otherKeyErrorObj]);
@@ -419,7 +438,7 @@ export default function Messages() {
         offset: pageParam,
         fields: MESSAGE_LIST_FIELDS,
       }),
-    enabled: !!myEmail && !!selectedId,
+    enabled: !!myEmail && !!selectedConversation,
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       if (!Array.isArray(lastPage)) return undefined;
@@ -441,9 +460,15 @@ export default function Messages() {
 
   useEffect(() => {
     if (messagesError && messagesErrorObj) {
-      console.warn('[Messages] failed to load messages', messagesErrorObj);
+      logError(messagesErrorObj, 'Messages load failed', { conversationId: selectedId });
     }
   }, [messagesError, messagesErrorObj]);
+
+  const conversationsConnectivityError =
+    conversationsError && looksLikeConnectivityError(conversationsErrorObj);
+
+  const messagesConnectivityError =
+    messagesError && looksLikeConnectivityError(messagesErrorObj);
 
   const markReadMutation = useMutation({
     mutationFn: async (conversationId) => markConversationRead(conversationId, { accessToken, myEmail }),
@@ -679,7 +704,7 @@ export default function Messages() {
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Loading conversations...
               </div>
-            ) : conversationsError ? (
+            ) : conversationsConnectivityError ? (
               <div className="p-6 text-slate-600 font-semibold space-y-3">
                 <div>Couldn’t load conversations. Please try again.</div>
                 <Button
@@ -692,7 +717,9 @@ export default function Messages() {
                 </Button>
               </div>
             ) : filteredConversations.length === 0 ? (
-              <div className="p-6 text-slate-600 font-semibold">No conversations yet.</div>
+              <div className="p-6 text-slate-600 font-semibold">
+                No active messages yet. Start a conversation from a profile or movement.
+              </div>
             ) : (
               <>
                 <div className="divide-y divide-slate-100">
@@ -841,7 +868,7 @@ export default function Messages() {
                       <Loader2 className="w-4 h-4 animate-spin" />
                       Loading messages...
                     </div>
-                  ) : messagesError ? (
+                  ) : messagesConnectivityError ? (
                     <div className="text-slate-600 font-semibold space-y-3">
                       <div>Couldn’t load messages. Please try again.</div>
                       <Button
@@ -854,7 +881,9 @@ export default function Messages() {
                       </Button>
                     </div>
                   ) : messages.length === 0 ? (
-                    <div className="text-slate-600 font-semibold">No messages yet. Say hi!</div>
+                    <div className="text-slate-600 font-semibold">
+                      No active messages yet. Start a conversation from a profile or movement.
+                    </div>
                   ) : (
                     <div className="space-y-3">
                       {hasMoreMessages ? (

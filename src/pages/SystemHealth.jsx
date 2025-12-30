@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useQuery } from 'react-query';
 import { useAuth } from '../auth/AuthProvider';
 import { Navigate } from 'react-router-dom';
+import { logError } from '@/utils/logError';
 
 function fetchMigrationLogs(token) {
   return fetch('/admin/migrations', {
@@ -34,9 +35,13 @@ export default function SystemHealth() {
     { enabled: !!accessToken }
   );
 
+  useEffect(() => {
+    if (error) logError(error, 'SystemHealth load failed');
+  }, [error]);
+
   if (!user || !isAdmin) return <Navigate to="/" replace />;
   if (isLoading) return <div>Loading system health…</div>;
-  if (error) return <div>Error loading logs: {error.message}</div>;
+  if (error) return <div>Unable to load system health right now.</div>;
 
   const logs = data?.logs || [];
   const lastBackup = getLastBackup(logs);

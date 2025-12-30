@@ -515,13 +515,13 @@ export default function Home() {
         initial={{ opacity: 0 }}
         animate={{ opacity: showIntro ? 0 : 1 }}
         transition={{ duration: 0.8, delay: showIntro ? 0 : 0.5 }}
-        className="space-y-8 pb-32 min-h-screen"
+        className="space-y-6 sm:space-y-8 pb-24 sm:pb-32 min-h-[70vh]"
       >
       {/* Hero Section */}
       <motion.div 
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="text-center py-12"
+        className="text-center py-8 sm:py-12"
       >
         <motion.div 
           animate={{ 
@@ -529,15 +529,15 @@ export default function Home() {
             scale: [1, 1.05, 1]
           }}
           transition={{ duration: 3, repeat: Infinity }}
-          className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-full text-sm font-black mb-6 shadow-lg shadow-yellow-400/40 uppercase tracking-wide"
+          className="inline-flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-full text-xs sm:text-sm font-black mb-4 sm:mb-6 shadow-lg shadow-yellow-400/40 uppercase tracking-wide"
         >
           <Sparkles className="w-4 h-4" />
           {t('theMovementEngine')}
         </motion.div>
-        <h1 className="text-5xl sm:text-7xl font-black text-slate-900 mb-6 tracking-tight leading-none">
+        <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black text-slate-900 mb-4 sm:mb-6 tracking-tight leading-none">
           {t('peoplePower')}
         </h1>
-        <p className="text-xl text-slate-600 max-w-2xl mx-auto leading-relaxed font-semibold">
+        <p className="text-base sm:text-xl text-slate-600 max-w-2xl mx-auto leading-relaxed font-semibold">
           {t('homeTagline')}
         </p>
       </motion.div>
@@ -578,7 +578,7 @@ export default function Home() {
       ) : null}
 
       {/* Filter & Actions Bar */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-4 rounded-3xl border-3 border-slate-200 shadow-lg">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-3 sm:p-4 rounded-2xl sm:rounded-3xl border-3 border-slate-200 shadow-lg">
         <FilterTabs activeFilter={activeFilter} onFilterChange={setActiveFilter} />
 
         <div className="relative">
@@ -587,7 +587,7 @@ export default function Home() {
               <motion.button
                 whileHover={reduceMotion ? undefined : { scale: 1.05 }}
                 whileTap={reduceMotion ? undefined : { scale: 0.95 }}
-                className="flex items-center gap-2 px-7 py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-2xl font-black shadow-xl shadow-yellow-400/40 hover:shadow-yellow-400/60 transition-shadow uppercase tracking-wide"
+                className="flex items-center gap-2 px-5 py-3 sm:px-7 sm:py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-2xl font-black shadow-xl shadow-yellow-400/40 hover:shadow-yellow-400/60 transition-shadow uppercase tracking-wide"
                 >
                 <Plus className="w-5 h-5" strokeWidth={3} />
                 {t('startMovement')}
@@ -598,7 +598,7 @@ export default function Home() {
               type="button"
               whileHover={reduceMotion ? undefined : { scale: 1.0 }}
               whileTap={reduceMotion ? undefined : { scale: 0.98 }}
-              className="flex items-center gap-2 px-7 py-4 bg-slate-200 text-slate-600 rounded-2xl font-black shadow-inner uppercase tracking-wide cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-3 sm:px-7 sm:py-4 bg-slate-200 text-slate-600 rounded-2xl font-black shadow-inner uppercase tracking-wide cursor-not-allowed"
               disabled
               aria-disabled="true"
               title="Accept safety & terms to continue"
@@ -619,19 +619,19 @@ export default function Home() {
       </div>
 
       {/* Movements List */}
-      <div className="space-y-5">
+      <div className="space-y-4 sm:space-y-5">
         {showOfflineLabel && offlineMovements ? (
           <div className="text-center py-2 mb-2 text-xs font-bold text-yellow-900 bg-yellow-100 rounded-xl">
             Showing last saved version (offline). Data may be outdated.
           </div>
         ) : null}
         {isLoading && !offlineMovements ? (
-          <div className="flex flex-col items-center justify-center py-24">
+          <div className="flex flex-col items-center justify-center py-16 sm:py-24">
             <Loader2 className="w-10 h-10 text-[#3A3DFF] animate-spin mb-4" />
             <p className="text-slate-500 font-bold">{t('loadingMovements')}</p>
           </div>
         ) : !offlineMovements && isMovementsError ? (
-          <div className="text-center py-24">
+          <div className="text-center py-16 sm:py-24">
             <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
               <Zap className="w-12 h-12 text-slate-400" />
             </div>
@@ -649,7 +649,7 @@ export default function Home() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: reduceMotion ? 0 : undefined }}
-            className="text-center py-24"
+            className="text-center py-16 sm:py-24"
           >
             <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
               <Zap className="w-12 h-12 text-slate-400" />
@@ -658,7 +658,7 @@ export default function Home() {
             <p className="text-slate-500 mb-6 font-semibold">{t('beTheFirst')}</p>
             {gateReady ? (
               <Link to={createPageUrl('CreateMovement')}>
-                <button className="px-7 py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow uppercase tracking-wide">
+                <button className="px-5 py-3 sm:px-7 sm:py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow uppercase tracking-wide">
                   {t('createFirstMovement')}
                 </button>
               </Link>
@@ -669,7 +669,7 @@ export default function Home() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: reduceMotion ? 0 : undefined }}
-            className="text-center py-24"
+            className="text-center py-16 sm:py-24"
           >
             <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
               <Zap className="w-12 h-12 text-slate-400" />
@@ -681,7 +681,7 @@ export default function Home() {
                   Local is approximate. Set your city and radius in your profile to see nearby movements.
                 </p>
                 <Link to={createPageUrl('Profile')}>
-                  <button className="px-7 py-4 bg-white text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow border-2 border-slate-200 uppercase tracking-wide">
+                  <button className="px-5 py-3 sm:px-7 sm:py-4 bg-white text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow border-2 border-slate-200 uppercase tracking-wide">
                     Update location
                   </button>
                 </Link>
@@ -693,7 +693,7 @@ export default function Home() {
                   Try increasing your radius (currently ~{localConfig.radiusKm}km) to discover more.
                 </p>
                 <Link to={createPageUrl('Profile')}>
-                  <button className="px-7 py-4 bg-white text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow border-2 border-slate-200 uppercase tracking-wide">
+                  <button className="px-5 py-3 sm:px-7 sm:py-4 bg-white text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow border-2 border-slate-200 uppercase tracking-wide">
                     Adjust radius
                   </button>
                 </Link>
@@ -734,7 +734,7 @@ export default function Home() {
       {gateReady ? (
           <Link 
             to={createPageUrl('CreateMovement')}
-            className="fixed bottom-6 right-6 md:hidden z-40"
+            className="fixed bottom-24 right-5 md:hidden z-40"
           >
             <motion.button
               whileHover={reduceMotion ? undefined : { scale: 1.1 }}

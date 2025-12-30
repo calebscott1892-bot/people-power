@@ -19,6 +19,52 @@ function parseAdminEmails(raw) {
     .filter(Boolean);
 }
 
+function EarlyAccessBanner() {
+  const [hidden, setHidden] = useState(false);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('pp_early_access_dismissed');
+      if (stored === '1') setHidden(true);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hidden) return;
+    try {
+      localStorage.setItem('pp_early_access_dismissed', '1');
+    } catch {
+      // ignore
+    }
+  }, [hidden]);
+
+  if (hidden) return null;
+
+  return (
+    <div className="w-full border-b border-amber-200 bg-amber-50 text-amber-900 px-4 sm:px-6 py-3">
+      <div className="max-w-7xl mx-auto flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
+        <div className="flex-1">
+          <div className="font-black text-sm sm:text-base">People Power — Early Access</div>
+          <p className="text-xs sm:text-[13px] leading-snug text-amber-900/90">
+            This is a pre-release version of People Power. Some features are still stabilising and data may be
+            periodically reset during deployment. Thanks for helping us improve the platform.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setHidden(true)}
+          className="text-xs font-bold underline underline-offset-2 whitespace-nowrap"
+          aria-label="Dismiss early access banner"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function LayoutContent({ children }) {
   const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
   const { user: authUser } = useAuth();
@@ -59,7 +105,7 @@ function LayoutContent({ children }) {
 
   // Combined fixed bottom stack height (NAV + legal footer).
   // Increased slightly so content never hides behind the stacked bars.
-  const bottomStackPaddingPx = useMemo(() => 132, []);
+  const bottomStackPaddingPx = useMemo(() => 156, []);
 
   const hideBottomStack = useMemo(() => {
     // Hide bottom navigation during intro/safety/onboarding gating on Home.
@@ -90,7 +136,7 @@ function LayoutContent({ children }) {
       )}
       {/* Main scrollable content */}
       <div
-        className="flex-1"
+        className="flex-1 overflow-x-hidden"
         style={{
           paddingBottom: `calc(${bottomStackPaddingPx}px + env(safe-area-inset-bottom))`,
         }}
@@ -98,7 +144,7 @@ function LayoutContent({ children }) {
         {/* Header */}
         <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-xl border-b-4 border-slate-200 shadow-sm">
           <div className="max-w-7xl mx-auto px-4 sm:px-6">
-            <div className="flex items-center justify-between h-16 md:h-20">
+            <div className="flex items-center justify-between h-14 sm:h-16 md:h-20">
               {/* Logo */}
               <Link
                 to={createPageUrl('Home')}
@@ -106,9 +152,9 @@ function LayoutContent({ children }) {
               >
                 <motion.div
                   whileHover={{ rotate: 10, scale: 1.1 }}
-                  className="w-10 h-10 md:w-12 md:h-12 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/30"
+                  className="w-9 h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/30"
                 >
-                  <Zap className="w-6 h-6 md:w-7 md:h-7 text-[#FFC947]" fill="#FFC947" strokeWidth={3} />
+                  <Zap className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 text-[#FFC947]" fill="#FFC947" strokeWidth={3} />
                 </motion.div>
                 <div className="hidden sm:flex flex-col">
                   <span className="text-xl md:text-2xl font-black text-slate-900 leading-none tracking-tight">
@@ -174,8 +220,10 @@ function LayoutContent({ children }) {
           </div>
         </header>
 
+        <EarlyAccessBanner />
+
         {/* Main Content */}
-        <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-6 md:py-8">
+        <main className="flex-1 max-w-7xl mx-auto px-3 sm:px-6 py-4 sm:py-6 md:py-8">
           {children}
         </main>
       </div>
@@ -197,19 +245,19 @@ function LayoutContent({ children }) {
                     key={item.page}
                     to={createPageUrl(item.page)}
                     className={cn(
-                      "flex flex-col items-center gap-1 px-3 py-2 rounded-xl transition-all min-w-[60px]",
-                      isCreate && "-mt-6 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 shadow-lg shadow-yellow-400/40",
+                      "flex flex-col items-center gap-1 px-3 py-2 rounded-xl transition-all min-w-[54px] sm:min-w-[60px]",
+                      isCreate && "-mt-5 sm:-mt-6 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 shadow-lg shadow-yellow-400/40",
                       !isCreate && (active ? "text-[#3A3DFF]" : "text-slate-500")
                     )}
                   >
                     <Icon
                       className={cn(
-                        isCreate ? "w-7 h-7" : "w-6 h-6",
+                        isCreate ? "w-6 h-6 sm:w-7 sm:h-7" : "w-5 h-5 sm:w-6 sm:h-6",
                         active && !isCreate && "scale-110"
                       )}
                       strokeWidth={active && !isCreate ? 2.5 : 2}
                     />
-                    <span className={cn("text-xs font-bold", isCreate && "uppercase tracking-wide")}>{item.name}</span>
+                    <span className={cn("text-[10px] sm:text-xs font-bold", isCreate && "uppercase tracking-wide")}>{item.name}</span>
                   </Link>
                 );
               })}

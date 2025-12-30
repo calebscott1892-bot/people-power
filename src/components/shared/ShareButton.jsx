@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { useAuth } from '@/auth/AuthProvider';
 import { createConversation, sendMessage } from '@/api/messagesClient';
 import { fetchPublicKey, upsertMyPublicKey } from '@/api/keysClient';
+import { logError } from '@/utils/logError';
 import {
   Dialog,
   DialogContent,
@@ -78,7 +79,7 @@ export default function ShareButton({ movement, variant = "default" }) {
       toast.success('Link copied!');
       setShowDialog(false);
     } catch (e) {
-      console.warn('[ShareButton] copy link failed', e);
+      logError(e, 'ShareButton copy link failed');
       toast.error("Couldn't copy link right now");
     }
   };
@@ -129,8 +130,8 @@ export default function ShareButton({ movement, variant = "default" }) {
       setRecipientEmail('');
       setShowDialog(false);
     } catch (e) {
-      console.warn('[ShareButton] share-to-dm failed', e);
-      toast.error(String(e?.message || 'Failed to share via DM'));
+      logError(e, 'ShareButton share to DM failed', { recipient: to });
+      toast.error('Failed to share via DM');
     } finally {
       setSendingDm(false);
     }
@@ -158,7 +159,7 @@ export default function ShareButton({ movement, variant = "default" }) {
 
       setShowDialog(false);
     } catch (e) {
-      console.warn('[ShareButton] external share failed', e);
+      logError(e, 'ShareButton external share failed');
       // Fallback: try copy link
       await handleCopyLink();
     }
@@ -173,7 +174,7 @@ export default function ShareButton({ movement, variant = "default" }) {
       window.open(url, '_blank', 'noopener,noreferrer');
       setShowDialog(false);
     } catch (e) {
-      console.warn('[ShareButton] openUrl failed', e);
+      logError(e, 'ShareButton openUrl failed', { url });
       toast.error("Couldn't open share target");
     }
   };

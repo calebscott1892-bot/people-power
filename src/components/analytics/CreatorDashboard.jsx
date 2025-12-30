@@ -18,6 +18,7 @@ import { listMovementEventsPage } from '@/api/eventsClient';
 import { listMovementPetitionsPage } from '@/api/petitionsClient';
 import { fetchEventRsvpSummary } from '@/api/eventRsvpsClient';
 import { fetchPetitionSignatureSummary } from '@/api/petitionSignaturesClient';
+import { logError } from '@/utils/logError';
 
 const COLORS = ['#3A3DFF', '#5B5EFF', '#FFC947', '#FFD666'];
 
@@ -133,19 +134,19 @@ export default function CreatorDashboard({ movement, isOwner, userProfile }) {
   const anyError = analyticsError || eventsError || petitionsError || rsvpsError || signaturesError;
 
   useEffect(() => {
-    if (analyticsErrorObj) console.warn('[CreatorDashboard] analytics load failed', analyticsErrorObj);
+    if (analyticsErrorObj) logError(analyticsErrorObj, 'CreatorDashboard analytics load failed', { movementId });
   }, [analyticsErrorObj]);
   useEffect(() => {
-    if (eventsErrorObj) console.warn('[CreatorDashboard] events load failed', eventsErrorObj);
+    if (eventsErrorObj) logError(eventsErrorObj, 'CreatorDashboard events load failed', { movementId });
   }, [eventsErrorObj]);
   useEffect(() => {
-    if (petitionsErrorObj) console.warn('[CreatorDashboard] petitions load failed', petitionsErrorObj);
+    if (petitionsErrorObj) logError(petitionsErrorObj, 'CreatorDashboard petitions load failed', { movementId });
   }, [petitionsErrorObj]);
   useEffect(() => {
-    if (rsvpsErrorObj) console.warn('[CreatorDashboard] rsvps load failed', rsvpsErrorObj);
+    if (rsvpsErrorObj) logError(rsvpsErrorObj, 'CreatorDashboard RSVPs load failed', { movementId });
   }, [rsvpsErrorObj]);
   useEffect(() => {
-    if (signaturesErrorObj) console.warn('[CreatorDashboard] signatures load failed', signaturesErrorObj);
+    if (signaturesErrorObj) logError(signaturesErrorObj, 'CreatorDashboard signatures load failed', { movementId });
   }, [signaturesErrorObj]);
 
   // Calculate metrics
@@ -291,7 +292,7 @@ Provide:
       setAiInsights(response);
       cacheAIResult('aiCreatorInsights', payloadHash, response);
     } catch (error) {
-      console.error('AI insights failed:', error);
+      logError(error, 'CreatorDashboard AI insights failed', { movementId });
     } finally {
       setLoadingInsights(false);
     }

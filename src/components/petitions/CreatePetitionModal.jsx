@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { auth, entities } from '@/api/appClient';
 import { focusFirstInteractive, trapFocusKeyDown } from '@/components/utils/focusTrap';
+import { logError } from '@/utils/logError';
 
 export default function CreatePetitionModal({ open, onOpenChange, movementId, onCreated }) {
   const [title, setTitle] = useState('');
@@ -37,7 +38,7 @@ export default function CreatePetitionModal({ open, onOpenChange, movementId, on
         const isAuth = await auth.isAuthenticated();
         user = isAuth ? await auth.me() : null;
       } catch (e) {
-        console.warn('[CreatePetitionModal] auth failed', e);
+        logError(e, 'Create petition auth check failed');
         user = null;
       }
 
@@ -60,7 +61,7 @@ export default function CreatePetitionModal({ open, onOpenChange, movementId, on
         });
         onCreated?.(created || null);
       } catch (e) {
-        console.warn('[CreatePetitionModal] Petition.create failed', e);
+        logError(e, 'Create petition failed', { movementId: safeMovementId });
         toast.error("Couldn't create petition right now");
         return;
       }

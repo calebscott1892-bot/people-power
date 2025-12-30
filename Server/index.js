@@ -16,6 +16,42 @@ const fastify = require('fastify')({
 });
 const { v4: uuidv4 } = require('uuid');
 
+// Healthcheck (keep simple and always registered)
+fastify.get('/health', async (_request, _reply) => {
+  return {
+    ok: true,
+    status: 'healthy',
+    uptime: process.uptime(),
+    env: process.env.NODE_ENV || 'unknown',
+  };
+});
+
+const RATE_LIMITS = {
+  global: { max: 100, timeWindow: 5 * 60 * 1000 }, // 5 minutes
+  movementCreate: { max: 5, timeWindow: 60 * 60 * 1000 }, // 1 hour
+  messageSend: { max: 60, timeWindow: 60 * 1000 }, // 1 minute
+  reportCreate: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
+  petitionSign: { max: 30, timeWindow: 60 * 60 * 1000 }, // 1 hour
+  upload: { max: 20, timeWindow: 60 * 60 * 1000 }, // 1 hour
+  evidenceSubmit: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
+  commentCreate: { max: 30, timeWindow: 60 * 60 * 1000 }, // 1 hour
+};
+
+function rateLimitKeyGenerator(request) {
+  const authHeader = request.headers?.authorization ? String(request.headers.authorization) : '';
+  const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+  const ip = request.ip ? String(request.ip) : '';
+  return `${ip}:${token || 'anon'}`;
+}
+
+fastify.register(require('@fastify/rate-limit'), {
+  global: true,
+  max: RATE_LIMITS.global.max,
+  timeWindow: RATE_LIMITS.global.timeWindow,
+  keyGenerator: rateLimitKeyGenerator,
+  errorResponseBuilder: () => ({ error: 'Too many requests, please slow down.' }),
+});
+
 // --- Upload limits ---
 const MAX_UPLOAD_BYTES = process.env.MAX_UPLOAD_BYTES ? parseInt(process.env.MAX_UPLOAD_BYTES, 10) : 5 * 1024 * 1024; // 5MB default
 const ALLOWED_UPLOAD_MIME_TYPES = [
@@ -44,7 +80,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 
 // Create or update a feature flag
 fastify.post('/admin/feature-flags', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
   const { name, enabled, rollout_percentage, description } = request.body || {};
   if (!name) return reply.code(400).send({ error: 'Flag name required' });
@@ -64,7 +100,7 @@ fastify.post('/admin/feature-flags', async (request, reply) => {
 
 // Delete a feature flag
 fastify.delete('/admin/feature-flags/:id', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
   const id = String(request.params.id);
   await ensureFeatureFlagsTable();
@@ -100,7 +136,7 @@ async function ensureFeatureFlagsTable() {
 
 // List all research configs
 fastify.get('/admin/research-mode-configs', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
   await ensureResearchModeConfigTable();
   const res = await pool.query('SELECT * FROM research_mode_configs ORDER BY updated_at DESC');
@@ -109,7 +145,7 @@ fastify.get('/admin/research-mode-configs', async (request, reply) => {
 
 // Create or update a research config
 fastify.post('/admin/research-mode-configs', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
   const { scope, scope_id, enabled_features } = request.body || {};
   if (!['user','movement','global'].includes(scope)) return reply.code(400).send({ error: 'Invalid scope' });
@@ -130,7 +166,7 @@ fastify.post('/admin/research-mode-configs', async (request, reply) => {
 
 // Delete a research config
 fastify.delete('/admin/research-mode-configs/:id', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
   const id = String(request.params.id);
   await ensureResearchModeConfigTable();
@@ -176,7 +212,7 @@ async function ensureResearchModeConfigTable() {
 }
 // GET /admin/community-health (admin-only, aggregate stats, no private content)
 fastify.get('/admin/community-health', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
   if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
   // Time windows
@@ -407,7 +443,7 @@ async function logCollaboratorAction({ movement_id, actor_user_id, action_type, 
 }
 // GET /admin/migrations (admin-only)
 fastify.get('/admin/migrations', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
 
   const limit = Math.max(1, Math.min(50, Number(request.query?.limit) || 20));
@@ -445,7 +481,7 @@ async function exportTableToJson(table) {
 
 // POST /admin/backup (admin-only)
 fastify.post('/admin/backup', async (request, reply) => {
-  const authedUser = await requireStaffUser(request, reply);
+  const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
 
   const started_at = nowIso();
@@ -493,7 +529,7 @@ fastify.post('/admin/backup', async (request, reply) => {
   if (status === 'success') {
     return reply.send({ ok: true, message, backupFile, details });
   } else {
-    return reply.code(500).send({ error: message, details });
+    return reply.code(500).send({ error: message });
   }
 });
 // ...existing code...
@@ -597,6 +633,7 @@ function getStaffRoleForEmail(email) {
   return null;
 }
 
+// NOTE: Debug routes are dev-only; keep disabled unless explicitly enabled.
 const DEBUG_ROUTES_ENABLED = (() => {
   const raw = String(process.env.ENABLE_DEBUG_ROUTES || '').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes';
@@ -683,6 +720,7 @@ const memoryMovementResourcesByMovement = new Map();
 const memoryMovementEventsByMovement = new Map();
 const memoryMovementPetitionsByMovement = new Map();
 const memoryMovementImpactUpdatesByMovement = new Map();
+const memoryMovementEvidenceByMovement = new Map();
 const memoryMovementTasksByMovement = new Map();
 const memoryMovementDiscussionsByMovement = new Map();
 
@@ -1275,6 +1313,35 @@ async function ensureMovementExtrasTables() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_movement_discussions_movement_created_at ON movement_discussions (movement_id, created_at DESC)');
 }
 
+async function ensureMovementEvidenceTable() {
+  if (!hasDatabaseUrl) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS movement_evidence (
+      id TEXT PRIMARY KEY,
+      movement_id TEXT NOT NULL,
+      submitter_email TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      media_type TEXT NOT NULL,
+      url TEXT NOT NULL,
+      text TEXT NULL,
+      caption TEXT NULL,
+      file_name TEXT NULL,
+      mime_type TEXT NULL,
+      file_size INT NULL,
+      verified_by_email TEXT NULL,
+      verified_at TIMESTAMPTZ NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query('ALTER TABLE movement_evidence ADD COLUMN IF NOT EXISTS text TEXT NULL');
+  await pool.query('ALTER TABLE movement_evidence ALTER COLUMN url DROP NOT NULL');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_movement_evidence_movement_created_at ON movement_evidence (movement_id, created_at DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_movement_evidence_status ON movement_evidence (status)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_movement_evidence_submitter ON movement_evidence (submitter_email)');
+}
+
 async function ensureCollaboratorsTable() {
   if (!hasDatabaseUrl) return;
 
@@ -1460,6 +1527,17 @@ function findMemoryResourceById(resourceId) {
   return null;
 }
 
+function findMemoryEvidenceById(evidenceId) {
+  const id = String(evidenceId || '').trim();
+  if (!id) return null;
+  for (const list of memoryMovementEvidenceByMovement.values()) {
+    if (!Array.isArray(list)) continue;
+    const found = list.find((e) => String(e?.id) === id);
+    if (found) return found;
+  }
+  return null;
+}
+
 function memoryUpdateResourceById(resourceId, patch) {
   const id = String(resourceId || '').trim();
   if (!id) return null;
@@ -1471,6 +1549,22 @@ function memoryUpdateResourceById(resourceId, patch) {
     const next = { ...cur, ...(patch || {}) };
     list[idx] = next;
     memoryMovementResourcesByMovement.set(String(movementId), list);
+    return next;
+  }
+  return null;
+}
+
+function memoryUpdateEvidenceById(evidenceId, patch) {
+  const id = String(evidenceId || '').trim();
+  if (!id) return null;
+  for (const [movementId, list] of memoryMovementEvidenceByMovement.entries()) {
+    if (!Array.isArray(list)) continue;
+    const idx = list.findIndex((e) => String(e?.id) === id);
+    if (idx === -1) continue;
+    const cur = list[idx];
+    const next = { ...cur, ...(patch || {}) };
+    list[idx] = next;
+    memoryMovementEvidenceByMovement.set(String(movementId), list);
     return next;
   }
   return null;
@@ -1606,6 +1700,31 @@ async function getMovementOwnerEmail(movementId) {
   try {
     const res = await pool.query('SELECT author_email FROM movements WHERE id = $1 LIMIT 1', [id]);
     return normalizeEmail(res.rows?.[0]?.author_email);
+  } catch {
+    return null;
+  }
+}
+
+async function getMovementCollaboratorRole(movementId, userEmail) {
+  const id = String(movementId || '').trim();
+  const email = normalizeEmail(userEmail);
+  if (!id || !email) return null;
+
+  if (!hasDatabaseUrl) {
+    const list = memoryListCollaborators(id);
+    const record = Array.isArray(list)
+      ? list.find((c) => normalizeEmail(c?.user_email) === email && String(c?.status || '') === 'accepted')
+      : null;
+    return record?.role ? String(record.role) : null;
+  }
+
+  try {
+    await ensureCollaboratorsTable();
+    const res = await pool.query(
+      'SELECT role FROM collaborators WHERE movement_id = $1 AND user_email = $2 AND status = $3 LIMIT 1',
+      [id, email, 'accepted']
+    );
+    return res.rows?.[0]?.role ? String(res.rows[0].role) : null;
   } catch {
     return null;
   }
@@ -1924,6 +2043,19 @@ async function requireStaffUser(request, reply) {
   return user;
 }
 
+async function requireAdminUser(request, reply) {
+  const user = await requireStaffUser(request, reply);
+  if (!user) return null;
+
+  const role = getStaffRoleForEmail(user.email);
+  if (role !== 'admin') {
+    reply.code(403).send({ error: 'Admin access required' });
+    return null;
+  }
+
+  return user;
+}
+
 function buildInsertForMovements(columns, payload) {
   const byName = new Map(columns.map((c) => [c.column_name, c]));
 
@@ -2070,7 +2202,7 @@ async function ensureMovementExtrasColumns() {
   }
 }
 
-fastify.post('/uploads', async (request, reply) => {
+fastify.post('/uploads', { config: { rateLimit: RATE_LIMITS.upload } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -2119,11 +2251,6 @@ fastify.post('/uploads', async (request, reply) => {
   });
 });
 
-fastify.get('/health', async (request, reply) => {
-  // Simple healthcheck: no secrets, just basic status
-  return { ok: true, status: 'healthy', uptime: process.uptime() };
-});
-
 // Platform role declaration acknowledgment
 fastify.get('/platform-acknowledgment/me', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
@@ -2155,7 +2282,7 @@ fastify.post('/platform-acknowledgment/me', async (request, reply) => {
   const schema = z.object({ accepted: z.literal(true) });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid payload' });
   }
 
   const email = normalizeEmail(authedUser.email);
@@ -2190,7 +2317,7 @@ fastify.post('/me/public-key', async (request, reply) => {
   const schema = z.object({ public_key: z.string().min(20).max(5000) });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid payload' });
   }
 
   const email = normalizeEmail(authedUser.email);
@@ -2244,150 +2371,166 @@ fastify.get('/public-keys/:email', async (request, reply) => {
   }
 });
 
-fastify.get('/db-health', async () => {
-  const result = await pool.query('SELECT NOW()');
-  return { dbTime: result.rows[0] };
-});
-
-fastify.get('/movements', async (request, _reply) => {
-  function parseIntParam(value, fallback, { min = 0, max = 500 } = {}) {
-    const n = Number.parseInt(String(value ?? ''), 10);
-    if (!Number.isFinite(n)) return fallback;
-    const clamped = Math.max(min, Math.min(max, n));
-    return clamped;
-  }
-
-  function normalizeFields(value) {
-    if (!value) return null;
-    const list = String(value)
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return list.length ? Array.from(new Set(list)) : null;
-  }
-
-  function stripHtml(text) {
-    return String(text || '')
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  function buildSummaryFromDescription(description) {
-    const plain = stripHtml(description);
-    if (!plain) return null;
-    return plain.length > 200 ? `${plain.slice(0, 200)}…` : plain;
-  }
-
-  function projectRecord(record, fields) {
-    if (!fields) return record;
-    const out = {};
-    const want = new Set(['id', ...fields]);
-
-    for (const key of want) {
-      if (key === 'summary') {
-        const summary =
-          record?.summary != null
-            ? String(record.summary)
-            : buildSummaryFromDescription(record?.description);
-        if (summary != null) out.summary = summary;
-        continue;
-      }
-
-      if (Object.prototype.hasOwnProperty.call(record, key)) {
-        out[key] = record[key];
-        continue;
-      }
-
-      // Back-compat aliases
-      if (key === 'created_date' && record?.created_at && out.created_date == null) {
-        out.created_date = record.created_at;
-      }
+// NOTE: /movements is hardened to never 500 due to query params; on error it falls back to a safe test movement.
+fastify.get('/movements', async (request, reply) => {
+  try {
+    function parseIntParam(value, fallback, { min = 0, max = 500 } = {}) {
+      const n = Number.parseInt(String(value ?? ''), 10);
+      if (!Number.isFinite(n)) return fallback;
+      const clamped = Math.max(min, Math.min(max, n));
+      return clamped;
     }
 
-    return out;
-  }
+    function normalizeFields(value) {
+      if (!value) return null;
+      const list = String(value)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return list.length ? Array.from(new Set(list)) : null;
+    }
 
-  const limit = parseIntParam(request.query?.limit, 50, { min: 1, max: 100 });
-  const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
-  const fields = normalizeFields(request.query?.fields);
+    function stripHtml(text) {
+      return String(text || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
 
-  function sortByCreatedDesc(a, b) {
-    const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
-    const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
-    return tb - ta;
-  }
+    function buildSummaryFromDescription(description) {
+      const plain = stripHtml(description);
+      if (!plain) return null;
+      return plain.length > 200 ? `${plain.slice(0, 200)}…` : plain;
+    }
 
-  if (!hasDatabaseUrl) {
-    const merged = memoryMovements
-      .map((m) => {
-        const summary = getMemoryVoteSummary(m?.id, null);
-        return {
-          ...m,
-          upvotes: summary.upvotes,
-          downvotes: summary.downvotes,
-          score: summary.score,
-        };
-      })
-      .sort(sortByCreatedDesc);
+    function projectRecord(record, fields) {
+      if (!fields) return record;
+      const out = {};
+      const want = new Set(['id', ...fields]);
 
-    const page = merged.slice(offset, offset + limit);
-    return page.map((m) => projectRecord(m, fields));
-  }
+      for (const key of want) {
+        if (key === 'summary') {
+          const summary =
+            record?.summary != null
+              ? String(record.summary)
+              : buildSummaryFromDescription(record?.description);
+          if (summary != null) out.summary = summary;
+          continue;
+        }
 
-  try {
-    await ensureVotesTable();
-    const result = await pool.query(
-      `SELECT
-         m.*,
-         COALESCE(v.upvotes, 0)::int AS upvotes,
-         COALESCE(v.downvotes, 0)::int AS downvotes,
-         (COALESCE(v.upvotes, 0) - COALESCE(v.downvotes, 0))::int AS score
-       FROM movements m
-       LEFT JOIN (
-         SELECT
-           movement_id,
-           COALESCE(SUM(CASE WHEN value = 1 THEN 1 ELSE 0 END), 0)::int AS upvotes,
-           COALESCE(SUM(CASE WHEN value = -1 THEN 1 ELSE 0 END), 0)::int AS downvotes
-         FROM movement_votes
-         GROUP BY movement_id
-       ) v ON v.movement_id = m.id
-       ORDER BY m.created_at DESC
-       LIMIT 500`
-    );
+        if (Object.prototype.hasOwnProperty.call(record, key)) {
+          out[key] = record[key];
+          continue;
+        }
 
-    const rows = Array.isArray(result.rows) ? result.rows : [];
-    const seen = new Set(rows.map((r) => String(r?.id)));
-    const mergedMemory = memoryMovements
-      .filter((m) => !seen.has(String(m?.id)))
-      .map((m) => {
-        const summary = getMemoryVoteSummary(m?.id, null);
-        return {
-          ...m,
-          upvotes: summary.upvotes,
-          downvotes: summary.downvotes,
-          score: summary.score,
-        };
-      });
+        // Back-compat aliases
+        if (key === 'created_date' && record?.created_at && out.created_date == null) {
+          out.created_date = record.created_at;
+        }
+      }
 
-    const merged = [...rows, ...mergedMemory].sort(sortByCreatedDesc);
-    const page = merged.slice(offset, offset + limit);
-    return page.map((m) => projectRecord(m, fields));
-  } catch (e) {
-    fastify.log.warn({ err: e }, 'DB query failed for GET /movements; using memory fallback');
-    const merged = memoryMovements
-      .map((m) => {
-        const summary = getMemoryVoteSummary(m?.id, null);
-        return {
-          ...m,
-          upvotes: summary.upvotes,
-          downvotes: summary.downvotes,
-          score: summary.score,
-        };
-      })
-      .sort(sortByCreatedDesc);
-    const page = merged.slice(offset, offset + limit);
-    return page.map((m) => projectRecord(m, fields));
+      return out;
+    }
+
+    const limit = parseIntParam(request.query?.limit, 20, { min: 1, max: 100 });
+    const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
+    const fields = normalizeFields(request.query?.fields);
+
+    function sortByCreatedDesc(a, b) {
+      const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+      return tb - ta;
+    }
+
+    if (!hasDatabaseUrl) {
+      const merged = memoryMovements
+        .map((m) => {
+          const summary = getMemoryVoteSummary(m?.id, null);
+          return {
+            ...m,
+            upvotes: summary.upvotes,
+            downvotes: summary.downvotes,
+            score: summary.score,
+          };
+        })
+        .sort(sortByCreatedDesc);
+
+      const page = merged.slice(offset, offset + limit);
+      return reply.send(page.map((m) => projectRecord(m, fields)));
+    }
+
+    try {
+      await ensureVotesTable();
+      const result = await pool.query(
+        `SELECT
+           m.*,
+           COALESCE(v.upvotes, 0)::int AS upvotes,
+           COALESCE(v.downvotes, 0)::int AS downvotes,
+           (COALESCE(v.upvotes, 0) - COALESCE(v.downvotes, 0))::int AS score
+         FROM movements m
+         LEFT JOIN (
+           SELECT
+             movement_id,
+             COALESCE(SUM(CASE WHEN value = 1 THEN 1 ELSE 0 END), 0)::int AS upvotes,
+             COALESCE(SUM(CASE WHEN value = -1 THEN 1 ELSE 0 END), 0)::int AS downvotes
+           FROM movement_votes
+           GROUP BY movement_id
+         ) v ON v.movement_id = m.id
+         ORDER BY m.created_at DESC
+         LIMIT 500`
+      );
+
+      const rows = Array.isArray(result.rows) ? result.rows : [];
+      const seen = new Set(rows.map((r) => String(r?.id)));
+      const mergedMemory = memoryMovements
+        .filter((m) => !seen.has(String(m?.id)))
+        .map((m) => {
+          const summary = getMemoryVoteSummary(m?.id, null);
+          return {
+            ...m,
+            upvotes: summary.upvotes,
+            downvotes: summary.downvotes,
+            score: summary.score,
+          };
+        });
+
+      const merged = [...rows, ...mergedMemory].sort(sortByCreatedDesc);
+      const page = merged.slice(offset, offset + limit);
+      return reply.send(page.map((m) => projectRecord(m, fields)));
+    } catch (e) {
+      fastify.log.warn({ err: e }, 'DB query failed for GET /movements; using memory fallback');
+      const merged = memoryMovements
+        .map((m) => {
+          const summary = getMemoryVoteSummary(m?.id, null);
+          return {
+            ...m,
+            upvotes: summary.upvotes,
+            downvotes: summary.downvotes,
+            score: summary.score,
+          };
+        })
+        .sort(sortByCreatedDesc);
+      const page = merged.slice(offset, offset + limit);
+      return reply.send(page.map((m) => projectRecord(m, fields)));
+    }
+  } catch (err) {
+    fastify.log.error({ err }, 'GET /movements failed; returning fallback');
+    return reply.send({
+      ok: true,
+      movements: [
+        {
+          id: 'test-movement-1',
+          title: 'Test Movement',
+          description: 'This is a test movement served from migration-mode fallback storage.',
+          tags: ['demo'],
+          created_at: new Date().toISOString(),
+          momentum_score: 0,
+          upvotes: 0,
+          downvotes: 0,
+          score: 0,
+        },
+      ],
+    });
   }
 });
 
@@ -2495,7 +2638,7 @@ fastify.post('/movements/:id/follow', async (request, reply) => {
   const schema = z.object({ following: z.boolean() });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid follow payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid follow payload' });
   }
 
   const email = normalizeEmail(authedUser.email);
@@ -2637,7 +2780,7 @@ fastify.patch('/movements/:id/comment-settings', async (request, reply) => {
   });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid settings payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid settings payload' });
   }
 
   const patch = parsed.data;
@@ -2764,7 +2907,7 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
   }
 });
 
-fastify.post('/movements/:id/comments', async (request, reply) => {
+fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.commentCreate } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -2774,7 +2917,7 @@ fastify.post('/movements/:id/comments', async (request, reply) => {
   const schema = z.object({ content: z.string().min(1).max(2000) });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid comment payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid comment payload' });
   }
 
   const email = normalizeEmail(authedUser.email);
@@ -3002,7 +3145,7 @@ fastify.post('/movements/:id/resources', async (request, reply) => {
       return /^https?:\/\//i.test(s);
     }, { message: 'file_url must be a valid URL or /uploads/ path' });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3056,6 +3199,9 @@ fastify.post('/movements/:id/resources', async (request, reply) => {
 });
 
 fastify.post('/resources/:id/download', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
   const resourceId = request.params?.id ? String(request.params.id) : null;
   if (!resourceId) return reply.code(400).send({ error: 'Resource id is required' });
 
@@ -3120,6 +3266,297 @@ fastify.delete('/resources/:id', async (request, reply) => {
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to delete resource');
     return reply.code(500).send({ error: 'Failed to delete resource' });
+  }
+});
+
+fastify.get('/movements/:id/evidence', async (request, reply) => {
+  const id = request.params?.id ? String(request.params.id) : null;
+  if (!id) return reply.code(400).send({ error: 'Movement id is required' });
+
+  function parseIntParam(value, fallback, { min = 0, max = 200 } = {}) {
+    const n = Number.parseInt(String(value ?? ''), 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function normalizeFields(value) {
+    if (!value) return null;
+    const list = String(value)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return list.length ? Array.from(new Set(list)) : null;
+  }
+
+  function projectRecord(record, fields) {
+    if (!fields) return record;
+    const out = {};
+    const want = new Set(['id', ...fields]);
+    for (const key of want) {
+      if (Object.prototype.hasOwnProperty.call(record, key)) out[key] = record[key];
+    }
+    return out;
+  }
+
+  const allowedStatuses = new Set(['approved', 'pending', 'rejected', 'all']);
+  const requestedStatus = request.query?.status ? String(request.query.status).toLowerCase() : 'approved';
+  const status = allowedStatuses.has(requestedStatus) ? requestedStatus : 'approved';
+
+  const limit = parseIntParam(request.query?.limit, 20, { min: 1, max: 200 });
+  const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
+  const fields = normalizeFields(request.query?.fields);
+
+  let requesterEmail = null;
+  let isReviewer = false;
+  if (status !== 'approved') {
+    const authedUser = await requireVerifiedUser(request, reply);
+    if (!authedUser) return;
+    requesterEmail = normalizeEmail(authedUser.email);
+  } else {
+    requesterEmail = await tryGetUserEmailFromRequest(request);
+  }
+
+  if (requesterEmail) {
+    const ownerEmail = await getMovementOwnerEmail(id);
+    const isAdmin = !!(requesterEmail && ADMIN_EMAILS.has(requesterEmail));
+    const collaboratorRole = await getMovementCollaboratorRole(id, requesterEmail);
+    const canReviewRole = collaboratorRole === 'admin' || collaboratorRole === 'editor';
+    isReviewer = !!(ownerEmail && requesterEmail === ownerEmail) || isAdmin || canReviewRole;
+  }
+
+  if (status !== 'approved' && !isReviewer) {
+    return reply.code(403).send({ error: 'Not allowed' });
+  }
+
+  function sortByCreatedDesc(a, b) {
+    const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+    const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+    return tb - ta;
+  }
+
+  function stripSensitive(record) {
+    if (!record || typeof record !== 'object') return record;
+    const { submitter_email, verified_by_email, ...rest } = record;
+    return rest;
+  }
+
+  if (!hasDatabaseUrl) {
+    const list = memoryListExtras(memoryMovementEvidenceByMovement, id).sort(sortByCreatedDesc);
+    const filtered = status === 'all' ? list : list.filter((e) => String(e?.status || 'pending') === status);
+    const page = filtered.slice(offset, offset + limit).map((e) => projectRecord(e, fields));
+    const safe = status === 'approved' && !isReviewer ? page.map(stripSensitive) : page;
+    return reply.send({ evidence: safe });
+  }
+
+  try {
+    await ensureMovementEvidenceTable();
+    const values = [String(id)];
+    let where = 'movement_id = $1';
+    if (status !== 'all') {
+      values.push(status);
+      where += ` AND status = $${values.length}`;
+    }
+    values.push(limit, offset);
+    const limitIdx = values.length - 1;
+    const offsetIdx = values.length;
+    const res = await pool.query(
+      `SELECT *
+       FROM movement_evidence
+       WHERE ${where}
+       ORDER BY created_at DESC
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      values
+    );
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const projected = rows.map((e) => projectRecord(e, fields));
+    const safe = status === 'approved' && !isReviewer ? projected.map(stripSensitive) : projected;
+    return reply.send({ evidence: safe });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to load movement evidence');
+    return reply.code(500).send({ error: 'Failed to load evidence' });
+  }
+});
+
+fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evidenceSubmit } }, async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const id = request.params?.id ? String(request.params.id) : null;
+  if (!id) return reply.code(400).send({ error: 'Movement id is required' });
+
+  const schema = z
+    .object({
+      media_type: z.enum(['image', 'link', 'video', 'text']),
+      url: z.string().max(800).optional().nullable(),
+      text: z.string().max(1200).optional().nullable(),
+      caption: z.string().max(500).optional().nullable(),
+      file_name: z.string().max(260).optional().nullable(),
+      mime_type: z.string().max(120).optional().nullable(),
+      file_size: z.number().int().min(1).max(MAX_UPLOAD_BYTES).optional().nullable(),
+    })
+    .refine((v) => {
+      if (v.media_type === 'text') return !!(v.text && String(v.text).trim());
+      return !!(v.url && String(v.url).trim());
+    }, { message: 'Evidence content is required' });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const mediaType = String(parsed.data.media_type);
+  const rawUrl = parsed.data.url ? String(parsed.data.url).trim() : '';
+  const rawText = parsed.data.text ? String(parsed.data.text).trim() : '';
+
+  function normalizeEvidenceUrl(value) {
+    const v = String(value || '').trim();
+    if (!v) return null;
+    if (v.startsWith('/uploads/')) return v;
+    try {
+      const u = new URL(v);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  const url = rawUrl ? normalizeEvidenceUrl(rawUrl) : null;
+  if (mediaType !== 'text' && !url) {
+    return reply.code(400).send({ error: 'Evidence URL must be http(s) or /uploads/ path' });
+  }
+  if (mediaType === 'text' && !rawText) {
+    return reply.code(400).send({ error: 'Evidence text is required' });
+  }
+
+  const mime = parsed.data.mime_type ? String(parsed.data.mime_type).trim().toLowerCase() : null;
+  const allowedImageMimes = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif']);
+
+  if (mediaType === 'image') {
+    if (mime && !allowedImageMimes.has(mime)) {
+      return reply.code(415).send({ error: 'Unsupported image type' });
+    }
+  } else if (mediaType !== 'text') {
+    if (url.startsWith('/uploads/')) {
+      return reply.code(400).send({ error: 'Uploads are only allowed for image evidence' });
+    }
+  }
+
+  const ownerEmail = await getMovementOwnerEmail(id);
+  const isOwner = !!(ownerEmail && email === ownerEmail);
+  const now = nowIso();
+
+  const row = {
+    id: randomUUID(),
+    movement_id: String(id),
+    submitter_email: email,
+    status: isOwner ? 'approved' : 'pending',
+    media_type: mediaType,
+    url: mediaType === 'text' ? null : url,
+    text: mediaType === 'text' ? cleanText(rawText, 1200) : null,
+    caption: parsed.data.caption ? cleanText(parsed.data.caption, 500) : null,
+    file_name: parsed.data.file_name ? cleanText(parsed.data.file_name, 260) : null,
+    mime_type: mime || null,
+    file_size: typeof parsed.data.file_size === 'number' ? parsed.data.file_size : null,
+    verified_by_email: isOwner ? email : null,
+    verified_at: isOwner ? now : null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  if (!hasDatabaseUrl) {
+    return reply.code(201).send({ evidence: memoryAppendExtra(memoryMovementEvidenceByMovement, id, row) });
+  }
+
+  try {
+    await ensureMovementEvidenceTable();
+    const inserted = await pool.query(
+      `INSERT INTO movement_evidence (id, movement_id, submitter_email, status, media_type, url, text, caption, file_name, mime_type, file_size, verified_by_email, verified_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING *`,
+      [
+        row.id,
+        row.movement_id,
+        row.submitter_email,
+        row.status,
+        row.media_type,
+        row.url,
+        row.text,
+        row.caption,
+        row.file_name,
+        row.mime_type,
+        row.file_size,
+        row.verified_by_email,
+        row.verified_at,
+      ]
+    );
+    return reply.code(201).send({ evidence: inserted.rows?.[0] || row });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to submit movement evidence');
+    return reply.code(500).send({ error: 'Failed to submit evidence' });
+  }
+});
+
+fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const movementId = request.params?.id ? String(request.params.id) : null;
+  const evidenceId = request.params?.evidenceId ? String(request.params.evidenceId) : null;
+  if (!movementId) return reply.code(400).send({ error: 'Movement id is required' });
+  if (!evidenceId) return reply.code(400).send({ error: 'Evidence id is required' });
+
+  const schema = z.object({ status: z.enum(['approved', 'rejected']) });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const ownerEmail = await getMovementOwnerEmail(movementId);
+  const isAdmin = !!(email && ADMIN_EMAILS.has(email));
+  const collaboratorRole = await getMovementCollaboratorRole(movementId, email);
+  const canReviewRole = collaboratorRole === 'admin' || collaboratorRole === 'editor';
+  if (!ownerEmail || (!isAdmin && ownerEmail !== email && !canReviewRole)) {
+    return reply.code(403).send({ error: 'Only the movement owner or team can verify evidence' });
+  }
+
+  const status = parsed.data.status;
+  const now = nowIso();
+
+  if (!hasDatabaseUrl) {
+    const existing = findMemoryEvidenceById(evidenceId);
+    if (!existing) return reply.code(404).send({ error: 'Evidence not found' });
+    if (String(existing.movement_id) !== String(movementId)) {
+      return reply.code(404).send({ error: 'Evidence not found' });
+    }
+    const updated = memoryUpdateEvidenceById(evidenceId, {
+      status,
+      verified_by_email: email,
+      verified_at: now,
+      updated_at: now,
+    });
+    return reply.send({ evidence: updated || { id: evidenceId } });
+  }
+
+  try {
+    await ensureMovementEvidenceTable();
+    const updated = await pool.query(
+      `UPDATE movement_evidence
+       SET status = $2,
+           verified_by_email = $3,
+           verified_at = $4,
+           updated_at = NOW()
+       WHERE id = $1 AND movement_id = $5
+       RETURNING *`,
+      [String(evidenceId), status, email, now, String(movementId)]
+    );
+    const row = updated.rows?.[0] || null;
+    if (!row) return reply.code(404).send({ error: 'Evidence not found' });
+    return reply.send({ evidence: row });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to verify movement evidence');
+    return reply.code(500).send({ error: 'Failed to verify evidence' });
   }
 });
 
@@ -3193,7 +3630,7 @@ fastify.post('/movements/:id/events', async (request, reply) => {
     description: z.string().max(1000).optional(),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3294,7 +3731,7 @@ fastify.post('/events/:id/rsvp', async (request, reply) => {
     status: z.enum(['going', 'interested', 'cancel']),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3354,7 +3791,7 @@ fastify.post('/events/:id/attendance', async (request, reply) => {
     attended: z.boolean(),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3454,7 +3891,7 @@ fastify.post('/movements/:id/petitions', async (request, reply) => {
     goal_signatures: z.number().int().min(1).max(100000000).optional(),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3552,7 +3989,7 @@ fastify.get('/petitions/:id/signatures', async (request, reply) => {
   }
 });
 
-fastify.post('/petitions/:id/sign', async (request, reply) => {
+fastify.post('/petitions/:id/sign', { config: { rateLimit: RATE_LIMITS.petitionSign } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -3565,7 +4002,7 @@ fastify.post('/petitions/:id/sign', async (request, reply) => {
     is_public: z.boolean().optional(),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3728,7 +4165,7 @@ fastify.post('/movements/:id/impact', async (request, reply) => {
 
   const schema = z.object({ title: z.string().max(120).optional(), content: z.string().min(1).max(2000) });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3833,7 +4270,7 @@ fastify.post('/movements/:id/tasks', async (request, reply) => {
     assigned_to_email: z.string().email().optional(),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -3881,7 +4318,7 @@ fastify.patch('/tasks/:id', async (request, reply) => {
     assigned_to_email: z.string().email().optional().nullable(),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const myEmail = normalizeEmail(authedUser.email);
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
@@ -3998,7 +4435,7 @@ fastify.post('/movements/:id/discussions', async (request, reply) => {
 
   const schema = z.object({ message: z.string().min(1).max(2000) });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -4043,7 +4480,7 @@ fastify.post('/movements/:id/vote', async (request, reply) => {
 
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid vote payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid vote payload' });
   }
 
   const value = parsed.data.value;
@@ -4088,7 +4525,7 @@ fastify.post('/movements/:id/vote', async (request, reply) => {
   }
 });
 
-fastify.post('/movements', async (request, reply) => {
+fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -4139,16 +4576,16 @@ fastify.post('/movements', async (request, reply) => {
         )
         .optional(),
     })
-    .refine((v) => !!(v.description || v.summary), {
+    .refine((v) => !!(v.description || v.summary || v.description_html), {
       message: 'description is required',
       path: ['description'],
     });
 
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
+    fastify.log.warn({ issues: parsed.error?.issues }, 'Invalid movement payload');
     return reply.code(400).send({
       error: 'Invalid movement payload',
-      details: parsed.error.issues,
     });
   }
 
@@ -4315,7 +4752,7 @@ fastify.delete('/movements/:id', async (request, reply) => {
   }
 });
 
-fastify.post('/reports', async (request, reply) => {
+fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -4329,7 +4766,7 @@ fastify.post('/reports', async (request, reply) => {
 
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid report payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid report payload' });
   }
 
   if (!hasDatabaseUrl) {
@@ -4437,7 +4874,7 @@ fastify.patch('/reports/:id', async (request, reply) => {
 
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid update payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid update payload' });
   }
 
   if (parsed.data.action_taken !== undefined && staffRole !== 'admin') {
@@ -4534,7 +4971,7 @@ fastify.post('/incidents', async (request, reply) => {
 
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid incident payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid incident payload' });
   }
 
   const created = await logIncident({
@@ -4756,6 +5193,11 @@ if (DEBUG_ROUTES_ENABLED) {
       canSetActionTaken: role === 'admin',
     });
   });
+
+  fastify.get('/db-health', async () => {
+    const result = await pool.query('SELECT NOW()');
+    return { dbTime: result.rows[0] };
+  });
 }
 
 fastify.post('/conversations', async (request, reply) => {
@@ -4765,7 +5207,7 @@ fastify.post('/conversations', async (request, reply) => {
   const schema = z.object({ recipient_email: z.string().email() });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid payload' });
   }
 
   const myEmail = normalizeEmail(authedUser.email);
@@ -4834,7 +5276,7 @@ fastify.post('/conversations/:id/request', async (request, reply) => {
   const schema = z.object({ action: z.enum(['accept', 'decline', 'block']) });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid payload' });
   }
 
   if (!hasDatabaseUrl) {
@@ -4994,14 +5436,14 @@ fastify.get('/conversations/:id/messages', async (request, reply) => {
   }
 });
 
-fastify.post('/conversations/:id/messages', async (request, reply) => {
+fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.messageSend } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
   const schema = z.object({ body: z.string().min(1).max(4000) });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid payload' });
   }
 
   const myEmail = normalizeEmail(authedUser.email);
@@ -5123,7 +5565,7 @@ fastify.post('/users/:email/follow', async (request, reply) => {
   const schema = z.object({ following: z.boolean() });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid payload' });
   }
 
   if (!hasDatabaseUrl) {
@@ -5298,7 +5740,7 @@ fastify.post('/movements/:id/collaborators/invite', async (request, reply) => {
     role: z.enum(['admin', 'editor', 'viewer']).optional(),
   });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const inviterEmail = normalizeEmail(authedUser.email);
   if (!inviterEmail) return reply.code(400).send({ error: 'User email is required' });
@@ -5440,7 +5882,7 @@ fastify.patch('/collaborators/:id', async (request, reply) => {
 
   const schema = z.object({ role: z.enum(['admin', 'editor', 'viewer']) });
   const parsed = schema.safeParse(request.body ?? {});
-  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
@@ -5892,7 +6334,7 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
   const schema = z.object({ emoji: z.string().min(1).max(16) });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
-    return reply.code(400).send({ error: 'Invalid payload', details: parsed.error.issues });
+    return reply.code(400).send({ error: 'Invalid payload' });
   }
 
   const myEmail = normalizeEmail(authedUser.email);
@@ -5979,8 +6421,15 @@ const start = async () => {
         fastify.log.warn({ err: e }, 'Failed to ensure movement extras tables at startup');
       }
     }
-    await fastify.listen({ port: PORT, host: HOST });
-    fastify.log.info(`Server running on ${HOST}:${PORT}`);
+    fastify
+      .listen({ port: PORT, host: HOST })
+      .then(() => {
+        fastify.log.info(`People Power API listening on http://${HOST}:${PORT}`);
+      })
+      .catch((err) => {
+        fastify.log.error(err);
+        process.exit(1);
+      });
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

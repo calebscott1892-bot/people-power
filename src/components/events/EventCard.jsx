@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { entities } from "@/api/appClient";
+import { logError } from '@/utils/logError';
 
 const eventTypeColors = {
   rally: 'bg-red-100 text-red-700 border-red-300',
@@ -60,7 +61,7 @@ export default function EventCard({ event, currentUser, isPast = false }) {
       toast.success('RSVP updated!');
     },
     onError: (e) => {
-      console.warn('[EventCard] RSVP failed', e);
+      logError(e, 'Event RSVP failed', { eventId: event?.id });
       toast.error('Could not update RSVP. Please try again.');
     },
   });

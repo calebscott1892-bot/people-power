@@ -195,7 +195,7 @@ export default function ReportButton({
           const res = await uploadFile(evidenceFile, { accessToken });
           evidenceFileUrl = res?.url ? String(res.url) : null;
         } catch (e) {
-          console.warn('[ReportButton] evidence upload failed', e);
+          logError(e, 'ReportButton evidence upload failed', { contentType: String(contentType), contentId: safeContentId });
           toast.error('Failed to upload evidence');
           return;
         }
