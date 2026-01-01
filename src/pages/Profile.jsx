@@ -13,6 +13,7 @@ import TagBadge from '../components/shared/TagBadge';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchMovementsPage, fetchMyFollowedMovements } from '@/api/movementsClient';
 import EditProfileModal from '../components/profile/EditProfileModal';
+import ShareButton from '@/components/shared/ShareButton';
 import { entities } from '@/api/appClient';
 import { fetchMyFollowers, fetchMyFollowingUsers } from '@/api/userFollowsClient';
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
@@ -293,7 +294,7 @@ export default function Profile() {
               </div>
             </div>
 
-            <div className="sm:pt-4">
+            <div className="sm:pt-4 flex flex-col sm:flex-row gap-3">
               <Button
                 onClick={() => setShowEditModal(true)}
                 variant="outline"
@@ -301,6 +302,7 @@ export default function Profile() {
               >
                 Edit
               </Button>
+              <ShareButton profile={userProfile} label="Share profile" variant="outline" />
             </div>
           </div>
 

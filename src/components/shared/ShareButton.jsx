@@ -15,12 +15,13 @@ import {
 
 const NEW_MOVEMENT_EXTERNAL_SHARE_COOLDOWN_MS = 15 * 60 * 1000;
 
-export default function ShareButton({ movement, variant = "default" }) {
+export default function ShareButton({ movement, profile, variant = "default", label }) {
   const { user, session } = useAuth();
   const [showDialog, setShowDialog] = useState(false);
   const [dmOpen, setDmOpen] = useState(false);
   const [recipientEmail, setRecipientEmail] = useState('');
   const [sendingDm, setSendingDm] = useState(false);
+  const targetType = movement ? 'movement' : profile ? 'profile' : 'movement';
 
   const e2eePromiseRef = useRef(null);
   const loadE2EE = async () => {
@@ -35,18 +36,18 @@ export default function ShareButton({ movement, variant = "default" }) {
 
   const movementCreatedAt = movement?.created_at || movement?.created_date || movement?.createdAt || null;
   const movementAgeMs = useMemo(() => {
-    if (!movementCreatedAt) return null;
+    if (targetType !== 'movement' || !movementCreatedAt) return null;
     const t = new Date(movementCreatedAt).getTime();
     if (!Number.isFinite(t)) return null;
     return Date.now() - t;
-  }, [movementCreatedAt]);
+  }, [movementCreatedAt, targetType]);
 
   const externalShareRemainingMs = useMemo(() => {
     if (movementAgeMs === null) return 0;
     return Math.max(0, NEW_MOVEMENT_EXTERNAL_SHARE_COOLDOWN_MS - movementAgeMs);
   }, [movementAgeMs]);
 
-  const externalShareLocked = externalShareRemainingMs > 0;
+  const externalShareLocked = targetType === 'movement' && externalShareRemainingMs > 0;
   const externalShareRemainingLabel = useMemo(() => {
     if (!externalShareLocked) return '';
     const minutes = Math.max(1, Math.ceil(externalShareRemainingMs / (60 * 1000)));
@@ -54,20 +55,34 @@ export default function ShareButton({ movement, variant = "default" }) {
   }, [externalShareLocked, externalShareRemainingMs]);
 
   const safeMovementId = movement?.id ?? movement?._id ?? null;
+  const profileUsername = String(profile?.username || profile?.handle || '').trim().replace(/^@/, '');
   const shareUrl = useMemo(() => {
     try {
-      if (!safeMovementId) return window.location.href;
-      return `${window.location.origin}/movements/${encodeURIComponent(String(safeMovementId))}`;
+      if (targetType === 'movement') {
+        if (!safeMovementId) return window.location.href;
+        return `${window.location.origin}/movements/${encodeURIComponent(String(safeMovementId))}`;
+      }
+      if (targetType === 'profile' && profileUsername) {
+        return `${window.location.origin}/u/${encodeURIComponent(profileUsername)}`;
+      }
+      return window.location.href;
     } catch {
       return '';
     }
-  }, [safeMovementId]);
+  }, [safeMovementId, targetType, profileUsername]);
 
-  const shareTitle = String(movement?.title || movement?.name || 'Movement');
-  const shareDesc = String(movement?.description || movement?.summary || '').trim();
+  const profileDisplayName = String(profile?.display_name || profile?.full_name || '').trim();
+  const shareTitle =
+    targetType === 'profile'
+      ? (profileDisplayName || (profileUsername ? `@${profileUsername}` : 'Profile'))
+      : String(movement?.title || movement?.name || 'Movement');
+  const shareDesc =
+    targetType === 'profile'
+      ? String(profile?.bio || '').trim()
+      : String(movement?.description || movement?.summary || '').trim();
   const shareText = shareDesc
     ? `${shareDesc.substring(0, 140)}${shareDesc.length > 140 ? '…' : ''}`
-    : '';
+    : (targetType === 'profile' ? 'View this profile on People Power.' : '');
 
   const handleCopyLink = async () => {
     try {
@@ -182,6 +197,9 @@ export default function ShareButton({ movement, variant = "default" }) {
   const encodedUrl = encodeURIComponent(shareUrl || window.location.href);
   const encodedText = encodeURIComponent([shareTitle, shareText].filter(Boolean).join('\n\n'));
 
+  const optionClass =
+    "w-full h-auto py-3 justify-start border-2 rounded-xl font-bold whitespace-normal text-left leading-snug";
+
   return (
     <>
       <Button
@@ -190,16 +208,18 @@ export default function ShareButton({ movement, variant = "default" }) {
         className="font-bold rounded-xl"
       >
         <Share2 className="w-4 h-4 mr-2" />
-        Share
+        {label || 'Share'}
       </Button>
 
       <Dialog open={showDialog} onOpenChange={setShowDialog}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md w-[92vw] max-h-[80vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle className="text-xl font-black">Share Movement</DialogTitle>
+            <DialogTitle className="text-xl font-black">
+              {targetType === 'profile' ? 'Share Profile' : 'Share Movement'}
+            </DialogTitle>
           </DialogHeader>
 
-          <div className="space-y-3 mt-4">
+          <div className="space-y-3 mt-4 pr-1">
             <Button
               onClick={() => {
                 if (!user) {
@@ -209,7 +229,7 @@ export default function ShareButton({ movement, variant = "default" }) {
                 setDmOpen(true);
               }}
               variant="outline"
-              className="w-full h-14 justify-start border-2 rounded-xl font-bold"
+              className={optionClass}
             >
               <Share2 className="w-5 h-5 mr-3" />
               Share to DM
@@ -218,7 +238,7 @@ export default function ShareButton({ movement, variant = "default" }) {
             <Button
               onClick={handleCopyLink}
               variant="outline"
-              className="w-full h-14 justify-start border-2 rounded-xl font-bold"
+              className={optionClass}
             >
               <LinkIcon className="w-5 h-5 mr-3" />
               Copy Link
@@ -227,7 +247,7 @@ export default function ShareButton({ movement, variant = "default" }) {
             <Button
               onClick={handleExternalShare}
               variant="outline"
-              className="w-full h-14 justify-start border-2 rounded-xl font-bold"
+              className={`${optionClass} flex-wrap gap-2`}
               title="Uses your device's native share sheet when available (AirDrop/Instagram/Messages/etc)"
               disabled={externalShareLocked}
             >
@@ -244,7 +264,7 @@ export default function ShareButton({ movement, variant = "default" }) {
               <Button
                 onClick={() => openUrl(`https://twitter.com/intent/tweet?url=${encodedUrl}&text=${encodedText}`)}
                 variant="outline"
-                className="w-full h-12 justify-start border-2 rounded-xl font-bold"
+                className={optionClass}
                 disabled={externalShareLocked}
               >
                 <ExternalLink className="w-4 h-4 mr-3" />
@@ -254,7 +274,7 @@ export default function ShareButton({ movement, variant = "default" }) {
               <Button
                 onClick={() => openUrl(`https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}`)}
                 variant="outline"
-                className="w-full h-12 justify-start border-2 rounded-xl font-bold"
+                className={optionClass}
                 disabled={externalShareLocked}
               >
                 <ExternalLink className="w-4 h-4 mr-3" />
@@ -264,7 +284,7 @@ export default function ShareButton({ movement, variant = "default" }) {
               <Button
                 onClick={() => openUrl(`https://wa.me/?text=${encodedText}%0A%0A${encodedUrl}`)}
                 variant="outline"
-                className="w-full h-12 justify-start border-2 rounded-xl font-bold"
+                className={optionClass}
                 disabled={externalShareLocked}
               >
                 <ExternalLink className="w-4 h-4 mr-3" />
@@ -274,7 +294,7 @@ export default function ShareButton({ movement, variant = "default" }) {
               <Button
                 onClick={() => openUrl(`https://t.me/share/url?url=${encodedUrl}&text=${encodedText}`)}
                 variant="outline"
-                className="w-full h-12 justify-start border-2 rounded-xl font-bold"
+                className={optionClass}
                 disabled={externalShareLocked}
               >
                 <ExternalLink className="w-4 h-4 mr-3" />
@@ -288,7 +308,7 @@ export default function ShareButton({ movement, variant = "default" }) {
                   openUrl(`mailto:?subject=${subject}&body=${body}`);
                 }}
                 variant="outline"
-                className="w-full h-12 justify-start border-2 rounded-xl font-bold"
+                className={optionClass}
                 disabled={externalShareLocked}
               >
                 <ExternalLink className="w-4 h-4 mr-3" />
@@ -307,7 +327,7 @@ export default function ShareButton({ movement, variant = "default" }) {
                   setShowDialog(false);
                 }}
                 variant="outline"
-                className="w-full h-12 justify-start border-2 rounded-xl font-bold"
+                className={optionClass}
                 disabled={externalShareLocked}
               >
                 <ExternalLink className="w-4 h-4 mr-3" />
@@ -319,7 +339,7 @@ export default function ShareButton({ movement, variant = "default" }) {
       </Dialog>
 
       <Dialog open={dmOpen} onOpenChange={setDmOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md w-[92vw] max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-xl font-black">Share to DM</DialogTitle>
           </DialogHeader>

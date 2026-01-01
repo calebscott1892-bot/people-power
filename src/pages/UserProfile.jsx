@@ -12,6 +12,7 @@ import EditProfileModal from '../components/profile/EditProfileModal';
 import GamificationWidget from '../components/gamification/GamificationWidget';
 import GiftPointsModal from '@/components/challenges/GiftPointsModal';
 import BackButton from '@/components/shared/BackButton';
+import ShareButton from '@/components/shared/ShareButton';
 import { entities } from '@/api/appClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchUserFollow, setUserFollow } from '@/api/userFollowsClient';
@@ -386,6 +387,7 @@ export default function UserProfile() {
                   <Edit className="w-4 h-4 mr-2" />
                   Edit
                 </Button>
+                <ShareButton profile={userProfile} label="Share profile" variant="outline" />
                 {profileIsAdmin ? (
                   <Link
                     to={createPageUrl('AdminDashboard')}
@@ -456,6 +458,7 @@ export default function UserProfile() {
                       <MessageCircle className="w-4 h-4 mr-2" />
                       Message
                     </Button>
+                    <ShareButton profile={userProfile} label="Share profile" variant="outline" />
 
                     <Button
                       onClick={() => {
