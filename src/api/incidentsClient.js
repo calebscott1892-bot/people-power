@@ -3,7 +3,7 @@
  *
  * Network-backed (Node server) endpoints (see Server/index.js):
  * - POST /incidents        -> { ok: true, incident }
- * - GET  /admin/incidents  -> { items, limit, offset, has_more } (requires staff auth)
+ * - GET  /admin/incidents  -> { items, limit, offset, has_more } (requires admin auth)
  */
 
 import { getServerBaseUrl } from './serverBase';

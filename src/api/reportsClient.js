@@ -17,6 +17,8 @@
  * @property {string} reported_content_id
  * @property {string} report_category
  * @property {string|null} report_details
+ * @property {string|null} report_type
+ * @property {string|null} report_title
  * @property {string|null} evidence_file_url
  * @property {'pending'|'reviewing'|'resolved'|'dismissed'|string} status
  * @property {string|null} priority
@@ -71,6 +73,8 @@ async function createLocalReport(payload, options) {
   const reportedContentType = payload?.reported_content_type ? String(payload.reported_content_type) : null;
   const reportedContentId = payload?.reported_content_id ? String(payload.reported_content_id) : null;
   const reportCategory = payload?.report_category ? String(payload.report_category) : null;
+  const reportType = payload?.report_type ? String(payload.report_type) : 'abuse';
+  const reportTitle = payload?.report_title ? String(payload.report_title) : null;
 
   if (!reporterEmail) throw new Error('Authentication required');
   if (!reportedContentType || !reportedContentId) throw new Error('Reported content is required');
@@ -90,6 +94,8 @@ async function createLocalReport(payload, options) {
     reported_content_id: reportedContentId,
     report_category: reportCategory,
     report_details: payload?.report_details != null ? String(payload.report_details) : null,
+    report_type: reportType,
+    report_title: reportTitle,
     evidence_file_url: payload?.evidence_file_url ? String(payload.evidence_file_url) : null,
     created_at: nowIso(),
     updated_at: nowIso(),

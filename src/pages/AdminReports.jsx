@@ -7,13 +7,16 @@ import ReportCard from '@/components/admin/ReportCard';
 import ReportActions from '@/components/admin/ReportActions';
 import AuditLogViewer from '@/components/moderation/AuditLogViewer';
 import AdminAppealsPanel from '@/components/moderation/AdminAppealsPanel';
+import AdminBackButton from '@/components/admin/AdminBackButton';
 import { entities } from '@/api/appClient';
-import { getStaffRole, isStaff } from '@/utils/staff';
+import { getStaffRole } from '@/utils/staff';
+import { createPageUrl } from '@/utils';
 
 export default function AdminReports() {
-  const { session } = useAuth();
+  const { session, isAdmin } = useAuth();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState('pending');
+  const [typeFilter, setTypeFilter] = useState('all');
 
   const [selectedReport, setSelectedReport] = useState(null);
 
@@ -21,7 +24,7 @@ export default function AdminReports() {
   const moderatorEmail = session?.user?.email ? String(session.user.email) : '';
   const role = getStaffRole(moderatorEmail);
 
-  const canView = !!accessToken && isStaff(moderatorEmail);
+  const canView = !!accessToken && !!isAdmin;
 
   const {
     data: reports = [],
@@ -64,6 +67,11 @@ export default function AdminReports() {
     });
   }, [rows]);
 
+  const filteredRows = useMemo(() => {
+    if (typeFilter === 'all') return enrichedRows;
+    return enrichedRows.filter((r) => String(r?.report_type || 'abuse') === typeFilter);
+  }, [enrichedRows, typeFilter]);
+
   const getPastReportsCount = async (report) => {
     try {
       const type = String(report?.reported_content_type || '');
@@ -81,9 +89,7 @@ export default function AdminReports() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-12 space-y-6">
-      <Link to="/" className="text-[#3A3DFF] font-bold">
-        &larr; Back to home
-      </Link>
+      <AdminBackButton />
 
       <div className="p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -92,11 +98,15 @@ export default function AdminReports() {
             <p className="text-slate-600 font-semibold text-sm">
               Verified-user reports queue.
             </p>
+            <div className="inline-flex items-center mt-3 px-3 py-1 rounded-full bg-slate-900 text-white text-xs font-black uppercase">
+              Admin view – tools not available to regular users
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
             <Link
-              to="/AdminIncidentLog"
+              to={createPageUrl('AdminIncidentLog')}
+              state={{ fromLabel: 'Reports', fromPath: createPageUrl('AdminReports') }}
               className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 font-black text-sm hover:bg-slate-50"
             >
               Incident Log
@@ -125,6 +135,16 @@ export default function AdminReports() {
               <option value="dismissed">Dismissed</option>
             </select>
 
+            <select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className="p-2 rounded-xl border border-slate-200 bg-slate-50 font-semibold text-sm"
+            >
+              <option value="all">All types</option>
+              <option value="abuse">Misconduct</option>
+              <option value="bug">Bug / technical</option>
+            </select>
+
             <button
               type="button"
               onClick={() => refetch()}
@@ -140,7 +160,7 @@ export default function AdminReports() {
         ) : !canView ? (
           <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
             <div className="font-black text-slate-900">Not authorized</div>
-            <div className="text-sm font-semibold mt-1">Staff access required.</div>
+            <div className="text-sm font-semibold mt-1">Admin access required.</div>
           </div>
         ) : isLoading ? (
           <div className="text-slate-600 font-semibold">Loading reports…</div>
@@ -151,11 +171,11 @@ export default function AdminReports() {
               {String(error?.message || 'Unknown error')}
             </div>
           </div>
-        ) : enrichedRows.length === 0 ? (
+        ) : filteredRows.length === 0 ? (
           <div className="text-slate-600 font-semibold">No reports in this status.</div>
         ) : (
           <div className="grid grid-cols-1 gap-4">
-            {enrichedRows.map((r) => (
+            {filteredRows.map((r) => (
               <ReportCard
                 key={String(r?.id)}
                 report={r}

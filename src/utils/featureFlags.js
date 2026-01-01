@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { getServerBaseUrl } from '@/api/serverBase';
 
 const FORCE_ALL_FLAGS_ON = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FORCE_ALL_FLAGS_ON === 'true' && import.meta.env.MODE !== 'production';
 
@@ -18,7 +19,10 @@ const CACHE_MS = 60 * 1000;
 
 async function fetchFlags() {
   if (_flagsCache && Date.now() - _flagsCacheTime < CACHE_MS) return _flagsCache;
-  const res = await fetch('/feature-flags');
+  const baseUrl = getServerBaseUrl();
+  const res = await fetch(`${baseUrl}/feature-flags`, {
+    headers: { Accept: 'application/json' },
+  });
   if (!res.ok) throw new Error('Failed to fetch feature flags');
   const data = await res.json();
   _flagsCache = data;
@@ -26,22 +30,37 @@ async function fetchFlags() {
   return data;
 }
 
-export function useFeatureFlag(name, userId) {
-  return useQuery({
-    queryKey: ['featureFlag', name, userId],
-    queryFn: async () => {
-      if (FORCE_ALL_FLAGS_ON) return { enabled: true };
-      const { flags } = await fetchFlags();
-      const flag = Array.isArray(flags) ? flags.find(f => f.name === name) : null;
-      if (!flag) return { enabled: false };
-      if (!flag.enabled) return { enabled: false };
-      const pct = typeof flag.rollout_percentage === 'number' ? flag.rollout_percentage : 100;
-      if (pct >= 100 || !userId) return { enabled: true };
-      // Deterministic hash
-      const hash = stableHash(String(userId) + ':' + name) % 100;
-      return { enabled: hash < pct };
-    },
+export function useFeatureFlag(name, userId, options = {}) {
+  const defaultEnabled = options?.defaultEnabled === true;
+  const enableWhileLoading = options?.enableWhileLoading === true;
+  const query = useQuery({
+    queryKey: ['featureFlags'],
+    queryFn: fetchFlags,
     staleTime: CACHE_MS,
-    select: (data) => ({ enabled: !!data?.enabled, loading: false }),
+    enabled: !FORCE_ALL_FLAGS_ON,
   });
+
+  if (FORCE_ALL_FLAGS_ON) {
+    return { enabled: true, loading: false };
+  }
+
+  if (query.isLoading) {
+    return { enabled: enableWhileLoading ? defaultEnabled : false, loading: true };
+  }
+
+  if (query.isError) {
+    return { enabled: defaultEnabled, loading: false };
+  }
+
+  const flags = Array.isArray(query.data?.flags) ? query.data.flags : [];
+  const flag = flags.find((f) => f.name === name);
+  if (!flag) return { enabled: defaultEnabled, loading: false };
+  if (!flag.enabled) return { enabled: false, loading: false };
+
+  const pct = typeof flag.rollout_percentage === 'number' ? flag.rollout_percentage : 100;
+  if (pct >= 100) return { enabled: true, loading: false };
+  if (!userId) return { enabled: false, loading: false };
+
+  const hash = stableHash(String(userId) + ':' + name) % 100;
+  return { enabled: hash < pct, loading: false };
 }

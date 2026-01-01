@@ -16,9 +16,8 @@ import { updateReport } from '@/api/reportsClient';
 import { uploadFile } from '@/api/uploadsClient';
 import { toast } from 'sonner';
 import { logError } from '@/utils/logError';
+import { ALLOWED_UPLOAD_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 
-const EVIDENCE_MAX_MB = 5;
-const EVIDENCE_ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'];
 
 function nowIso() {
   return new Date().toISOString();
@@ -172,7 +171,11 @@ export default function Notifications() {
     try {
       let evidenceUrl = null;
       if (followupEvidence) {
-        const res = await uploadFile(followupEvidence, { accessToken });
+        const res = await uploadFile(followupEvidence, {
+          accessToken,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+        });
         evidenceUrl = res?.url ? String(res.url) : null;
       }
 
@@ -315,7 +318,7 @@ export default function Notifications() {
                 <label className="text-sm font-black text-slate-700">Evidence file (optional)</label>
                 <input
                   type="file"
-                  accept="image/png,image/jpeg,image/jpg,image/gif,application/pdf"
+                  accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,application/pdf"
                   onChange={(e) => {
                     const file = (e.target.files && e.target.files[0]) || null;
                     e.target.value = '';
@@ -323,13 +326,13 @@ export default function Notifications() {
                       setFollowupEvidence(null);
                       return;
                     }
-                    if (file.size > EVIDENCE_MAX_MB * 1024 * 1024) {
-                      toast.error(`File too large. Max size is ${EVIDENCE_MAX_MB}MB.`);
-                      setFollowupEvidence(null);
-                      return;
-                    }
-                    if (file.type && !EVIDENCE_ALLOWED_MIME_TYPES.includes(file.type)) {
-                      toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF) or PDF.');
+                    const validationError = validateFileUpload({
+                      file,
+                      maxBytes: MAX_UPLOAD_BYTES,
+                      allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+                    });
+                    if (validationError) {
+                      toast.error(validationError);
                       setFollowupEvidence(null);
                       return;
                     }
@@ -365,6 +368,12 @@ export default function Notifications() {
 }
 
 function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
+  const safeActorName = useMemo(() => {
+    const raw = String(notification?.actor_name || '').trim();
+    if (raw && !raw.includes('@')) return raw;
+    return 'Member';
+  }, [notification]);
+
   const getIcon = () => {
     switch (notification.type) {
       case 'follow': return <UserPlus className="w-5 h-5 text-blue-500" />;
@@ -381,15 +390,15 @@ function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
   const getMessage = () => {
     switch (notification.type) {
       case 'follow':
-        return `${notification.actor_name} started following you`;
+        return `${safeActorName} started following you`;
       case 'message':
-        return `${notification.actor_name} sent you a message`;
+        return `${safeActorName} sent you a message`;
       case 'movement_boost':
-        return `${notification.actor_name} boosted "${notification.content_title}"`;
+        return `${safeActorName} boosted "${notification.content_title}"`;
       case 'comment':
-        return `${notification.actor_name} commented on "${notification.content_title}"`;
+        return `${safeActorName} commented on "${notification.content_title}"`;
       case 'challenge_complete':
-        return `${notification.actor_name} completed a challenge`;
+        return `${safeActorName} completed a challenge`;
       case 'event_reminder':
         return notification.content_title || 'Upcoming event reminder';
       case 'moderation_request_more_info':

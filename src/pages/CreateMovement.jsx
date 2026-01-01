@@ -10,12 +10,15 @@ import { createMovement } from '@/api/movementsClient';
 import { acceptPlatformAcknowledgment, fetchMyPlatformAcknowledgment } from '@/api/platformAckClient';
 import { checkLeadershipCap, registerLeadershipRole } from '@/components/governance/PowerConcentrationLimiter';
 import MovementCard from '@/components/home/MovementCard';
+import LocationPicker from '@/components/profile/LocationPicker';
 import AIMovementAssistant from '@/components/creation/AIMovementAssistant';
 import { uploadFile } from '@/api/uploadsClient';
 import toast from 'react-hot-toast';
 import Filter from 'bad-words';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
+import { ALLOWED_IMAGE_MIME_TYPES, ALLOWED_UPLOAD_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
+import BackButton from '@/components/shared/BackButton';
 
 const TAG_OPTIONS = [
   // Movement-type categories requested
@@ -40,6 +43,8 @@ const TAG_OPTIONS = [
   { id: 'animals', label: 'Animal Rights' },
 ];
 
+const CLAIM_EVIDENCE_MIME_TYPES = [...ALLOWED_IMAGE_MIME_TYPES, 'application/pdf'];
+
 export default function CreateMovement() {
   const { user, session, loading: authLoading } = useAuth();
   const accessToken = session?.access_token ?? null;
@@ -48,19 +53,15 @@ export default function CreateMovement() {
 
   // Field lock state (for edit mode)
   const [movementLocks, setMovementLocks] = useState({});
-  const [locksLoading, setLocksLoading] = useState(false);
-  const [locksError, setLocksError] = useState(null);
   // If editing an existing movement, fetch lock state
   // (Assume movementId is available in edit mode; for creation, all fields are editable)
-  const movementId = null; // TODO (pre-production): set this if editing (affects edit mode permissions)
-  const isOwnerOrAdmin = true; // TODO (pre-production): set this if editing (affects edit mode permissions)
+  const movementId = null; // TODO (pre-production): wire edit mode movementId; create flow has no locks.
+  const isOwnerOrAdmin = true; // TODO (pre-production): derive from auth/roles in edit mode; create flow assumes owner.
   useEffect(() => {
     if (!movementId) return;
-    setLocksLoading(true);
     fetchMovementLocks(movementId, { accessToken })
       .then(setMovementLocks)
-      .catch((e) => setLocksError(e))
-      .finally(() => setLocksLoading(false));
+      .catch((e) => logError(e, 'Failed to load movement locks'));
   }, [movementId, accessToken]);
   const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
   useEffect(() => {
@@ -81,9 +82,7 @@ export default function CreateMovement() {
   const [mediaLinkInput, setMediaLinkInput] = useState('');
   const [mediaLinks, setMediaLinks] = useState([]);
 
-  const [includeMapLocation, setIncludeMapLocation] = useState(false);
-  const [mapCoords, setMapCoords] = useState(null); // { lat, lon }
-  const [mapLoading, setMapLoading] = useState(false);
+  const [mapCoords, setMapCoords] = useState(null); // { lat, lng }
 
   const [coverFile, setCoverFile] = useState(null);
   const [coverUrl, setCoverUrl] = useState('');
@@ -120,45 +119,6 @@ export default function CreateMovement() {
     } catch {
       return null;
     }
-  };
-
-  const geocodeCityLevel = async ({ city, country }) => {
-    const c = String(city || '').trim();
-    const k = String(country || '').trim();
-    const query = [c, k].filter(Boolean).join(', ');
-    if (!query) return null;
-
-    const cacheKey = `peoplepower_geocode_${query.toLowerCase()}`;
-    try {
-      const cached = sessionStorage.getItem(cacheKey);
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (parsed && typeof parsed === 'object' && parsed.lat != null && parsed.lon != null) {
-          return parsed;
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!res.ok) return null;
-    const json = await res.json();
-    const first = Array.isArray(json) ? json[0] : null;
-    if (!first?.lat || !first?.lon) return null;
-
-    const lat = Number(first.lat);
-    const lon = Number(first.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-
-    const rounded = { lat: Number(lat.toFixed(2)), lon: Number(lon.toFixed(2)) };
-    try {
-      sessionStorage.setItem(cacheKey, JSON.stringify(rounded));
-    } catch {
-      // ignore
-    }
-    return rounded;
   };
 
   const toSafeHtmlParagraph = (text) => {
@@ -199,6 +159,14 @@ export default function CreateMovement() {
       .map((t) => String(t).trim())
       .filter(Boolean)
       .filter((t) => allowed.has(t));
+    const previewDisplayName =
+      user?.user_metadata?.full_name ||
+      user?.user_metadata?.name ||
+      user?.user_metadata?.username ||
+      (user?.email ? String(user.email).split('@')[0] : '');
+    const previewUsername =
+      user?.user_metadata?.username ||
+      (user?.email ? String(user.email).split('@')[0] : '');
 
     return {
       id: 'preview',
@@ -206,57 +174,30 @@ export default function CreateMovement() {
       description: descriptionText || 'Your movement description will appear here.',
       tags,
       author_email: user?.email ?? 'you@example.com',
+      creator_display_name: previewDisplayName || null,
+      creator_username: previewUsername || null,
       upvotes: 0,
       downvotes: 0,
       score: 0,
       location_city: locationCity || undefined,
       location_country: locationCountry || undefined,
-      location_lat: includeMapLocation ? mapCoords?.lat : undefined,
-      location_lon: includeMapLocation ? mapCoords?.lon : undefined,
+      location_lat: mapCoords?.lat ?? undefined,
+      location_lon: mapCoords?.lng ?? undefined,
     };
-  }, [title, descriptionText, selectedTags, user, locationCity, locationCountry, includeMapLocation, mapCoords]);
+  }, [title, descriptionText, selectedTags, user, locationCity, locationCountry, mapCoords]);
 
-  const updateMapPreview = async ({ silent = false } = {}) => {
-    if (!includeMapLocation) return;
-    const city = String(locationCity || '').trim();
-    const country = String(locationCountry || '').trim();
-    if (!city && !country) {
-      setMapCoords(null);
-      return;
-    }
-    setMapLoading(true);
-    try {
-      const coords = await geocodeCityLevel({ city, country });
-      setMapCoords(coords);
-      if (!coords && !silent) {
-        toast.error('Could not find that city-level location');
-      }
-    } catch {
-      setMapCoords(null);
-      if (!silent) {
-        toast.error('Failed to load map location');
-      }
-    } finally {
-      setMapLoading(false);
-    }
+  const handleLocationChange = (next) => {
+    setLocationCity(next?.city || '');
+    setLocationCountry(next?.country || '');
   };
-
-  useEffect(() => {
-    if (!includeMapLocation) return;
-    const city = String(locationCity || '').trim();
-    const country = String(locationCountry || '').trim();
-    if (!city && !country) {
-      setMapCoords(null);
-      return;
-    }
-    const timer = setTimeout(() => {
-      updateMapPreview({ silent: true });
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [includeMapLocation, locationCity, locationCountry]);
 
   const handleSubmit = async (e) => {
     e?.preventDefault?.();
+
+    if (backendStatus === 'offline') {
+      toast.error('You appear to be offline — please reconnect before creating a movement.');
+      return;
+    }
 
     if (saving) return;
 
@@ -309,8 +250,8 @@ export default function CreateMovement() {
         author_email: user?.email ?? null,
         location_city: String(locationCity || '').trim() || undefined,
         location_country: String(locationCountry || '').trim() || undefined,
-        location_lat: includeMapLocation ? mapCoords?.lat : undefined,
-        location_lon: includeMapLocation ? mapCoords?.lon : undefined,
+        location_lat: mapCoords?.lat ?? undefined,
+        location_lon: mapCoords?.lng ?? undefined,
         media_urls: normalizedLinks.length ? normalizedLinks : undefined,
         claims: nextClaims.length ? nextClaims : undefined,
       };
@@ -397,7 +338,11 @@ export default function CreateMovement() {
       let finalCoverUrl = coverUrl;
       if (!finalCoverUrl && coverFile) {
         try {
-          const uploaded = await uploadFile(coverFile, { accessToken });
+          const uploaded = await uploadFile(coverFile, {
+            accessToken,
+            maxBytes: MAX_UPLOAD_BYTES,
+            allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+          });
           finalCoverUrl = uploaded?.url ? String(uploaded.url) : '';
           setCoverUrl(finalCoverUrl);
         } catch (err) {
@@ -436,6 +381,7 @@ export default function CreateMovement() {
           const exists = id ? arr.some((m) => (m?.id ?? m?._id) === id) : false;
           return exists ? arr : [created, ...arr];
         });
+        await queryClient.invalidateQueries({ queryKey: ['movements', 'feed'] });
       } catch (e) {
         logError(e, 'Create movement cache update failed');
       }
@@ -458,7 +404,7 @@ export default function CreateMovement() {
         rawMessage.includes('NetworkError') ||
         rawMessage.includes('Load failed');
       const message = looksOffline
-        ? 'Could not reach the backend server (http://localhost:3001). Start the server and try again.'
+        ? 'Could not reach the backend server. Check your connection and try again.'
         : rawMessage || "We couldn’t create your movement. Please try again.";
       setSubmitBanner({
         type: 'error',
@@ -507,13 +453,10 @@ export default function CreateMovement() {
               </div>
             )}
 
-            <button
-              type="button"
-              onClick={() => navigate('/')}
+            <BackButton
               className="w-full inline-flex items-center justify-center px-4 py-3 rounded-2xl border border-slate-200 bg-white text-slate-900 font-black hover:bg-slate-50"
-            >
-              Back to home
-            </button>
+              iconClassName="hidden"
+            />
           </div>
         </div>
       </div>
@@ -645,6 +588,7 @@ export default function CreateMovement() {
             <div className="space-y-2">
               <label className="block text-sm font-bold text-slate-700">Description</label>
               <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white">
+                {/* NOTE: Keep a plain textarea here to avoid legacy editor bundles (PropTypes crash: u.string). */}
                 <textarea
                   value={descriptionText}
                   onChange={(e) => setDescriptionText(e.target.value)}
@@ -662,84 +606,38 @@ export default function CreateMovement() {
               ) : null}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="block text-sm font-bold text-slate-700">City (optional)</label>
-                <input
-                  type="text"
-                  value={locationCity}
-                  onChange={(e) => setLocationCity(e.target.value)}
-                  placeholder="City-level only for privacy"
-                  className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#FFC947]"
-                />
+            {/* Location */}
+            <div className="space-y-3">
+              <label className="block text-sm font-bold text-slate-700">Location (optional)</label>
+              <div className="text-xs text-slate-600 font-semibold">
+                Use your current location or apply a city/country to set a coarse, city-level marker.
               </div>
-              <div className="space-y-2">
-                <label className="block text-sm font-bold text-slate-700">Country (optional)</label>
-                <input
-                  type="text"
-                  value={locationCountry}
-                  onChange={(e) => setLocationCountry(e.target.value)}
-                  placeholder="Country"
-                  className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#FFC947]"
-                />
-              </div>
-            </div>
-
-            {/* Optional map location */}
-            <div className="space-y-2">
-              <label className="flex items-start gap-3 text-sm font-semibold text-slate-800">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={includeMapLocation}
-                  onChange={(e) => {
-                    const next = !!e.target.checked;
-                    setIncludeMapLocation(next);
-                    if (!next) setMapCoords(null);
+              <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50 space-y-3">
+                <LocationPicker
+                  location={{ city: locationCity, country: locationCountry }}
+                  coordinates={mapCoords}
+                  onLocationChange={handleLocationChange}
+                  onCoordinatesChange={(coords) => {
+                    if (coords?.lat != null && coords?.lng != null) {
+                      setMapCoords(coords);
+                    } else {
+                      setMapCoords(null);
+                    }
                   }}
+                  onApplyResult={(result) => {
+                    if (result && result.ok === false && result.message) {
+                      toast(result.message);
+                    }
+                  }}
+                  showIntro={false}
+                  showInputs={true}
+                  showRadius={false}
+                  mapHeight={200}
                 />
-                <span>
-                  Add map location (optional). This uses an approximate city-level marker.
-                </span>
-              </label>
-
-              {includeMapLocation ? (
-                <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50 space-y-3">
-                  <div className="text-xs text-slate-600 font-semibold">
-                    Uses your City/Country fields. Coordinates are rounded to protect privacy.
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      disabled={mapLoading}
-                      onClick={updateMapPreview}
-                      className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-white border border-slate-200 text-slate-900 font-black text-xs"
-                    >
-                      {mapLoading ? 'Loading…' : 'Preview map'}
-                    </button>
-                    {mapCoords ? (
-                      <div className="text-xs font-semibold text-slate-600">
-                        Saved: {mapCoords.lat}, {mapCoords.lon}
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="rounded-xl overflow-hidden border border-slate-200 bg-white">
-                    {mapCoords ? (
-                      <img
-                        alt="City-level map preview"
-                        loading="lazy"
-                        className="w-full h-28 object-cover"
-                        src={`https://staticmap.openstreetmap.de/staticmap.php?center=${mapCoords.lat},${mapCoords.lon}&zoom=11&size=640x220&maptype=mapnik&markers=${mapCoords.lat},${mapCoords.lon},lightblue1`}
-                      />
-                    ) : (
-                      <div className="h-28 flex items-center justify-center text-xs text-slate-500 font-semibold">
-                        Set a location to preview it on the map.
-                      </div>
-                    )}
-                  </div>
+                <div className="text-xs text-slate-500 font-semibold">
+                  {mapCoords ? `Saved: ${mapCoords.lat}, ${mapCoords.lng}` : 'No map location set yet.'}
                 </div>
-              ) : null}
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -771,19 +669,18 @@ export default function CreateMovement() {
                   <div className="flex items-center justify-between gap-3">
                     <input
                       type="file"
-                      accept="image/png,image/jpeg,image/jpg,image/gif,application/pdf"
+                      accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,application/pdf"
                       onChange={(e) => {
                         const file = e.target.files?.[0] ?? null;
                         e.target.value = '';
                         if (!file) return;
-                        const MAX_UPLOAD_MB = 5;
-                        const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'];
-                        if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-                          toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-                          return;
-                        }
-                        if (!ALLOWED_MIME_TYPES.includes(file.type)) {
-                          toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF) or PDF.');
+                        const validationError = validateFileUpload({
+                          file,
+                          maxBytes: MAX_UPLOAD_BYTES,
+                          allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+                        });
+                        if (validationError) {
+                          toast.error(validationError);
                           return;
                         }
                         setCoverFile(file);
@@ -945,18 +842,18 @@ export default function CreateMovement() {
                           <div className="text-xs font-black text-slate-600">Evidence upload</div>
                           <input
                             type="file"
+                            accept="image/png,image/jpeg,image/jpg,image/webp,application/pdf"
                             onChange={async (e) => {
                               const file = e.target.files?.[0] ?? null;
                               e.target.value = '';
                               if (!file) return;
-                              const MAX_UPLOAD_MB = 5;
-                              const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'application/pdf'];
-                              if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-                                toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-                                return;
-                              }
-                              if (!ALLOWED_MIME_TYPES.includes(file.type)) {
-                                toast.error('That file type isn’t supported. Please upload an image (JPG/PNG) or PDF.');
+                              const validationError = validateFileUpload({
+                                file,
+                                maxBytes: MAX_UPLOAD_BYTES,
+                                allowedMimeTypes: CLAIM_EVIDENCE_MIME_TYPES,
+                              });
+                              if (validationError) {
+                                toast.error(validationError);
                                 return;
                               }
                               if (!accessToken) {
@@ -964,7 +861,11 @@ export default function CreateMovement() {
                                 return;
                               }
                               try {
-                                const uploaded = await uploadFile(file, { accessToken });
+                                const uploaded = await uploadFile(file, {
+                                  accessToken,
+                                  maxBytes: MAX_UPLOAD_BYTES,
+                                  allowedMimeTypes: CLAIM_EVIDENCE_MIME_TYPES,
+                                });
                                 const url = uploaded?.url ? String(uploaded.url) : '';
                                 if (!url) throw new Error('Upload succeeded but no URL returned');
                                 setClaims((prev) =>

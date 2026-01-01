@@ -1,3 +1,5 @@
+import { logError } from '../utils/logError';
+
 let sodiumPromise = null;
 let didSelfTest = false;
 
@@ -71,7 +73,7 @@ export async function initSodium() {
           if (!opened) throw new Error('secretbox open failed');
           if (!u8Equal(opened, msg)) throw new Error('secretbox roundtrip mismatch');
         } catch (e) {
-          console.warn('[e2ee] crypto self-test failed (dev only)', e);
+          logError(e, 'e2ee: crypto self-test failed');
         }
       }
 

@@ -3,107 +3,23 @@ import { toast } from 'sonner';
 import { useAuth } from '@/auth/AuthProvider';
 import { createReport } from '@/api/reportsClient';
 import { uploadFile } from '@/api/uploadsClient';
-import { entities } from '@/api/appClient';
 import { logError } from '@/utils/logError';
 import { Link } from 'react-router-dom';
 import { focusFirstInteractive, trapFocusKeyDown } from '@/components/utils/focusTrap';
-
-const REPORT_REASONS = [
-  {
-    value: 'harassment_or_bullying',
-    label: 'Harassment or Bullying',
-    description: 'Targeted harassment, intimidation, or repeated unwanted contact directed at a person or group.',
-  },
-  {
-    value: 'hate_speech_or_discrimination',
-    label: 'Hate Speech or Discrimination',
-    description: 'Hate, slurs, or discrimination based on protected characteristics (or similar).',
-  },
-  {
-    value: 'incitement_of_violence_or_harm',
-    label: 'Incitement of Violence or Harm',
-    description: 'Threats, calls for violence, or encouragement of physical harm or destruction.',
-  },
-  {
-    value: 'illegal_activity_or_dangerous_conduct',
-    label: 'Illegal Activity or Dangerous Conduct',
-    description: 'Coordination of illegal acts or dangerous conduct that could put people at risk.',
-  },
-  {
-    value: 'misinformation_or_deceptive_activity',
-    label: 'Misinformation / Deceptive Activity',
-    description: 'Deceptive claims or manipulative content that could mislead people into harm or fraud.',
-  },
-  {
-    value: 'spam_or_scams',
-    label: 'Spam or Scams',
-    description: 'Spam, repetitive promotion, scams, phishing, or suspicious links.',
-  },
-  {
-    value: 'privacy_violation_or_doxxing',
-    label: 'Privacy Violation / Doxxing',
-    description: 'Sharing private personal info (addresses, phone numbers, IDs) without consent.',
-  },
-  {
-    value: 'underage_safety_concern',
-    label: 'Underage Safety Concern',
-    description: 'Content that raises concerns about minors’ safety or exploitation.',
-  },
-  {
-    value: 'impersonation_or_identity_fraud',
-    label: 'Impersonation / Identity Fraud',
-    description: 'Pretending to be someone else, or misrepresenting identity to deceive others.',
-  },
-  {
-    value: 'inappropriate_content',
-    label: 'Inappropriate Content',
-    description: 'Adult or otherwise inappropriate content that violates community safety expectations.',
-  },
-  {
-    value: 'other',
-    label: 'Other',
-    description: 'Anything else that does not fit the categories above (please add a short explanation).',
-  },
-];
-
-const RATE_WINDOW_MS = 10 * 60 * 1000;
-const RATE_MAX_REPORTS = 3;
-const REPORT_MAX_UPLOAD_MB = 5;
-const REPORT_ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'];
-
-function normalizeEmail(value) {
-  const s = value == null ? '' : String(value).trim().toLowerCase();
-  return s || null;
-}
-
-function getRateKey(email) {
-  return `peoplepower_report_rate:${email}`;
-}
-
-function loadRecentReportTimes(email) {
-  const key = getRateKey(email);
-  try {
-    const raw = localStorage.getItem(key);
-    const arr = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(arr)) return [];
-    const now = Date.now();
-    return arr
-      .map((t) => Number(t))
-      .filter((t) => Number.isFinite(t))
-      .filter((t) => now - t < RATE_WINDOW_MS);
-  } catch {
-    return [];
-  }
-}
-
-function saveRecentReportTimes(email, times) {
-  const key = getRateKey(email);
-  try {
-    localStorage.setItem(key, JSON.stringify(times));
-  } catch {
-    // ignore
-  }
-}
+import { ALLOWED_UPLOAD_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
+import {
+  REPORT_TUTORIAL_KEY,
+  REPORT_REASONS,
+  BUG_REASONS,
+  BUG_TITLE_MAX,
+  BUG_DETAILS_MAX,
+} from '@/components/safety/reportingConfig';
+import {
+  normalizeReporterEmail,
+  checkReportingEligibility,
+  loadRecentReportTimes,
+  saveRecentReportTimes,
+} from '@/components/safety/reportingUtils';
 
 export default function ReportButton({
   contentType = 'movement',
@@ -120,63 +36,100 @@ export default function ReportButton({
     if (!root) return;
     focusFirstInteractive(root);
   }, [open]);
+  const [reportType, setReportType] = useState('abuse');
   const [category, setCategory] = useState('');
   const [details, setDetails] = useState('');
+  const [bugCategory, setBugCategory] = useState('');
+  const [bugTitle, setBugTitle] = useState('');
+  const [bugDetails, setBugDetails] = useState('');
   const [evidenceFile, setEvidenceFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [tutorialSeen, setTutorialSeen] = useState(true);
 
   const safeContentId = useMemo(() => String(contentId ?? '').trim(), [contentId]);
   const disabled = !safeContentId;
+  const reportCenterLink = useMemo(() => {
+    if (!safeContentId) return '/report';
+    const type = encodeURIComponent(String(contentType || 'content'));
+    const id = encodeURIComponent(safeContentId);
+    return `/report?type=${type}&id=${id}`;
+  }, [contentType, safeContentId]);
 
+  useEffect(() => {
+    if (!open) return;
+    try {
+      const seen = localStorage.getItem(REPORT_TUTORIAL_KEY) === 'true';
+      setTutorialSeen(seen);
+    } catch {
+      setTutorialSeen(true);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (open) return;
+    setReportType('abuse');
+    setCategory('');
+    setDetails('');
+    setBugCategory('');
+    setBugTitle('');
+    setBugDetails('');
+    setEvidenceFile(null);
+  }, [open]);
+
+  useEffect(() => {
+    if (reportType === 'bug') {
+      setCategory('');
+      setDetails('');
+    } else {
+      setBugCategory('');
+      setBugTitle('');
+      setBugDetails('');
+    }
+  }, [reportType]);
+
+  const activeReasons = reportType === 'bug' ? BUG_REASONS : REPORT_REASONS;
   const selectedReason = useMemo(
-    () => REPORT_REASONS.find((r) => r.value === category) || null,
-    [category]
+    () => activeReasons.find((r) => r.value === (reportType === 'bug' ? bugCategory : category)) || null,
+    [activeReasons, reportType, bugCategory, category]
   );
 
   const reporterEmail = useMemo(
-    () => normalizeEmail(session?.user?.email),
+    () => normalizeReporterEmail(session?.user?.email),
     [session]
   );
 
-  const checkReportingEligibility = async () => {
-    if (!reporterEmail) return { ok: false, reason: 'You need to be logged in to submit a report' };
-
-    // Local anti-abuse gate (can be extended by admin tooling)
-    try {
-      const stats = await entities.UserReportStats.filter({ user_email: reporterEmail });
-      const record = Array.isArray(stats) && stats.length ? stats[0] : null;
-      const disabledUntil = record?.reporting_disabled_until ? new Date(record.reporting_disabled_until) : null;
-      if (disabledUntil && !Number.isNaN(disabledUntil.getTime())) {
-        if (disabledUntil.getTime() > Date.now()) {
-          return { ok: false, reason: 'Reporting is temporarily disabled for this account.' };
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    const times = loadRecentReportTimes(reporterEmail);
-    if (times.length >= RATE_MAX_REPORTS) {
-      return { ok: false, reason: 'You’ve submitted several reports recently. Please wait and try again.' };
-    }
-    return { ok: true };
-  };
-
   const handleSubmit = async () => {
     if (disabled) return;
-    if (!category) {
-      toast.error('Please select a reason');
+    const isBugReport = reportType === 'bug';
+    const reasonValue = isBugReport ? bugCategory : category;
+    const detailsValue = isBugReport ? bugDetails : details;
+
+    if (!reasonValue) {
+      toast.error('Please select a category');
       return;
     }
 
-    if (category === 'other' && !String(details || '').trim()) {
+    if (isBugReport) {
+      if (!String(bugTitle || '').trim()) {
+        toast.error('Please add a short title for the bug report');
+        return;
+      }
+      if (!String(detailsValue || '').trim()) {
+        toast.error('Please describe the issue');
+        return;
+      }
+      if (String(detailsValue || '').length > BUG_DETAILS_MAX) {
+        toast.error(`Please keep the description under ${BUG_DETAILS_MAX} characters`);
+        return;
+      }
+    } else if (reasonValue === 'other' && !String(detailsValue || '').trim()) {
       toast.error('Please add a short explanation for “Other”');
       return;
     }
 
     setSubmitting(true);
     try {
-      const eligibility = await checkReportingEligibility();
+      const eligibility = await checkReportingEligibility(reporterEmail);
       if (!eligibility.ok) {
         toast.error(String(eligibility.reason || 'Cannot submit report right now'));
         return;
@@ -192,7 +145,11 @@ export default function ReportButton({
             toast.error('Log in to upload evidence');
             return;
           }
-          const res = await uploadFile(evidenceFile, { accessToken });
+          const res = await uploadFile(evidenceFile, {
+            accessToken,
+            maxBytes: MAX_UPLOAD_BYTES,
+            allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+          });
           evidenceFileUrl = res?.url ? String(res.url) : null;
         } catch (e) {
           logError(e, 'ReportButton evidence upload failed', { contentType: String(contentType), contentId: safeContentId });
@@ -214,13 +171,23 @@ export default function ReportButton({
         // ignore
       }
 
+      const bugContextId = (() => {
+        if (typeof window !== 'undefined' && window.location?.pathname) {
+          return window.location.pathname;
+        }
+        return safeContentId || 'app';
+      })();
+
       await createReport(
         {
-          reported_content_type: String(contentType),
-          reported_content_id: safeContentId,
-          report_category: category,
-          report_details: details || null,
+          report_type: reportType,
+          report_title: isBugReport ? String(bugTitle || '').trim() : null,
+          reported_content_type: isBugReport ? 'app' : String(contentType),
+          reported_content_id: isBugReport ? bugContextId : safeContentId,
+          report_category: reasonValue,
+          report_details: detailsValue || null,
           evidence_file_url: evidenceFileUrl || undefined,
+          evidence_urls: evidenceFileUrl ? [evidenceFileUrl] : undefined,
           is_repeat_report: isRepeatReport || undefined,
         },
         { accessToken, reporterEmail }
@@ -247,10 +214,13 @@ export default function ReportButton({
       setOpen(false);
       setCategory('');
       setDetails('');
+      setBugCategory('');
+      setBugTitle('');
+      setBugDetails('');
       setEvidenceFile(null);
     } catch (e) {
       logError(e, 'Failed to submit report', { contentType: String(contentType), contentId: safeContentId });
-      toast.error(String(e?.message || "Couldn't submit report right now"));
+      toast.error("Couldn't submit report right now");
     } finally {
       setSubmitting(false);
     }
@@ -287,7 +257,7 @@ export default function ReportButton({
             aria-labelledby="report_modal_title"
             aria-describedby="report_modal_desc"
             tabIndex={-1}
-            className="relative w-full max-w-md rounded-3xl bg-white border border-slate-200 shadow-lg overflow-hidden"
+            className="relative w-full max-w-sm sm:max-w-md rounded-3xl bg-white border border-slate-200 shadow-lg overflow-hidden max-h-[90vh] overflow-y-auto"
           >
             <div className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] px-5 py-4 text-slate-900">
               <div id="report_modal_title" className="font-black text-lg">Report</div>
@@ -297,101 +267,194 @@ export default function ReportButton({
             </div>
 
             <div className="p-5 space-y-3">
+              {!tutorialSeen ? (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                  <div className="font-black text-slate-900">How reporting works</div>
+                  <ul className="text-xs text-slate-600 font-semibold space-y-2 list-disc pl-4">
+                    <li>People Power is a neutral facilitation platform.</li>
+                    <li>Content reports go to moderators; site bug reports go to the dev team.</li>
+                    <li>Use reports for safety issues, not good-faith disagreements.</li>
+                    <li>Submitting a report doesn’t guarantee removal, but flags for review.</li>
+                  </ul>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        localStorage.setItem(REPORT_TUTORIAL_KEY, 'true');
+                      } catch {
+                        // ignore
+                      }
+                      setTutorialSeen(true);
+                    }}
+                    className="w-full px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90"
+                  >
+                    Got it
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setReportType('abuse')}
+                      className={`flex-1 px-3 py-2 rounded-xl text-xs font-black border ${
+                        reportType === 'abuse' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      Report content or behaviour
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReportType('bug')}
+                      className={`flex-1 px-3 py-2 rounded-xl text-xs font-black border ${
+                        reportType === 'bug' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      Report a problem with the app
+                    </button>
+                  </div>
 
-            <label className="text-sm font-black text-slate-700">Reason</label>
-            <select
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
-            >
-              <option value="">Select…</option>
-              {REPORT_REASONS.map((r) => (
-                <option key={r.value} value={r.value}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
+                  {!reporterEmail ? (
+                    <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
+                      Please sign in to submit a report.
+                    </div>
+                  ) : null}
 
-            {selectedReason ? (
-              <div className="text-xs text-slate-600 font-semibold">
-                {selectedReason.description}
-              </div>
-            ) : null}
+                  <label className="text-sm font-black text-slate-700">Category</label>
+                  <select
+                    value={reportType === 'bug' ? bugCategory : category}
+                    onChange={(e) => {
+                      if (reportType === 'bug') setBugCategory(e.target.value);
+                      else setCategory(e.target.value);
+                    }}
+                    className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
+                  >
+                    <option value="">Select…</option>
+                    {activeReasons.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
 
-            <label className="text-sm font-black text-slate-700">
-              Explanation (optional)
-              {category === 'other' ? <span className="text-rose-700"> *</span> : null}
-            </label>
-            <textarea
-              value={details}
-              onChange={(e) => setDetails(e.target.value)}
-              className="w-full min-h-24 p-3 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
-              placeholder="What happened?"
-            />
+                  {selectedReason ? (
+                    <div className="text-xs text-slate-600 font-semibold">
+                      {selectedReason.description}
+                    </div>
+                  ) : null}
 
-            <div className="pt-1 space-y-2">
-              <label className="text-sm font-black text-slate-700">Evidence file (optional)</label>
+                  {reportType === 'bug' ? (
+                    <>
+                      <label className="text-sm font-black text-slate-700">Short title</label>
+                      <input
+                        value={bugTitle}
+                        onChange={(e) => setBugTitle(e.target.value.slice(0, BUG_TITLE_MAX))}
+                        className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
+                        placeholder="E.g. Create button not responding"
+                        maxLength={BUG_TITLE_MAX}
+                      />
+                      <div className="text-xs text-slate-500 font-semibold">
+                        Page: {typeof window !== 'undefined' ? window.location.pathname : 'current page'}
+                      </div>
+                    </>
+                  ) : null}
 
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/jpg,image/gif,application/pdf"
-                onChange={(e) => {
-                  const file = (e.target.files && e.target.files[0]) || null;
-                  e.target.value = '';
-                  if (!file) {
-                    setEvidenceFile(null);
-                    return;
-                  }
-                  if (file.size > REPORT_MAX_UPLOAD_MB * 1024 * 1024) {
-                    toast.error(`File too large. Max size is ${REPORT_MAX_UPLOAD_MB}MB.`);
-                    setEvidenceFile(null);
-                    return;
-                  }
-                  if (file.type && !REPORT_ALLOWED_MIME_TYPES.includes(file.type)) {
-                    toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF) or PDF.');
-                    setEvidenceFile(null);
-                    return;
-                  }
-                  setEvidenceFile(file);
-                }}
-                className="block w-full text-sm"
-              />
-              <div className="text-xs text-slate-500 font-semibold">
-                Upload a screenshot or PDF if helpful. Please avoid sharing highly sensitive personal data.
-              </div>
-            </div>
+                  <label className="text-sm font-black text-slate-700">
+                    {reportType === 'bug' ? 'Description' : 'Explanation (optional)'}
+                    {reportType === 'bug' || (reportType === 'abuse' && category === 'other') ? (
+                      <span className="text-rose-700"> *</span>
+                    ) : null}
+                  </label>
+                  <textarea
+                    value={reportType === 'bug' ? bugDetails : details}
+                    onChange={(e) => {
+                      if (reportType === 'bug') setBugDetails(e.target.value.slice(0, BUG_DETAILS_MAX));
+                      else setDetails(e.target.value);
+                    }}
+                    className="w-full min-h-24 p-3 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
+                    placeholder={reportType === 'bug' ? 'Describe what you expected vs what happened.' : 'What happened?'}
+                  />
+                  {reportType === 'bug' ? (
+                    <div className="text-xs text-slate-500 font-semibold">
+                      {bugDetails.length}/{BUG_DETAILS_MAX}
+                    </div>
+                  ) : null}
 
-            <div className="flex gap-2 justify-end pt-2">
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 font-black hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSubmit}
-                disabled={submitting}
-                className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
-              >
-                {submitting ? 'Submitting…' : 'Submit'}
-              </button>
-            </div>
+                  <div className="pt-1 space-y-2">
+                    <label className="text-sm font-black text-slate-700">
+                      {reportType === 'bug' ? 'Screenshot (optional)' : 'Evidence file (optional)'}
+                    </label>
 
-            <div className="text-xs text-slate-500 font-semibold">
-              Reports are reviewed by moderators. Abuse of reporting may lead to restrictions.
-            </div>
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,application/pdf"
+                      onChange={(e) => {
+                        const file = (e.target.files && e.target.files[0]) || null;
+                        e.target.value = '';
+                        if (!file) {
+                          setEvidenceFile(null);
+                          return;
+                        }
+                        const validationError = validateFileUpload({
+                          file,
+                          maxBytes: MAX_UPLOAD_BYTES,
+                          allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+                        });
+                        if (validationError) {
+                          toast.error(validationError);
+                          setEvidenceFile(null);
+                          return;
+                        }
+                        setEvidenceFile(file);
+                      }}
+                      className="block w-full text-sm"
+                    />
+                    <div className="text-xs text-slate-500 font-semibold">
+                      Upload a screenshot or PDF if helpful. Please avoid sharing highly sensitive personal data.
+                    </div>
+                  </div>
 
-            <div className="text-xs font-semibold">
-              <Link
-                to="/safety-faq"
-                className="text-[#3A3DFF] hover:underline"
-                onClick={() => setOpen(false)}
-              >
-                Learn more about reporting
-              </Link>
-            </div>
+                  <div className="flex gap-2 justify-end pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setOpen(false)}
+                      className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 font-black hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSubmit}
+                      disabled={submitting || !reporterEmail}
+                      className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
+                    >
+                      {submitting ? 'Submitting…' : 'Submit'}
+                    </button>
+                  </div>
+
+                  <div className="text-xs text-slate-500 font-semibold">
+                    Reports are reviewed by moderators. Abuse of reporting may lead to restrictions.
+                  </div>
+
+                  <div className="text-xs font-semibold">
+                    <Link
+                      to="/safety-faq"
+                      className="text-[#3A3DFF] hover:underline"
+                      onClick={() => setOpen(false)}
+                    >
+                      Learn more about reporting
+                    </Link>
+                    <span className="mx-2 text-slate-300">•</span>
+                    <Link
+                      to={reportCenterLink}
+                      className="text-[#3A3DFF] hover:underline"
+                      onClick={() => setOpen(false)}
+                    >
+                      Open Report Center
+                    </Link>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>

@@ -1,7 +1,8 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { HelpCircle, ArrowLeft, Shield } from 'lucide-react';
+import { HelpCircle, Shield } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import BackButton from '@/components/shared/BackButton';
 
 export default function SafetyFAQ() {
   const sections = [
@@ -118,13 +119,10 @@ export default function SafetyFAQ() {
                 </p>
               </div>
             </div>
-            <Link
-              to="/legal-hub"
+            <BackButton
               className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900 border border-slate-900/20 bg-white/40 hover:bg-white/60 px-3 py-2 rounded-full"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back
-            </Link>
+              iconClassName="w-4 h-4"
+            />
           </div>
         </div>
 

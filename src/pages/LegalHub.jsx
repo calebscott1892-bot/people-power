@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
+import BackButton from '@/components/shared/BackButton';
 
 export default function LegalHub() {
   return (
@@ -15,13 +15,10 @@ export default function LegalHub() {
                 Plain-language summaries and full policy text.
               </p>
             </div>
-            <Link
-              to="/"
+            <BackButton
               className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900 border border-slate-900/20 bg-white/40 hover:bg-white/60 px-3 py-2 rounded-full"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back
-            </Link>
+              iconClassName="w-4 h-4"
+            />
           </div>
         </div>
 

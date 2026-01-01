@@ -18,6 +18,10 @@ const categoryIcons = {
   underage_safety_concern: '👶',
   impersonation_or_identity_fraud: '🎭',
   inappropriate_content: '🔞',
+  page_not_loading: '🧭',
+  button_not_working: '🧩',
+  layout_issue: '📱',
+  wrong_information: '📌',
   other: '❓',
   // Back-compat for older category names
   harassment: '😡',
@@ -46,6 +50,18 @@ const statusColors = {
   dismissed: 'text-slate-600 bg-slate-100'
 };
 
+function maskEmail(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!raw.includes('@')) return raw;
+  const [name, domain] = raw.split('@');
+  if (!domain) return raw;
+  const head = name.slice(0, 1);
+  const tail = name.length > 2 ? name.slice(-1) : '';
+  const masked = `${head}${name.length > 1 ? '***' : ''}${tail}`;
+  return `${masked}@${domain}`;
+}
+
 export default function ReportCard({ report, onSelect }) {
   const { data: reporter } = useQuery({
     queryKey: ['user', report.reporter_email],
@@ -58,10 +74,18 @@ export default function ReportCard({ report, onSelect }) {
   const createdAt = report?.created_at || report?.created_date || report?.createdAt || report?.created;
   const status = String(report?.status || 'pending');
   const category = String(report?.report_category || report?.category || 'other');
+  const reportType = String(report?.report_type || 'abuse');
   const contentType = String(report?.reported_content_type || report?.content_type || 'content');
   const contentId = String(report?.reported_content_id || report?.content_id || '');
   const details = report?.report_details || report?.details || '';
+  const reportTitle = report?.report_title ? String(report.report_title) : '';
   const isReversed = !!(report?.action_reversed_at || report?.action_reversed_by);
+  const reporterLabel =
+    reporter?.display_name ||
+    reporter?.full_name ||
+    reporter?.username ||
+    maskEmail(report?.reporter_email) ||
+    'Reporter';
 
   return (
     <motion.div
@@ -78,7 +102,9 @@ export default function ReportCard({ report, onSelect }) {
           <div className="text-3xl">{categoryIcons[category] || '❓'}</div>
           <div className="flex-1 min-w-0">
             <h3 className="font-black text-lg text-slate-900 mb-1">
-              {category.replace(/_/g, ' ').toUpperCase()}
+              {reportType === 'bug'
+                ? (reportTitle || category.replace(/_/g, ' ').toUpperCase())
+                : category.replace(/_/g, ' ').toUpperCase()}
             </h3>
             <p className="text-sm text-slate-600 font-semibold">
               {contentType} • ID: {contentId ? `${contentId.substring(0, 8)}...` : '—'}
@@ -87,6 +113,9 @@ export default function ReportCard({ report, onSelect }) {
         </div>
 
         <div className="flex flex-col items-end gap-2">
+          <span className="px-2 py-1 rounded text-[10px] font-black uppercase bg-slate-900 text-white">
+            {reportType === 'bug' ? 'BUG' : 'ABUSE'}
+          </span>
           <span className={cn(
             "px-3 py-1 rounded-lg text-xs font-black uppercase",
             statusColors[status] || statusColors.pending
@@ -115,7 +144,7 @@ export default function ReportCard({ report, onSelect }) {
         <div className="flex items-center gap-4 text-xs text-slate-500">
           <span className="flex items-center gap-1">
             <User className="w-3 h-3" />
-            {reporter?.full_name || reporter?.email || 'Unknown'}
+            {reporterLabel}
           </span>
           <span className="flex items-center gap-1">
             <Clock className="w-3 h-3" />

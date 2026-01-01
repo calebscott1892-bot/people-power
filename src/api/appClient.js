@@ -143,11 +143,11 @@ function createRemoteAuth(baseUrl) {
 		me: async () => {
 			return httpJson(baseUrl, '/api/auth/me', { method: 'GET' });
 		},
-		redirectToLogin: (url) => {
+		redirectToLogin: (_url) => {
 			// Placeholder: implement real auth redirects when auth is added.
 			// Placeholder: implement real auth redirects when auth is added. Use structured logging if needed.
 		},
-		logout: (redirectUrl) => {
+		logout: (_redirectUrl) => {
 			// Placeholder: implement real logout when auth is added. Use structured logging if needed.
 		},
 	};

@@ -17,6 +17,7 @@ export async function proxyRequest(context, { stripApiPrefix = false } = {}) {
   const backendBase = resolveBackendBase(env);
 
   if (!backendBase) {
+    // TODO: Cloudflare port pending – keep using Node server locally or set BACKEND_BASE_URL.
     return new Response(JSON.stringify({ error: 'Backend unavailable' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' },
@@ -54,8 +55,8 @@ export async function proxyRequest(context, { stripApiPrefix = false } = {}) {
       statusText: upstream.statusText,
       headers: responseHeaders,
     });
-  } catch (err) {
-    return new Response(JSON.stringify({ error: 'Upstream request failed', detail: String(err?.message || err) }), {
+  } catch {
+    return new Response(JSON.stringify({ error: 'Upstream request failed' }), {
       status: 502,
       headers: { 'Content-Type': 'application/json' },
     });

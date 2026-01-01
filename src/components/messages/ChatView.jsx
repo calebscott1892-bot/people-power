@@ -10,6 +10,10 @@ import { toast } from "sonner";
 import GifPicker from './GifPicker';
 import ReactionPicker from './ReactionPicker';
 import { entities, integrations } from '@/api/appClient';
+import { useAuth } from '@/auth/AuthProvider';
+import { uploadFile } from '@/api/uploadsClient';
+import { ALLOWED_IMAGE_WITH_GIF_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
+import { isAdmin as isAdminEmail } from '@/utils/staff';
 import {
   cacheAIResult,
   getCachedAIResult,
@@ -19,11 +23,11 @@ import {
 } from '@/utils/aiGuardrail';
 
 export default function ChatView({ conversation, currentUser, isRequest, onAcceptRequest }) {
+  const { session } = useAuth();
+  const accessToken = session?.access_token ? String(session.access_token) : null;
   const [message, setMessage] = useState('');
   const [showGifPicker, setShowGifPicker] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
-  const MAX_UPLOAD_MB = 5;
-  const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif'];
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const queryClient = useQueryClient();
@@ -47,6 +51,7 @@ export default function ChatView({ conversation, currentUser, isRequest, onAccep
     },
     enabled: !!otherUserEmail
   });
+  const isAdminOther = otherProfile?.user_email ? isAdminEmail(otherProfile.user_email) : false;
 
   const messagePageSize = 50;
   const messageFields = [
@@ -190,18 +195,29 @@ export default function ChatView({ conversation, currentUser, isRequest, onAccep
   const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-      toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-      return;
-    }
-    if (file.type && !ALLOWED_IMAGE_TYPES.includes(file.type)) {
-      toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF).');
+    const validationError = validateFileUpload({
+      file,
+      maxBytes: MAX_UPLOAD_BYTES,
+      allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+    });
+    if (validationError) {
+      toast.error(validationError);
       return;
     }
 
     setUploadingImage(true);
     try {
-      const { file_url } = await integrations.Core.UploadFile({ file });
+      if (!accessToken) {
+        toast.error('Please sign in to upload an image');
+        return;
+      }
+      const upload = await uploadFile(file, {
+        accessToken,
+        maxBytes: MAX_UPLOAD_BYTES,
+        allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+      });
+      const file_url = upload?.url;
+      if (!file_url) throw new Error('Upload failed');
 
       const prompt = `Analyze this image URL and determine if it contains: nudity, explicit content, violence, or harmful content. Respond with ONLY a JSON object.`;
       const response_json_schema = {
@@ -285,7 +301,14 @@ export default function ChatView({ conversation, currentUser, isRequest, onAccep
             </div>
           )}
           <div>
-            <h2 className="font-black text-slate-900">{otherProfile?.display_name || 'User'}</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="font-black text-slate-900">{otherProfile?.display_name || 'User'}</h2>
+              {isAdminOther ? (
+                <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                  Admin
+                </span>
+              ) : null}
+            </div>
             <p className="text-xs text-slate-500">@{otherProfile?.username}</p>
           </div>
         </div>
@@ -294,9 +317,14 @@ export default function ChatView({ conversation, currentUser, isRequest, onAccep
       {/* Request Banner */}
       {isRequest && (
         <div className="p-4 bg-yellow-50 border-b-2 border-yellow-200">
-          <p className="text-sm text-yellow-900 font-bold mb-3">
-            Message request from {otherProfile?.display_name}
-          </p>
+          <div className="flex items-center gap-2 text-sm text-yellow-900 font-bold mb-3">
+            <span>Message request from {otherProfile?.display_name}</span>
+            {isAdminOther ? (
+              <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                Admin
+              </span>
+            ) : null}
+          </div>
           <div className="flex gap-2">
             <Button
               onClick={() => acceptRequestMutation.mutate()}

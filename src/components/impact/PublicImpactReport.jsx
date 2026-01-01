@@ -34,7 +34,7 @@ export default function PublicImpactReport({ movement }) {
   const shareReport = async () => {
     const text = `Impact Report: ${movement.title}\n\n` +
       `📊 Momentum Score: ${movement.momentum_score || 0}\n` +
-      `👥 Participants: ${(movement.verified_participants || 0) + (movement.unverified_participants || 0)}\n` +
+      `👥 Participants (verified): ${movement.verified_participants || 0}\n` +
       `🚀 Boosts: ${movement.boosts || 0}\n\n` +
       `View full movement: ${window.location.origin}/MovementDetails?id=${movement.id}`;
 
@@ -100,9 +100,9 @@ export default function PublicImpactReport({ movement }) {
           <div className="bg-gradient-to-br from-purple-50 to-white p-6 rounded-xl border-2 border-purple-200 text-center">
             <Users className="w-8 h-8 text-purple-600 mx-auto mb-2" />
             <div className="text-3xl font-black text-purple-600 mb-1">
-              {(movement.verified_participants || 0) + (movement.unverified_participants || 0)}
+              {movement.verified_participants || 0}
             </div>
-            <div className="text-sm font-bold text-slate-600">Total Participants</div>
+            <div className="text-sm font-bold text-slate-600">Verified Participants</div>
           </div>
 
           <div className="bg-gradient-to-br from-yellow-50 to-white p-6 rounded-xl border-2 border-yellow-200 text-center">

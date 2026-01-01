@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, UserPlus, UserMinus, Loader2, Zap, TrendingUp, Trophy, MessageCircle, Edit } from 'lucide-react';
+import { UserPlus, UserMinus, Loader2, Zap, TrendingUp, Trophy, MessageCircle, Edit } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -11,6 +11,7 @@ import TagBadge from '../components/shared/TagBadge';
 import EditProfileModal from '../components/profile/EditProfileModal';
 import GamificationWidget from '../components/gamification/GamificationWidget';
 import GiftPointsModal from '@/components/challenges/GiftPointsModal';
+import BackButton from '@/components/shared/BackButton';
 import { entities } from '@/api/appClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchUserFollow, setUserFollow } from '@/api/userFollowsClient';
@@ -19,10 +20,35 @@ import { createConversation } from '@/api/messagesClient';
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
 import { giftPoints } from '@/api/pointGiftsClient';
 import { fetchMovementsPage } from '@/api/movementsClient';
+import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
+import { fetchMyBlocks, blockUser, unblockUser } from '@/api/blocksClient';
+import { isAdmin as isAdminEmail } from '@/utils/staff';
+
+function getMovementAuthorLabel(movement) {
+  const displayName = String(
+    movement?.creator_display_name ||
+    movement?.author_display_name ||
+    ''
+  ).trim();
+  const usernameRaw = String(
+    movement?.creator_username ||
+    movement?.author_username ||
+    ''
+  ).trim();
+  const username = usernameRaw ? usernameRaw.replace(/^@/, '') : '';
+  const fallback = String(movement?.author_name || movement?.creator_name || '').trim();
+  const safeFallback = fallback && !fallback.includes('@') ? fallback : '';
+  return displayName || (username ? `@${username}` : (safeFallback || 'Member'));
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
 
 export default function UserProfile() {
+  const location = useLocation();
   const navigate = useNavigate();
-  const { email: emailParam } = useParams();
+  const { email: emailParam, username: usernameParam } = useParams();
   const [searchParams] = useSearchParams();
   const { user, session } = useAuth();
   const accessToken = session?.access_token || null;
@@ -32,6 +58,12 @@ export default function UserProfile() {
     const raw = (fromParam || fromQuery || '').trim();
     return raw || null;
   }, [emailParam, searchParams]);
+  const profileUsername = useMemo(() => {
+    const fromParam = usernameParam ? String(usernameParam) : '';
+    const fromQuery = searchParams?.get('username') ? String(searchParams.get('username')) : '';
+    const raw = (fromParam || fromQuery || '').trim();
+    return raw || null;
+  }, [usernameParam, searchParams]);
   const [currentUser, setCurrentUser] = useState(null);
   const [isFollowing, setIsFollowing] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -42,45 +74,78 @@ export default function UserProfile() {
     setCurrentUser(user || null);
   }, [user]);
 
-  const { data: followState } = useQuery({
-    queryKey: ['userFollow', profileEmail, currentUser?.email],
-    queryFn: async () => fetchUserFollow(profileEmail, { accessToken }),
-    enabled: !!accessToken && !!profileEmail && !!currentUser?.email,
+  const { data: userProfile, isLoading: profileLoading } = useQuery({
+    queryKey: ['userProfile', profileEmail, profileUsername],
+    queryFn: async () => {
+      if (profileEmail) {
+        const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
+        if (profiles.length > 0) return profiles[0];
+
+        // Create profile if doesn't exist
+        const users = await entities.User.filter({ email: profileEmail });
+        if (users.length === 0) return null;
+
+        const user = users[0];
+        return entities.UserProfile.create({
+          user_email: user.email,
+          display_name: user.full_name,
+          username: user.email.split('@')[0],
+          bio: '',
+          followers_count: 0,
+          following_count: 0
+        });
+      }
+
+      if (profileUsername) {
+        if (!accessToken) return null;
+        return fetchPublicProfileByUsername(profileUsername, { accessToken });
+      }
+
+      return null;
+    },
+    enabled: !!profileEmail || !!profileUsername
   });
+
+  const resolvedProfileEmail = useMemo(() => {
+    return profileEmail || userProfile?.user_email || null;
+  }, [profileEmail, userProfile]);
+
+  const profileIsAdmin = useMemo(() => {
+    return resolvedProfileEmail ? isAdminEmail(resolvedProfileEmail) : false;
+  }, [resolvedProfileEmail]);
+
+  const { data: followState } = useQuery({
+    queryKey: ['userFollow', resolvedProfileEmail, currentUser?.email],
+    queryFn: async () => fetchUserFollow(resolvedProfileEmail, { accessToken }),
+    enabled: !!accessToken && !!resolvedProfileEmail && !!currentUser?.email,
+  });
+
+  const { data: myBlocks } = useQuery({
+    queryKey: ['myBlocks', accessToken],
+    queryFn: async () => fetchMyBlocks({ accessToken }),
+    enabled: !!accessToken,
+  });
+
+  const blockedEmails = useMemo(() => {
+    const list = Array.isArray(myBlocks?.blocked) ? myBlocks.blocked : [];
+    return new Set(list.map((b) => normalizeEmail(b?.email)).filter(Boolean));
+  }, [myBlocks]);
+
+  const isBlockedByMe = useMemo(() => {
+    const email = normalizeEmail(resolvedProfileEmail);
+    return !!email && blockedEmails.has(email);
+  }, [blockedEmails, resolvedProfileEmail]);
 
   useEffect(() => {
-    if (followState && typeof followState.following === 'boolean' && profileEmail !== currentUser?.email) {
+    if (followState && typeof followState.following === 'boolean' && resolvedProfileEmail !== currentUser?.email) {
       setIsFollowing(!!followState.following);
     }
-  }, [followState, profileEmail, currentUser?.email]);
-
-  const { data: userProfile, isLoading: profileLoading } = useQuery({
-    queryKey: ['userProfile', profileEmail],
-    queryFn: async () => {
-      const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
-      if (profiles.length > 0) return profiles[0];
-      
-      // Create profile if doesn't exist
-      const users = await entities.User.filter({ email: profileEmail });
-      if (users.length === 0) return null;
-      
-      const user = users[0];
-      return entities.UserProfile.create({
-        user_email: user.email,
-        display_name: user.full_name,
-        username: user.email.split('@')[0],
-        bio: '',
-        followers_count: 0,
-        following_count: 0
-      });
-    },
-    enabled: !!profileEmail
-  });
+  }, [followState, resolvedProfileEmail, currentUser?.email]);
 
   const { data: userMovements = [] } = useQuery({
-    queryKey: ['userMovements', profileEmail],
+    queryKey: ['userMovements', resolvedProfileEmail],
     queryFn: async () => {
-      const email = profileEmail ? String(profileEmail) : null;
+      const email = resolvedProfileEmail ? String(resolvedProfileEmail) : null;
       if (!email) return [];
       const all = await fetchMovementsPage({
         limit: 500,
@@ -92,21 +157,27 @@ export default function UserProfile() {
           'momentum_score',
           'author_email',
           'author_name',
+          'creator_display_name',
+          'creator_username',
+          'author_display_name',
+          'author_username',
           'created_at',
           'created_date',
         ].join(','),
+        accessToken,
       });
       return (Array.isArray(all) ? all : [])
         .filter((m) => String(m?.author_email || '').toLowerCase() === String(email).toLowerCase())
         .sort((a, b) => String(b?.created_at || b?.created_date || '').localeCompare(String(a?.created_at || a?.created_date || '')));
     },
-    enabled: !!profileEmail
+    enabled: !!resolvedProfileEmail
   });
 
   const { data: participatedMovements = [] } = useQuery({
-    queryKey: ['participatedMovements', profileEmail],
+    queryKey: ['participatedMovements', resolvedProfileEmail],
     queryFn: async () => {
-      const participations = await entities.Participation.filter({ user_email: profileEmail });
+      if (!resolvedProfileEmail) return [];
+      const participations = await entities.Participation.filter({ user_email: resolvedProfileEmail });
       if (participations.length === 0) return [];
       
       const movementIds = new Set(
@@ -126,24 +197,30 @@ export default function UserProfile() {
           'momentum_score',
           'author_email',
           'author_name',
+          'creator_display_name',
+          'creator_username',
+          'author_display_name',
+          'author_username',
           'created_at',
           'created_date',
         ].join(','),
+        accessToken,
       });
 
       return (Array.isArray(all) ? all : [])
         .filter((m) => movementIds.has(String(m?.id || '')))
         .sort((a, b) => String(b?.created_at || b?.created_date || '').localeCompare(String(a?.created_at || a?.created_date || '')));
     },
-    enabled: !!profileEmail
+    enabled: !!resolvedProfileEmail
   });
 
   const { data: userStats } = useQuery({
-    queryKey: ['userChallengeStats', profileEmail],
+    queryKey: ['userChallengeStats', resolvedProfileEmail],
     queryFn: async () => {
-      return fetchOrCreateUserChallengeStats(profileEmail);
+      if (!resolvedProfileEmail) return null;
+      return fetchOrCreateUserChallengeStats(resolvedProfileEmail);
     },
-    enabled: !!profileEmail
+    enabled: !!resolvedProfileEmail
   });
 
   const { data: myStats } = useQuery({
@@ -158,14 +235,14 @@ export default function UserProfile() {
   const toggleFollowMutation = useMutation({
     mutationFn: async () => {
       if (!accessToken) throw new Error('Sign in to follow');
-      if (!currentUser?.email || !profileEmail) throw new Error('Missing profile');
+      if (!currentUser?.email || !resolvedProfileEmail) throw new Error('Missing profile');
 
       const nextFollowing = !isFollowing;
       if (nextFollowing) {
         const rateCheck = await checkActionAllowed({
           email: currentUser?.email ?? null,
           action: 'user_follow',
-          contextId: profileEmail,
+          contextId: resolvedProfileEmail,
           accessToken,
         });
         if (!rateCheck?.ok) {
@@ -174,15 +251,59 @@ export default function UserProfile() {
         }
       }
 
-      return setUserFollow(profileEmail, !isFollowing, { accessToken });
+      return setUserFollow(resolvedProfileEmail, !isFollowing, { accessToken });
     },
     onSuccess: async (next) => {
       setIsFollowing(!!next?.following);
-      await queryClient.invalidateQueries({ queryKey: ['userFollow', profileEmail, currentUser?.email] });
+      await queryClient.invalidateQueries({ queryKey: ['userFollow', resolvedProfileEmail, currentUser?.email] });
       toast.success(next?.following ? 'Following!' : 'Unfollowed');
     },
     onError: (e) => toast.error(e?.message || 'Failed to update follow'),
   });
+
+  const blockMutation = useMutation({
+    mutationFn: async () => {
+      if (!accessToken) throw new Error('Sign in to block');
+      if (!resolvedProfileEmail) throw new Error('Missing profile');
+      return blockUser(resolvedProfileEmail, { accessToken });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['myBlocks', accessToken] });
+      toast.success('User blocked');
+    },
+    onError: (e) => toast.error(e?.message || 'Failed to block user'),
+  });
+
+  const unblockMutation = useMutation({
+    mutationFn: async () => {
+      if (!accessToken) throw new Error('Sign in to unblock');
+      if (!resolvedProfileEmail) throw new Error('Missing profile');
+      return unblockUser(resolvedProfileEmail, { accessToken });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['myBlocks', accessToken] });
+      toast.success('User unblocked');
+    },
+    onError: (e) => toast.error(e?.message || 'Failed to unblock user'),
+  });
+
+  const safeHandle = useMemo(() => {
+    const emailLocal = String(resolvedProfileEmail || '').split('@')[0]?.toLowerCase() || '';
+    const rawUsername = userProfile?.username ? String(userProfile.username) : '';
+    const rawDisplay = userProfile?.display_name || '';
+    const candidate =
+      (rawUsername && rawUsername.toLowerCase() !== emailLocal) ? rawUsername : rawDisplay;
+    const trimmed = String(candidate || '').trim();
+    if (trimmed) return trimmed.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (emailLocal) return `member-${emailLocal.slice(0, 3)}${emailLocal.length}`;
+    return 'member';
+  }, [userProfile, resolvedProfileEmail]);
+
+  const profilePhotoUrl = useMemo(() => {
+    const raw = userProfile?.profile_photo_url || userProfile?.avatar_url || '';
+    const trimmed = String(raw || '').trim();
+    return trimmed || '';
+  }, [userProfile]);
 
   if (profileLoading) {
     return (
@@ -197,23 +318,25 @@ export default function UserProfile() {
     return (
       <div className="flex flex-col items-center justify-center py-32">
         <h2 className="text-2xl font-black text-slate-900 mb-2">User not found</h2>
-        <Link to={createPageUrl('Home')}>
-          <Button>Back to Home</Button>
-        </Link>
+        <BackButton
+          className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-900 text-white font-bold"
+          iconClassName="w-4 h-4"
+        />
       </div>
     );
   }
 
-  const isOwnProfile = currentUser?.email === profileEmail;
+  const isOwnProfile = currentUser?.email === resolvedProfileEmail;
   const displayedFollowersCount = followState?.followers_count ?? userProfile.followers_count ?? 0;
   const displayedFollowingCount = followState?.following_count ?? userProfile.following_count ?? 0;
+  const blockPending = blockMutation.isPending || unblockMutation.isPending;
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
-      <Link to={createPageUrl('Home')} className="inline-flex items-center gap-2 text-slate-600 hover:text-slate-900 group font-bold">
-        <ArrowLeft className="w-5 h-5 group-hover:-translate-x-1 transition-transform" strokeWidth={2.5} />
-        Back
-      </Link>
+      <BackButton
+        className="inline-flex items-center gap-2 text-slate-600 hover:text-slate-900 group font-bold"
+        iconClassName="w-5 h-5 group-hover:-translate-x-1 transition-transform"
+      />
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -221,35 +344,40 @@ export default function UserProfile() {
         className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
       >
         {userProfile.banner_url ? (
-          <div className="h-32 bg-cover bg-center" style={{ backgroundImage: `url(${userProfile.banner_url})` }} />
+          <div className="h-24 sm:h-32 bg-cover bg-center" style={{ backgroundImage: `url(${userProfile.banner_url})` }} />
         ) : (
-          <div className="h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
+          <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
         
-        <div className="px-8 pb-8">
-          <div className="flex items-start justify-between gap-6 mb-6">
-            <div className="flex items-start gap-6">
-              <div className="w-32 h-32 -mt-16 bg-white rounded-3xl shadow-2xl flex items-center justify-center border-4 border-white">
-                {userProfile.profile_photo_url ? (
-                  <img src={userProfile.profile_photo_url} alt="" className="w-full h-full rounded-2xl object-cover" />
+        <div className="px-4 sm:px-8 pb-6 sm:pb-8">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6 mb-6">
+            <div className="flex items-start gap-4 sm:gap-6">
+              <div className="w-24 h-24 sm:w-32 sm:h-32 -mt-12 sm:-mt-16 bg-white rounded-full shadow-2xl flex items-center justify-center border-4 border-white overflow-hidden">
+                {profilePhotoUrl ? (
+                  <img src={profilePhotoUrl} alt="" className="w-full h-full rounded-full object-cover" />
                 ) : (
-                  <div className="w-28 h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-2xl flex items-center justify-center">
-                    <span className="text-5xl font-black text-slate-900">
+                  <div className="w-20 h-20 sm:w-28 sm:h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
+                    <span className="text-3xl sm:text-5xl font-black text-slate-900">
                       {(userProfile.display_name?.[0] || userProfile.username?.[0] || '?').toUpperCase()}
                     </span>
                   </div>
                 )}
               </div>
-              <div className="pt-4">
-                <h1 className="text-3xl font-black text-slate-900 mb-1">
+              <div className="pt-2 sm:pt-4">
+                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 mb-1">
                   {userProfile.display_name || 'Anonymous'}
                 </h1>
-                <p className="text-sm text-slate-500 font-semibold">@{userProfile.username}</p>
+                <p className="text-sm text-slate-500 font-semibold">@{safeHandle}</p>
+                {profileIsAdmin ? (
+                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                    Admin
+                  </span>
+                ) : null}
               </div>
             </div>
             
             {isOwnProfile && (
-              <div className="pt-4 flex gap-3">
+              <div className="pt-4 flex gap-3 flex-wrap">
                 <Button
                   onClick={() => setShowEditModal(true)}
                   variant="outline"
@@ -258,65 +386,107 @@ export default function UserProfile() {
                   <Edit className="w-4 h-4 mr-2" />
                   Edit
                 </Button>
+                {profileIsAdmin ? (
+                  <Link
+                    to={createPageUrl('AdminDashboard')}
+                    state={{ fromLabel: 'Profile', fromPath: location.pathname }}
+                    className="inline-flex h-12 items-center justify-center rounded-xl border-2 border-red-200 bg-red-50 px-4 text-sm font-black uppercase tracking-wide text-red-700"
+                  >
+                    Admin Panel
+                  </Link>
+                ) : null}
               </div>
             )}
 
             {!isOwnProfile && currentUser && (
-              <div className="pt-4 flex gap-3">
-                <Button
-                  onClick={() => toggleFollowMutation.mutate()}
-                  disabled={toggleFollowMutation.isPending}
-                  className={cn(
-                    "h-12 font-bold rounded-xl uppercase tracking-wide",
-                    isFollowing
-                      ? "bg-slate-200 hover:bg-slate-300 text-slate-700"
-                      : "bg-gradient-to-r from-[#3A3DFF] to-[#5B5EFF] hover:from-[#2A2DDD] hover:to-[#4B4EFF] text-white"
-                  )}
-                >
-                  {isFollowing ? (
-                    <>
-                      <UserMinus className="w-4 h-4 mr-2" />
-                      Unfollow
-                    </>
-                  ) : (
-                    <>
-                      <UserPlus className="w-4 h-4 mr-2" />
-                      Follow
-                    </>
-                  )}
-                </Button>
-                <Button
-                  onClick={async () => {
-                    try {
-                      if (!accessToken) throw new Error('Sign in to message');
-                      const convo = await createConversation(profileEmail, { accessToken });
-                      const id = convo?.id ? String(convo.id) : null;
-                      navigate(id ? `/Messages?conversationId=${encodeURIComponent(id)}` : '/Messages');
-                    } catch (e) {
-                      toast.error(e?.message || 'Failed to start conversation');
-                    }
-                  }}
-                  variant="outline"
-                  className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
-                >
-                  <MessageCircle className="w-4 h-4 mr-2" />
-                  Message
-                </Button>
+              <div className="pt-4 flex flex-wrap gap-3">
+                {isBlockedByMe ? (
+                  <>
+                    <Button
+                      onClick={() => unblockMutation.mutate()}
+                      disabled={blockPending}
+                      variant="outline"
+                      className="h-12 font-bold rounded-xl border-2 border-red-200 bg-red-50 text-red-700 uppercase tracking-wide"
+                    >
+                      Unblock
+                    </Button>
+                    <p className="w-full text-xs text-amber-700 font-semibold">
+                      You blocked this user. Their content and messages are hidden from you.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      onClick={() => toggleFollowMutation.mutate()}
+                      disabled={toggleFollowMutation.isPending || blockPending}
+                      className={cn(
+                        "h-12 font-bold rounded-xl uppercase tracking-wide",
+                        isFollowing
+                          ? "bg-slate-200 hover:bg-slate-300 text-slate-700"
+                          : "bg-gradient-to-r from-[#3A3DFF] to-[#5B5EFF] hover:from-[#2A2DDD] hover:to-[#4B4EFF] text-white"
+                      )}
+                    >
+                      {isFollowing ? (
+                        <>
+                          <UserMinus className="w-4 h-4 mr-2" />
+                          Unfollow
+                        </>
+                      ) : (
+                        <>
+                          <UserPlus className="w-4 h-4 mr-2" />
+                          Follow
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      onClick={async () => {
+                        try {
+                          if (!accessToken) throw new Error('Sign in to message');
+                          const convo = await createConversation(resolvedProfileEmail, { accessToken });
+                          const id = convo?.id ? String(convo.id) : null;
+                          navigate(id ? `/Messages?conversationId=${encodeURIComponent(id)}` : '/Messages');
+                        } catch (e) {
+                          toast.error(e?.message || 'Failed to start conversation');
+                        }
+                      }}
+                      variant="outline"
+                      className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
+                      disabled={blockPending}
+                    >
+                      <MessageCircle className="w-4 h-4 mr-2" />
+                      Message
+                    </Button>
 
-                <Button
-                  onClick={() => {
-                    if (!currentUser?.email) {
-                      toast.error('Sign in to gift points');
-                      return;
-                    }
-                    setShowGiftModal(true);
-                  }}
-                  variant="outline"
-                  className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
-                >
-                  <Trophy className="w-4 h-4 mr-2" />
-                  Gift points
-                </Button>
+                    <Button
+                      onClick={() => {
+                        if (!currentUser?.email) {
+                          toast.error('Sign in to gift points');
+                          return;
+                        }
+                        setShowGiftModal(true);
+                      }}
+                      variant="outline"
+                      className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
+                      disabled={blockPending}
+                    >
+                      <Trophy className="w-4 h-4 mr-2" />
+                      Gift points
+                    </Button>
+
+                    <Button
+                      onClick={() => {
+                        const ok = window.confirm('Blocking hides this user’s profile, movements, and messages. Continue?');
+                        if (!ok) return;
+                        blockMutation.mutate();
+                      }}
+                      variant="outline"
+                      className="h-12 font-bold rounded-xl border-2 border-red-200 text-red-700 uppercase tracking-wide"
+                      disabled={blockPending}
+                    >
+                      Block
+                    </Button>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -382,7 +552,7 @@ export default function UserProfile() {
       </motion.div>
 
       {/* Gamification Widget */}
-      <GamificationWidget userEmail={profileEmail} />
+      <GamificationWidget userEmail={resolvedProfileEmail} />
 
       {/* Movement History */}
       <motion.div
@@ -466,9 +636,9 @@ export default function UserProfile() {
                             </div>
                           )}
                         </div>
-                        <span className="text-xs font-bold text-slate-500 uppercase">
-                          by {movement.author_name}
-                        </span>
+                      <span className="text-xs font-bold text-slate-500 uppercase">
+                        by {getMovementAuthorLabel(movement)}
+                      </span>
                       </div>
                     </Link>
                   ))}
@@ -483,7 +653,7 @@ export default function UserProfile() {
         open={showEditModal}
         onClose={() => setShowEditModal(false)}
         profile={userProfile}
-        userEmail={profileEmail}
+        userEmail={resolvedProfileEmail}
         userStats={userStats}
       />
 
@@ -495,7 +665,7 @@ export default function UserProfile() {
           toUser={userProfile}
           userStats={myStats}
           onGift={async ({ amount, message }) => {
-            await giftPoints(currentUser.email, profileEmail, { amount, message });
+            await giftPoints(currentUser.email, resolvedProfileEmail, { amount, message });
             await queryClient.invalidateQueries({ queryKey: ['userChallengeStats'] });
             toast.success('Gift sent');
           }}

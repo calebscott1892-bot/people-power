@@ -5,8 +5,7 @@ export default function FuturePredictor({ movement, className = '' }) {
   const stats = useMemo(() => {
     const boosts = Number(movement?.boosts || 0) || 0;
     const supporters = Number(movement?.supporters || 0) || 0;
-    const participants =
-      (Number(movement?.verified_participants || 0) || 0) + (Number(movement?.unverified_participants || 0) || 0);
+    const participants = Number(movement?.verified_participants || 0) || 0;
     const momentum = Number(movement?.momentum_score || 0) || 0;
 
     const baseReach = Number(movement?.actual_reach || 0) || Math.max((boosts + supporters) * 10, 50);

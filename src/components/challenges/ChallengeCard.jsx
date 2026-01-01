@@ -7,23 +7,32 @@ import ReportButton from '../safety/ReportButton';
 
 const categoryColors = {
   kindness: "from-pink-400 to-rose-400",
+  civic_literacy: "from-amber-400 to-yellow-400",
+  community_care: "from-green-400 to-emerald-400",
   community: "from-[#3A3DFF] to-[#5B5EFF]",
-  cleanup: "from-green-400 to-emerald-400",
-  gratitude: "from-amber-400 to-yellow-400",
-  health: "from-cyan-400 to-blue-400",
-  creativity: "from-purple-400 to-fuchsia-400"
+  environment: "from-emerald-400 to-green-500",
+  wellbeing: "from-cyan-400 to-blue-400"
 };
 
 const categoryEmoji = {
   kindness: "💝",
-  community: "🤝",
-  cleanup: "🌱",
-  gratitude: "🙏",
-  health: "💪",
-  creativity: "🎨"
+  civic_literacy: "📚",
+  community_care: "🤝",
+  community: "🫱🏽‍🫲🏼",
+  environment: "🌱",
+  wellbeing: "💪"
 };
 
 export default function ChallengeCard({ challenge, onComplete, isCompleted, userCompletion }) {
+  const hasImageEvidence =
+    !!userCompletion?.evidence_image_url ||
+    userCompletion?.evidence_type === 'image' ||
+    userCompletion?.evidence_type === 'text_image';
+  const hasTextEvidence =
+    !!userCompletion?.evidence_text ||
+    userCompletion?.evidence_type === 'text' ||
+    userCompletion?.evidence_type === 'text_image';
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -68,13 +77,13 @@ export default function ChallengeCard({ challenge, onComplete, isCompleted, user
       {/* Evidence Indicators */}
       {userCompletion && (
         <div className="flex items-center gap-2 mb-4 text-sm">
-          {userCompletion.evidence_type === 'image' && (
+          {hasImageEvidence && (
             <span className="flex items-center gap-1 px-3 py-1 bg-blue-100 text-blue-700 rounded-lg font-semibold">
               <ImageIcon className="w-4 h-4" />
               Photo Evidence
             </span>
           )}
-          {userCompletion.evidence_type === 'text' && (
+          {hasTextEvidence && (
             <span className="flex items-center gap-1 px-3 py-1 bg-purple-100 text-purple-700 rounded-lg font-semibold">
               <FileText className="w-4 h-4" />
               Description Added

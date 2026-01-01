@@ -135,19 +135,19 @@ export default function CreatorDashboard({ movement, isOwner, userProfile }) {
 
   useEffect(() => {
     if (analyticsErrorObj) logError(analyticsErrorObj, 'CreatorDashboard analytics load failed', { movementId });
-  }, [analyticsErrorObj]);
+  }, [analyticsErrorObj, movementId]);
   useEffect(() => {
     if (eventsErrorObj) logError(eventsErrorObj, 'CreatorDashboard events load failed', { movementId });
-  }, [eventsErrorObj]);
+  }, [eventsErrorObj, movementId]);
   useEffect(() => {
     if (petitionsErrorObj) logError(petitionsErrorObj, 'CreatorDashboard petitions load failed', { movementId });
-  }, [petitionsErrorObj]);
+  }, [petitionsErrorObj, movementId]);
   useEffect(() => {
     if (rsvpsErrorObj) logError(rsvpsErrorObj, 'CreatorDashboard RSVPs load failed', { movementId });
-  }, [rsvpsErrorObj]);
+  }, [rsvpsErrorObj, movementId]);
   useEffect(() => {
     if (signaturesErrorObj) logError(signaturesErrorObj, 'CreatorDashboard signatures load failed', { movementId });
-  }, [signaturesErrorObj]);
+  }, [signaturesErrorObj, movementId]);
 
   // Calculate metrics
   const currentData = analyticsData[analyticsData.length - 1] || {};

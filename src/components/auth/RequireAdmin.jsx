@@ -1,22 +1,10 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
 
-function parseAdminEmails(raw) {
-  return String(raw || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 export default function RequireAdmin() {
-  const { user, loading } = useAuth();
+  const { user, loading, isAdmin } = useAuth();
   const location = useLocation();
-
-  const adminEmails = useMemo(
-    () => parseAdminEmails(import.meta?.env?.VITE_ADMIN_EMAILS),
-    []
-  );
 
   if (loading) {
     return (
@@ -30,9 +18,6 @@ export default function RequireAdmin() {
     const from = `${location.pathname}${location.search ?? ''}${location.hash ?? ''}`;
     return <Navigate to="/login" replace state={{ from }} />;
   }
-
-  const email = String(user?.email || '').trim().toLowerCase();
-  const isAdmin = !!(email && adminEmails.includes(email));
 
   if (!isAdmin) {
     return (

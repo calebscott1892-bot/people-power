@@ -3,13 +3,20 @@ import { translations } from './translations';
 
 const LanguageContext = createContext();
 
+function getStoredLanguage() {
+  try {
+    return localStorage.getItem('app_language') || 'en';
+  } catch {
+    return 'en';
+  }
+}
+
 export function LanguageProvider({ children }) {
-  const [language, setLanguage] = useState(
-    localStorage.getItem('app_language') || 'en'
-  );
+  const [language, setLanguage] = useState(getStoredLanguage);
 
   useEffect(() => {
     // Apply RTL for Arabic
+    if (typeof document === 'undefined') return;
     if (language === 'ar') {
       document.documentElement.dir = 'rtl';
       document.documentElement.lang = 'ar';
@@ -20,7 +27,11 @@ export function LanguageProvider({ children }) {
   }, [language]);
 
   const changeLanguage = (lang) => {
-    localStorage.setItem('app_language', lang);
+    try {
+      localStorage.setItem('app_language', lang);
+    } catch {
+      // ignore
+    }
     setLanguage(lang);
   };
 

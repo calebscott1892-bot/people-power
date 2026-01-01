@@ -8,7 +8,7 @@
 // with an in-memory fallback) so onboarding/tutorial flows can complete.
 
 // Use structured logging for warnings if needed in the future
-const warn = (...args) => {};
+const warn = (..._args) => {};
 
 export const auth = {
   isAuthenticated: async () => {

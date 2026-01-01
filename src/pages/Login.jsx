@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
+import BackButton from '@/components/shared/BackButton';
 
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signIn, signUp } = useAuth();
+  const { signIn, signUp, isSupabaseConfigured, authErrorMessage } = useAuth();
   const [mode, setMode] = useState('login'); // 'login' | 'signup'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -75,7 +76,7 @@ export default function Login() {
           </label>
 
           <button
-            disabled={loading}
+            disabled={loading || !isSupabaseConfigured}
             style={{
               padding: 12,
               borderRadius: 12,
@@ -84,11 +85,17 @@ export default function Login() {
               color: 'white',
               fontWeight: 900,
               cursor: 'pointer',
-              opacity: loading ? 0.7 : 1
+              opacity: loading || !isSupabaseConfigured ? 0.7 : 1
             }}
           >
             {loading ? 'Working…' : mode === 'signup' ? 'Sign up' : 'Login'}
           </button>
+
+          {!isSupabaseConfigured ? (
+            <div style={{ color: '#b91c1c', fontWeight: 800 }}>
+              {authErrorMessage || 'Sign-in is temporarily unavailable.'}
+            </div>
+          ) : null}
 
           {status ? <div style={{ color: '#b91c1c', fontWeight: 800 }}>{status}</div> : null}
 
@@ -100,9 +107,10 @@ export default function Login() {
             {mode === 'signup' ? 'Already have an account? Login' : 'New here? Create an account'}
           </button>
 
-          <Link to="/" style={{ color: '#64748b', fontWeight: 800, textAlign: 'center' }}>
-            Back to home
-          </Link>
+          <BackButton
+            className="inline-flex items-center justify-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-700"
+            iconClassName="w-4 h-4"
+          />
         </form>
       </div>
     </div>

@@ -5,22 +5,27 @@ import { Check, CheckCheck, Image as ImageIcon, Loader2, MessageCircle, Plus, Se
 import { useAuth } from '@/auth/AuthProvider';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import ComposeModal from '@/components/messages/ComposeModal';
 import { cn } from '@/lib/utils';
 import {
   actOnConversationRequest,
-  createConversation,
   fetchConversationsPage,
   fetchMessagesPage,
   markConversationRead,
   sendMessage,
   toggleMessageReaction,
+  updateGroupParticipants,
+  updateGroupSettings,
 } from '@/api/messagesClient';
+import { fetchMyBlocks } from '@/api/blocksClient';
 import { fetchPublicKey, upsertMyPublicKey } from '@/api/keysClient';
 import {
   deriveSharedSecretKey,
@@ -28,11 +33,18 @@ import {
   encryptText,
   getOrCreateIdentityKeypair,
 } from '@/lib/e2eeCrypto';
-import { packEncryptedPayload, unpackEncryptedPayload } from '@/lib/e2eeFormat';
+import { isEncryptedBody, packEncryptedPayload, unpackEncryptedPayload } from '@/lib/e2eeFormat';
 import { toast } from 'sonner';
 import { uploadFile } from '@/api/uploadsClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
+import { fetchMovementEvidencePage } from '@/api/movementExtrasClient';
+import {
+  ALLOWED_IMAGE_MIME_TYPES,
+  ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+  MAX_UPLOAD_BYTES,
+  validateFileUpload,
+} from '@/utils/uploadLimits';
 
 function safeJsonParse(text) {
   try {
@@ -40,6 +52,10 @@ function safeJsonParse(text) {
   } catch {
     return null;
   }
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 function isProbablySensitiveUrl(url) {
@@ -57,6 +73,15 @@ function looksLikeConnectivityError(error) {
   const msg = String(error?.message || '').toLowerCase();
   if (!msg) return false;
   return msg.includes('failed to fetch') || msg.includes('network') || msg.includes('load failed') || msg.includes('econnrefused');
+}
+
+function maskEmail(value) {
+  const s = String(value || '').trim();
+  if (!s.includes('@')) return s;
+  const [name, domain] = s.split('@');
+  if (!name || !domain) return s;
+  const prefix = name.slice(0, 2);
+  return `${prefix}***@${domain}`;
 }
 
 function MediaMessage({ payload, messageId }) {
@@ -134,9 +159,46 @@ function MessageBody({ plaintext, messageId }) {
 }
 
 function getOtherParticipant(participants, myEmail) {
-  const me = String(myEmail || '').toLowerCase();
+  const me = normalizeEmail(myEmail);
   const list = Array.isArray(participants) ? participants : [];
-  return list.find((e) => String(e || '').toLowerCase() !== me) || list[0] || '';
+  return list.find((e) => normalizeEmail(e) !== me) || list[0] || '';
+}
+
+function getConversationLabel(conversation, myEmail) {
+  if (conversation?.is_group) {
+    return String(conversation?.group_name || 'Verified participants group');
+  }
+  return getOtherParticipant(conversation?.participant_emails, myEmail) || 'Conversation';
+}
+
+function getGroupAdmins(conversation) {
+  const list = Array.isArray(conversation?.group_admin_emails) ? conversation.group_admin_emails : [];
+  const owner = normalizeEmail(conversation?.created_by_email);
+  const normalized = Array.from(new Set(list.map(normalizeEmail).filter(Boolean)));
+  if (owner && !normalized.includes(owner)) normalized.unshift(owner);
+  return normalized;
+}
+
+function isGroupAdmin(conversation, myEmail) {
+  const me = normalizeEmail(myEmail);
+  if (!me || !conversation?.is_group) return false;
+  return getGroupAdmins(conversation).includes(me);
+}
+
+function canPostToGroup(conversation, myEmail) {
+  if (!conversation?.is_group) return true;
+  const me = normalizeEmail(myEmail);
+  if (!me) return false;
+  const mode = String(conversation?.group_post_mode || 'owner_only');
+  const admins = getGroupAdmins(conversation);
+  const owner = normalizeEmail(conversation?.created_by_email);
+  if (mode === 'all') return true;
+  if (mode === 'admins') return admins.includes(me);
+  if (mode === 'owner_only') return owner ? owner === me : admins.includes(me);
+  const posters = Array.isArray(conversation?.group_posters)
+    ? conversation.group_posters.map(normalizeEmail).filter(Boolean)
+    : [];
+  return admins.includes(me) || posters.includes(me);
 }
 
 function formatTime(value) {
@@ -149,7 +211,7 @@ function formatTime(value) {
   }
 }
 
-function EncryptedMessage({ myEmail, otherPublicKey, encryptedPayload, messageId }) {
+function EncryptedMessage({ myEmail, senderPublicKey, encryptedPayload, messageId }) {
   const [text, setText] = useState(null);
   const [failed, setFailed] = useState(false);
 
@@ -157,9 +219,16 @@ function EncryptedMessage({ myEmail, otherPublicKey, encryptedPayload, messageId
     let cancelled = false;
     async function run() {
       try {
+        if (!senderPublicKey) throw new Error('Missing sender key');
+        const recipientKey = normalizeEmail(myEmail);
+        const payload =
+          encryptedPayload && typeof encryptedPayload === 'object' && encryptedPayload.recipients
+            ? encryptedPayload.recipients[recipientKey]
+            : encryptedPayload;
+        if (!payload) throw new Error('Missing recipient payload');
         const { privateKey } = await getOrCreateIdentityKeypair(myEmail);
-        const key = await deriveSharedSecretKey(privateKey, otherPublicKey);
-        const plaintext = await decryptText(encryptedPayload, key);
+        const key = await deriveSharedSecretKey(privateKey, senderPublicKey);
+        const plaintext = await decryptText(payload, key);
         if (!cancelled) setText(plaintext);
       } catch {
         if (!cancelled) setFailed(true);
@@ -169,7 +238,7 @@ function EncryptedMessage({ myEmail, otherPublicKey, encryptedPayload, messageId
     return () => {
       cancelled = true;
     };
-  }, [myEmail, otherPublicKey, encryptedPayload]);
+  }, [myEmail, senderPublicKey, encryptedPayload]);
 
   if (failed) {
     return <span className="opacity-80">[Unable to decrypt on this device]</span>;
@@ -191,7 +260,6 @@ export default function Messages() {
   const [selectedId, setSelectedId] = useState(null);
   const [draft, setDraft] = useState('');
   const [composeOpen, setComposeOpen] = useState(false);
-  const [recipientEmail, setRecipientEmail] = useState('');
   const [box, setBox] = useState('inbox');
   const [search, setSearch] = useState('');
 
@@ -199,11 +267,41 @@ export default function Messages() {
   const [pendingMediaSensitive, setPendingMediaSensitive] = useState(false);
   const [sendingMedia, setSendingMedia] = useState(false);
   const [reactionPickerForId, setReactionPickerForId] = useState(null);
+  const [customReactionDrafts, setCustomReactionDrafts] = useState({});
+
+  const [groupSettingsOpen, setGroupSettingsOpen] = useState(false);
+  const [groupNameDraft, setGroupNameDraft] = useState('');
+  const [groupAvatarFile, setGroupAvatarFile] = useState(null);
+  const [groupAvatarPreview, setGroupAvatarPreview] = useState('');
+  const [groupPostMode, setGroupPostMode] = useState('owner_only');
+  const [groupPosterSelection, setGroupPosterSelection] = useState([]);
+  const [groupAdminSelection, setGroupAdminSelection] = useState([]);
+  const [groupAddEmail, setGroupAddEmail] = useState('');
+  const [movementAddSelection, setMovementAddSelection] = useState([]);
 
   const mediaInputRef = useRef(null);
 
+  useEffect(() => {
+    return () => {
+      if (groupAvatarPreview && groupAvatarPreview.startsWith('blob:')) {
+        URL.revokeObjectURL(groupAvatarPreview);
+      }
+    };
+  }, [groupAvatarPreview]);
+
   const myEmail = user?.email || '';
-  const myEmailNormalized = useMemo(() => String(myEmail || '').toLowerCase(), [myEmail]);
+  const myEmailNormalized = useMemo(() => normalizeEmail(myEmail), [myEmail]);
+
+  const { data: myBlocks } = useQuery({
+    queryKey: ['myBlocks', myEmailNormalized],
+    queryFn: () => fetchMyBlocks({ accessToken }),
+    enabled: !!accessToken,
+  });
+
+  const blockedEmails = useMemo(() => {
+    const list = Array.isArray(myBlocks?.blocked) ? myBlocks.blocked : [];
+    return new Set(list.map((b) => normalizeEmail(b?.email)).filter(Boolean));
+  }, [myBlocks]);
 
   const CONVERSATIONS_PAGE_SIZE = 20;
   const CONVERSATION_LIST_FIELDS = useMemo(
@@ -213,6 +311,15 @@ export default function Messages() {
         'request_status',
         'requester_email',
         'blocked_by_email',
+        'is_group',
+        'group_name',
+        'group_avatar_url',
+        'group_type',
+        'movement_id',
+        'created_by_email',
+        'group_admin_emails',
+        'group_post_mode',
+        'group_posters',
         'updated_at',
         'created_at',
         'last_message_body',
@@ -348,6 +455,80 @@ export default function Messages() {
     [conversations, selectedId]
   );
 
+  const isGroupConversation = !!selectedConversation?.is_group;
+  const isMovementGroup = isGroupConversation && String(selectedConversation?.group_type || '') === 'movement_verified';
+  const isGroupAdminUser = isGroupConversation ? isGroupAdmin(selectedConversation, myEmail) : false;
+  const canPostGroup = isGroupConversation ? canPostToGroup(selectedConversation, myEmail) : true;
+  const isGroupOwner = isGroupConversation && myEmailNormalized && normalizeEmail(selectedConversation?.created_by_email) === myEmailNormalized;
+
+  useEffect(() => {
+    if (!groupSettingsOpen || !selectedConversation) return;
+    setGroupNameDraft(String(selectedConversation?.group_name || ''));
+    const mode = String(selectedConversation?.group_post_mode || 'owner_only');
+    setGroupPostMode(['owner_only', 'admins', 'selected', 'all'].includes(mode) ? mode : 'owner_only');
+    setGroupPosterSelection(
+      Array.isArray(selectedConversation?.group_posters)
+        ? selectedConversation.group_posters.map(normalizeEmail).filter(Boolean)
+        : []
+    );
+    setGroupAdminSelection(getGroupAdmins(selectedConversation));
+    setGroupAvatarFile(null);
+    setGroupAvatarPreview(String(selectedConversation?.group_avatar_url || ''));
+    setGroupAddEmail('');
+    setMovementAddSelection([]);
+  }, [groupSettingsOpen, selectedConversation]);
+
+  useEffect(() => {
+    if (groupSettingsOpen && !isGroupAdminUser) {
+      setGroupSettingsOpen(false);
+    }
+  }, [groupSettingsOpen, isGroupAdminUser]);
+
+  const { data: verifiedEvidence = [], isLoading: verifiedEvidenceLoading } = useQuery({
+    queryKey: ['verifiedEvidence', selectedConversation?.movement_id],
+    queryFn: () =>
+      fetchMovementEvidencePage(selectedConversation?.movement_id, {
+        status: 'approved',
+        fields: ['submitter_email'],
+        limit: 200,
+        offset: 0,
+        accessToken,
+      }),
+    enabled: groupSettingsOpen && isMovementGroup && !!accessToken && !!selectedConversation?.movement_id,
+  });
+
+  const verifiedParticipantEmails = useMemo(() => {
+    if (!isMovementGroup) return [];
+    const list = Array.isArray(verifiedEvidence) ? verifiedEvidence : [];
+    const emails = list.map((e) => normalizeEmail(e?.submitter_email)).filter(Boolean);
+    return Array.from(new Set(emails));
+  }, [verifiedEvidence, isMovementGroup]);
+
+  const groupParticipants = useMemo(() => {
+    if (!isGroupConversation) return [];
+    const list = Array.isArray(selectedConversation?.participant_emails)
+      ? selectedConversation.participant_emails
+      : [];
+    return Array.from(new Set(list.map(normalizeEmail).filter(Boolean)));
+  }, [isGroupConversation, selectedConversation]);
+
+  const blockedParticipants = useMemo(() => {
+    if (!selectedConversation) return [];
+    const participants = Array.isArray(selectedConversation?.participant_emails)
+      ? selectedConversation.participant_emails
+      : [];
+    return participants
+      .map(normalizeEmail)
+      .filter((email) => email && email !== myEmailNormalized && blockedEmails.has(email));
+  }, [selectedConversation, blockedEmails, myEmailNormalized]);
+
+  const hasBlockedParticipant = blockedParticipants.length > 0;
+
+  const selectedTitle = useMemo(
+    () => (selectedConversation ? getConversationLabel(selectedConversation, myEmail) : ''),
+    [selectedConversation, myEmail]
+  );
+
   useEffect(() => {
     if (conversationsLoading) return;
     const list = Array.isArray(conversations) ? conversations : [];
@@ -361,11 +542,22 @@ export default function Messages() {
     }
   }, [conversations, conversationsLoading, selectedId, setSearchParams]);
 
+  useEffect(() => {
+    if (selectedConversation?.is_group) {
+      setBox('groups');
+    }
+  }, [selectedConversation]);
+
   const cannotReply = useMemo(() => {
     const status = String(selectedConversation?.request_status || '').toLowerCase();
     const requester = String(selectedConversation?.requester_email || '').toLowerCase();
     return status === 'pending' && requester && requester !== myEmailNormalized;
   }, [selectedConversation, myEmailNormalized]);
+
+  const groupReadOnly = useMemo(() => {
+    if (!isGroupConversation) return false;
+    return !canPostGroup;
+  }, [isGroupConversation, canPostGroup]);
 
   const filteredConversations = useMemo(() => {
     const list = Array.isArray(conversations) ? conversations : [];
@@ -373,32 +565,43 @@ export default function Messages() {
     if (box === 'requests') {
       return list
         .filter((c) => String(c?.request_status || '').toLowerCase() === 'pending')
+        .filter((c) => !c?.is_group)
         .filter((c) => {
           if (!q) return true;
-          const other = String(getOtherParticipant(c?.participant_emails, myEmail) || '').toLowerCase();
+          const label = String(getConversationLabel(c, myEmail) || '').toLowerCase();
           const last = String(c?.last_message_body || '').toLowerCase();
-          return other.includes(q) || last.includes(q);
+          return label.includes(q) || last.includes(q);
+        });
+    }
+    if (box === 'groups') {
+      return list
+        .filter((c) => !!c?.is_group)
+        .filter((c) => {
+          if (!q) return true;
+          const label = String(getConversationLabel(c, myEmail) || '').toLowerCase();
+          const last = String(c?.last_message_body || '').toLowerCase();
+          return label.includes(q) || last.includes(q);
         });
     }
     return list
       .filter((c) => {
         const status = String(c?.request_status || 'accepted').toLowerCase();
-        return status !== 'pending' && status !== 'declined';
+        return status !== 'pending' && status !== 'declined' && !c?.is_group;
       })
       .filter((c) => {
         if (!q) return true;
-        const other = String(getOtherParticipant(c?.participant_emails, myEmail) || '').toLowerCase();
+        const label = String(getConversationLabel(c, myEmail) || '').toLowerCase();
         const last = String(c?.last_message_body || '').toLowerCase();
-        return other.includes(q) || last.includes(q);
+        return label.includes(q) || last.includes(q);
       });
   }, [conversations, box, search, myEmail]);
 
   const otherEmail = useMemo(() => {
-    if (!selectedConversation) return '';
+    if (!selectedConversation || isGroupConversation) return '';
     return getOtherParticipant(selectedConversation?.participant_emails, myEmail);
-  }, [selectedConversation, myEmail]);
+  }, [selectedConversation, myEmail, isGroupConversation]);
 
-  const otherEmailNormalized = useMemo(() => String(otherEmail || '').toLowerCase(), [otherEmail]);
+  const otherEmailNormalized = useMemo(() => normalizeEmail(otherEmail), [otherEmail]);
 
   const {
     data: otherPublicKey,
@@ -408,7 +611,7 @@ export default function Messages() {
   } = useQuery({
     queryKey: ['publicKey', otherEmail],
     queryFn: () => fetchPublicKey(otherEmail, { accessToken }),
-    enabled: !!accessToken && !!otherEmail,
+    enabled: !!accessToken && !!otherEmail && !isGroupConversation,
     staleTime: 1000 * 60 * 10,
   });
 
@@ -417,7 +620,38 @@ export default function Messages() {
       logError(otherKeyErrorObj, 'Messages recipient public key load failed', { recipient: otherEmailNormalized });
       toast.error('Recipient has no encryption key yet');
     }
-  }, [otherKeyError, otherKeyErrorObj]);
+  }, [otherKeyError, otherKeyErrorObj, otherEmailNormalized]);
+
+  const {
+    data: groupKeyBundle,
+    isLoading: groupKeysLoading,
+  } = useQuery({
+    queryKey: ['groupPublicKeys', selectedId, groupParticipants.join('|')],
+    queryFn: async () => {
+      const keys = {};
+      const missing = [];
+      if (myEmailNormalized) {
+        const kp = await getOrCreateIdentityKeypair(myEmail);
+        keys[myEmailNormalized] = kp.publicKey;
+      }
+      await Promise.all(
+        groupParticipants.map(async (email) => {
+          if (!email || email === myEmailNormalized) return;
+          try {
+            keys[email] = await fetchPublicKey(email, { accessToken });
+          } catch {
+            missing.push(email);
+          }
+        })
+      );
+      return { keys, missing };
+    },
+    enabled: isGroupConversation && !!accessToken && groupParticipants.length > 0,
+    staleTime: 1000 * 60 * 5,
+  });
+
+  const groupPublicKeys = groupKeyBundle?.keys || {};
+  const groupKeyMissing = Array.isArray(groupKeyBundle?.missing) ? groupKeyBundle.missing : [];
 
   const {
     data: messagesData,
@@ -452,17 +686,19 @@ export default function Messages() {
     if (!Array.isArray(pages)) return [];
 
     // Server returns newest-first pages; render oldest->newest.
-    return pages
+    const list = pages
       .slice()
       .reverse()
       .flatMap((p) => (Array.isArray(p) ? p.slice().reverse() : []));
-  }, [messagesData]);
+    if (!blockedEmails.size) return list;
+    return list.filter((m) => !blockedEmails.has(normalizeEmail(m?.sender_email)));
+  }, [messagesData, blockedEmails]);
 
   useEffect(() => {
     if (messagesError && messagesErrorObj) {
       logError(messagesErrorObj, 'Messages load failed', { conversationId: selectedId });
     }
-  }, [messagesError, messagesErrorObj]);
+  }, [messagesError, messagesErrorObj, selectedId]);
 
   const conversationsConnectivityError =
     conversationsError && looksLikeConnectivityError(conversationsErrorObj);
@@ -482,8 +718,12 @@ export default function Messages() {
       const text = String(draft || '').trim();
       if (!text) throw new Error('Message cannot be empty');
       if (!selectedId) throw new Error('Select a conversation');
-      if (!otherEmail) throw new Error('Missing recipient');
-      if (!otherPublicKey) throw new Error('Recipient has no encryption key yet');
+      if (!isGroupConversation) {
+        if (!otherEmail) throw new Error('Missing recipient');
+        if (!otherPublicKey) throw new Error('Recipient has no encryption key yet');
+      } else if (groupReadOnly) {
+        throw new Error('Only approved posters can send messages in this group');
+      }
 
       const rateCheck = await checkActionAllowed({
         email: myEmail,
@@ -497,8 +737,29 @@ export default function Messages() {
       }
 
       const { privateKey } = await getOrCreateIdentityKeypair(myEmail);
-      const key = await deriveSharedSecretKey(privateKey, otherPublicKey);
       const payload = JSON.stringify({ type: 'text', text });
+      if (isGroupConversation) {
+        if (!groupParticipants.length) throw new Error('Missing group participants');
+        if (!groupPublicKeys || !Object.keys(groupPublicKeys).length) {
+          throw new Error('Encryption keys are still loading');
+        }
+        if (groupKeyMissing.length) {
+          throw new Error('Some participants have not published encryption keys yet');
+        }
+        const recipients = {};
+        for (const email of groupParticipants) {
+          const publicKey = groupPublicKeys[email];
+          if (!publicKey) {
+            throw new Error(`Missing encryption key for ${email}`);
+          }
+          const key = await deriveSharedSecretKey(privateKey, publicKey);
+          recipients[email] = await encryptText(payload, key);
+        }
+        const packed = packEncryptedPayload({ v: 2, mode: 'group', recipients });
+        return sendMessage(selectedId, packed, { accessToken, myEmail });
+      }
+
+      const key = await deriveSharedSecretKey(privateKey, otherPublicKey);
       const encrypted = await encryptText(payload, key);
       const packed = packEncryptedPayload(encrypted);
       return sendMessage(selectedId, packed, { accessToken, myEmail });
@@ -528,6 +789,23 @@ export default function Messages() {
     onError: (e) => toast.error(e?.message || 'Failed to react'),
   });
 
+  const updateCustomReaction = (messageId, value) => {
+    const id = String(messageId || '');
+    setCustomReactionDrafts((prev) => ({ ...prev, [id]: value }));
+  };
+
+  const submitCustomReaction = (messageId) => {
+    const id = String(messageId || '');
+    const raw = customReactionDrafts[id] ? String(customReactionDrafts[id]).trim() : '';
+    if (!raw) {
+      toast.error('Enter an emoji to react');
+      return;
+    }
+    reactionMutation.mutate({ messageId: id, emoji: raw });
+    setCustomReactionDrafts((prev) => ({ ...prev, [id]: '' }));
+    setReactionPickerForId(null);
+  };
+
   const sendMedia = async () => {
     if (!pendingMediaFile) return;
     if (!accessToken) {
@@ -538,22 +816,53 @@ export default function Messages() {
       toast.error('Select a conversation');
       return;
     }
-    if (!otherEmail || !otherPublicKey) {
+    if (groupReadOnly) {
+      toast.error('Only approved posters can send media in this group');
+      return;
+    }
+    if (!isGroupConversation && (!otherEmail || !otherPublicKey)) {
       toast.error('Recipient key unavailable');
+      return;
+    }
+    if (isGroupConversation && groupKeyMissing.length) {
+      toast.error('Some participants have not published encryption keys yet');
       return;
     }
 
     setSendingMedia(true);
     try {
-      const uploaded = await uploadFile(pendingMediaFile, { accessToken });
+      const uploaded = await uploadFile(pendingMediaFile, {
+        accessToken,
+        maxBytes: MAX_UPLOAD_BYTES,
+        allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+      });
       const url = uploaded?.url ? String(uploaded.url) : null;
       if (!url) throw new Error('Upload failed');
 
       const { privateKey } = await getOrCreateIdentityKeypair(myEmail);
-      const key = await deriveSharedSecretKey(privateKey, otherPublicKey);
       const payload = JSON.stringify({ type: 'media', url, caption: '', sensitive: !!pendingMediaSensitive });
-      const encrypted = await encryptText(payload, key);
-      const packed = packEncryptedPayload(encrypted);
+      let packed = null;
+      if (isGroupConversation) {
+        if (!groupParticipants.length) throw new Error('Missing group participants');
+        if (!groupPublicKeys || !Object.keys(groupPublicKeys).length) {
+          throw new Error('Encryption keys are still loading');
+        }
+        const recipients = {};
+        for (const email of groupParticipants) {
+          const publicKey = groupPublicKeys[email];
+          if (!publicKey) {
+            throw new Error(`Missing encryption key for ${email}`);
+          }
+          const key = await deriveSharedSecretKey(privateKey, publicKey);
+          recipients[email] = await encryptText(payload, key);
+        }
+        packed = packEncryptedPayload({ v: 2, mode: 'group', recipients });
+      } else {
+        const key = await deriveSharedSecretKey(privateKey, otherPublicKey);
+        const encrypted = await encryptText(payload, key);
+        packed = packEncryptedPayload(encrypted);
+      }
+
       const created = await sendMessage(selectedId, packed, { accessToken, myEmail });
 
       setPendingMediaFile(null);
@@ -589,42 +898,123 @@ export default function Messages() {
     },
   });
 
-  const createConversationMutation = useMutation({
+  const updateGroupSettingsMutation = useMutation({
     mutationFn: async () => {
-      const email = String(recipientEmail || '').trim();
-      if (!email) throw new Error('Recipient email is required');
+      if (!accessToken) throw new Error('Authentication required');
+      if (!selectedConversation?.id) throw new Error('Select a group chat');
+      const name = String(groupNameDraft || '').trim();
+      if (!name) throw new Error('Group name is required');
 
-      const rateCheck = await checkActionAllowed({
-        email: myEmail,
-        action: 'conversation_create',
-        contextId: 'global',
-        accessToken,
-      });
-      if (!rateCheck?.ok) {
-        const wait = rateCheck?.retryAfterMs ? ` Try again in ${formatWaitMs(rateCheck.retryAfterMs)}.` : '';
-        throw new Error(String(rateCheck?.reason || 'Please slow down.') + wait);
-      }
-
-      return createConversation(email, { accessToken, myEmail });
-    },
-    onSuccess: async (convo) => {
-      setComposeOpen(false);
-      setRecipientEmail('');
-      await queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
-      if (convo?.id) {
-        setSelectedId(String(convo.id));
-        setSearchParams((prev) => {
-          const next = new URLSearchParams(prev);
-          next.set('conversationId', String(convo.id));
-          return next;
+      let avatarUrl = groupAvatarPreview || null;
+      if (groupAvatarFile) {
+        const uploaded = await uploadFile(groupAvatarFile, {
+          accessToken,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+          kind: 'group_avatar',
         });
-        markReadMutation.mutate(String(convo.id));
+        avatarUrl = uploaded?.url ? String(uploaded.url) : null;
       }
+
+      const payload = {
+        group_name: name,
+        group_avatar_url: avatarUrl,
+      };
+      if (!isMovementGroup || isGroupOwner) {
+        payload.group_post_mode = groupPostMode;
+        payload.group_posters = groupPosterSelection;
+      }
+      if (isGroupOwner) {
+        payload.group_admin_emails = groupAdminSelection;
+      }
+
+      return updateGroupSettings(selectedConversation.id, payload, { accessToken });
+    },
+    onSuccess: async (updated) => {
+      await queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
+      setGroupSettingsOpen(false);
+      setGroupAvatarFile(null);
+      setGroupAvatarPreview(String(updated?.group_avatar_url || ''));
+      toast.success('Group settings updated');
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to start conversation');
+      toast.error(e?.message || 'Failed to update group');
     },
   });
+
+  const updateGroupParticipantsMutation = useMutation({
+    mutationFn: async ({ add = [], remove = [] }) => {
+      if (!accessToken) throw new Error('Authentication required');
+      if (!selectedConversation?.id) throw new Error('Select a group chat');
+      return updateGroupParticipants(selectedConversation.id, { add_emails: add, remove_emails: remove }, { accessToken });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
+      setGroupAddEmail('');
+      setMovementAddSelection([]);
+      toast.success('Group participants updated');
+    },
+    onError: (e) => {
+      toast.error(e?.message || 'Failed to update participants');
+    },
+  });
+
+  const handleGroupAvatarChange = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const validationError = validateFileUpload({
+      file,
+      maxBytes: MAX_UPLOAD_BYTES,
+      allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+    });
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+    if (groupAvatarPreview && groupAvatarPreview.startsWith('blob:')) {
+      URL.revokeObjectURL(groupAvatarPreview);
+    }
+    setGroupAvatarFile(file);
+    setGroupAvatarPreview(URL.createObjectURL(file));
+  };
+
+  const toggleGroupPoster = (email) => {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return;
+    setGroupPosterSelection((prev) => {
+      const exists = prev.includes(normalized);
+      return exists ? prev.filter((e) => e !== normalized) : [...prev, normalized];
+    });
+  };
+
+  const toggleGroupAdmin = (email) => {
+    const normalized = normalizeEmail(email);
+    if (!normalized || normalized === normalizeEmail(selectedConversation?.created_by_email)) return;
+    setGroupAdminSelection((prev) => {
+      const exists = prev.includes(normalized);
+      return exists ? prev.filter((e) => e !== normalized) : [...prev, normalized];
+    });
+  };
+
+  const toggleMovementAdd = (email) => {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return;
+    setMovementAddSelection((prev) => {
+      const exists = prev.includes(normalized);
+      return exists ? prev.filter((e) => e !== normalized) : [...prev, normalized];
+    });
+  };
+
+  const handleConversationStarted = (convo) => {
+    if (!convo?.id) return;
+    setSelectedId(String(convo.id));
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set('conversationId', String(convo.id));
+      return next;
+    });
+    markReadMutation.mutate(String(convo.id));
+  };
 
   if (loading) {
     return (
@@ -637,7 +1027,7 @@ export default function Messages() {
 
   if (!user) {
     return (
-      <div className="max-w-4xl mx-auto px-4 py-12">
+      <div className="max-w-4xl mx-auto px-3 sm:px-4 py-10 sm:py-12">
         <div className="p-8 rounded-2xl border border-slate-200 bg-white shadow-sm text-center space-y-3">
           <h1 className="text-3xl font-black text-slate-900">Messages</h1>
           <p className="text-slate-600 font-semibold">Sign in to use messaging.</p>
@@ -647,7 +1037,7 @@ export default function Messages() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
+    <div className="max-w-6xl mx-auto px-3 sm:px-4 py-6 sm:py-8">
       <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden">
         <div className="grid grid-cols-1 md:grid-cols-3 min-h-[70vh]">
           {/* Left: conversations */}
@@ -697,7 +1087,19 @@ export default function Messages() {
               >
                 Requests
               </Button>
+              <Button
+                variant={box === 'groups' ? 'default' : 'outline'}
+                className={cn('h-10 rounded-xl font-bold', box === 'groups' && 'bg-[#3A3DFF] hover:bg-[#2A2DDD]')}
+                onClick={() => setBox('groups')}
+              >
+                Groups
+              </Button>
             </div>
+            {box === 'groups' ? (
+              <div className="px-4 pb-2 text-xs font-bold text-slate-500">
+                Verified participants can be added to author group chats at any time. Group chats live here.
+              </div>
+            ) : null}
 
             {conversationsLoading ? (
               <div className="p-6 text-slate-600 font-semibold flex items-center gap-2">
@@ -718,17 +1120,27 @@ export default function Messages() {
               </div>
             ) : filteredConversations.length === 0 ? (
               <div className="p-6 text-slate-600 font-semibold">
-                No active messages yet. Start a conversation from a profile or movement.
+                {box === 'groups'
+                  ? 'No group chats yet. Verified participant chats will appear here.'
+                  : box === 'requests'
+                    ? 'No message requests right now.'
+                    : 'No active messages yet. Start a conversation from a profile or movement.'}
               </div>
             ) : (
               <>
                 <div className="divide-y divide-slate-100">
                   {filteredConversations.map((c) => {
                     const id = String(c?.id || '');
-                    const other = getOtherParticipant(c?.participant_emails, myEmail);
+                    const isGroup = !!c?.is_group;
+                    const other = getConversationLabel(c, myEmail);
                     const unread = Number(c?.unread_count || 0);
                     const isSelected = id && selectedId && id === String(selectedId);
                     const status = String(c?.request_status || 'accepted').toLowerCase();
+                    const lastBody = c?.last_message_body
+                      ? (isEncryptedBody(c.last_message_body) ? 'Encrypted message' : String(c.last_message_body))
+                      : 'No messages yet';
+                    const participantCount = Array.isArray(c?.participant_emails) ? c.participant_emails.length : 0;
+                    const groupLabel = String(c?.group_type || '') === 'movement_verified' ? 'Verified group' : 'Group chat';
                     return (
                       <button
                         key={id}
@@ -747,14 +1159,29 @@ export default function Messages() {
                         )}
                       >
                         <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="font-black text-slate-900 truncate">{other || 'Conversation'}</div>
-                            <div className="text-sm text-slate-600 truncate">
-                              {c?.last_message_body ? String(c.last_message_body) : 'No messages yet'}
+                          <div className="flex items-center gap-3 min-w-0">
+                            {isGroup ? (
+                              <Avatar className="h-10 w-10">
+                                <AvatarImage src={c?.group_avatar_url || undefined} alt={other || 'Group'} />
+                                <AvatarFallback className="bg-slate-200 text-slate-700 font-black">
+                                  {(other || 'G')[0]?.toUpperCase()}
+                                </AvatarFallback>
+                              </Avatar>
+                            ) : null}
+                            <div className="min-w-0">
+                              <div className="font-black text-slate-900 truncate">{other || 'Conversation'}</div>
+                              <div className="text-sm text-slate-600 truncate">
+                                {lastBody}
+                              </div>
+                              {isGroup ? (
+                                <div className="text-xs font-black text-slate-500 mt-1">
+                                  {groupLabel} • {participantCount} participants
+                                </div>
+                              ) : null}
+                              {status === 'pending' && (
+                                <div className="text-xs font-black text-slate-500 mt-1">Request pending</div>
+                              )}
                             </div>
-                            {status === 'pending' && (
-                              <div className="text-xs font-black text-slate-500 mt-1">Request pending</div>
-                            )}
                           </div>
                           <div className="flex flex-col items-end gap-2">
                             <div className="text-xs text-slate-400 font-bold">{formatTime(c?.last_message_at || c?.updated_at)}</div>
@@ -806,60 +1233,94 @@ export default function Messages() {
               <>
                 <div className="p-4 border-b border-slate-200">
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="font-black text-slate-900">{otherEmail}</div>
-                      <div className="text-xs text-slate-500 font-bold mt-1">
-                        End-to-end encrypted
-                        {otherKeyLoading ? ' (loading key...)' : ''}
-                        {otherKeyError ? ' (key unavailable)' : ''}
+                    <div className="flex items-start gap-3">
+                      {isGroupConversation ? (
+                        <Avatar className="h-10 w-10">
+                          <AvatarImage src={selectedConversation?.group_avatar_url || undefined} alt={selectedTitle || 'Group'} />
+                          <AvatarFallback className="bg-slate-200 text-slate-700 font-black">
+                            {(selectedTitle || 'G')[0]?.toUpperCase()}
+                          </AvatarFallback>
+                        </Avatar>
+                      ) : null}
+                      <div>
+                        <div className="font-black text-slate-900">{selectedTitle || 'Conversation'}</div>
+                        <div className="text-xs text-slate-500 font-bold mt-1">
+                          End-to-end encrypted
+                          {isGroupConversation
+                            ? ` • ${groupParticipants.length} participants`
+                            : ''}
+                          {!isGroupConversation && otherKeyLoading ? ' (loading key...)' : ''}
+                          {!isGroupConversation && otherKeyError ? ' (key unavailable)' : ''}
+                          {isGroupConversation && groupKeysLoading ? ' (loading keys...)' : ''}
+                          {isGroupConversation && groupKeyMissing.length ? ' (missing keys)' : ''}
+                        </div>
                       </div>
                     </div>
 
-                    {String(selectedConversation?.request_status || '').toLowerCase() === 'pending' &&
-                      String(selectedConversation?.requester_email || '').toLowerCase() !==
-                        String(myEmail || '').toLowerCase() && (
-                        <div className="flex items-center gap-2">
-                          <Button
-                            className="h-10 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
-                            disabled={requestActionMutation.isPending}
-                            onClick={() =>
-                              requestActionMutation.mutate({
-                                conversationId: String(selectedConversation?.id),
-                                action: 'accept',
-                              })
-                            }
-                          >
-                            Accept
-                          </Button>
-                          <Button
-                            variant="outline"
-                            className="h-10 rounded-xl font-bold"
-                            disabled={requestActionMutation.isPending}
-                            onClick={() =>
-                              requestActionMutation.mutate({
-                                conversationId: String(selectedConversation?.id),
-                                action: 'decline',
-                              })
-                            }
-                          >
-                            Decline
-                          </Button>
-                          <Button
-                            variant="outline"
-                            className="h-10 rounded-xl font-bold"
-                            disabled={requestActionMutation.isPending}
-                            onClick={() =>
-                              requestActionMutation.mutate({
-                                conversationId: String(selectedConversation?.id),
-                                action: 'block',
-                              })
-                            }
-                          >
-                            Block
-                          </Button>
-                        </div>
-                      )}
+                    <div className="flex items-center gap-2 flex-wrap justify-end">
+                      {isGroupConversation && isGroupAdminUser ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-10 rounded-xl font-bold"
+                          onClick={() => setGroupSettingsOpen(true)}
+                        >
+                          Group settings
+                        </Button>
+                      ) : null}
+
+                      {String(selectedConversation?.request_status || '').toLowerCase() === 'pending' &&
+                        String(selectedConversation?.requester_email || '').toLowerCase() !==
+                          String(myEmail || '').toLowerCase() && (
+                          <div className="flex items-center gap-2">
+                            <Button
+                              className="h-10 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
+                              disabled={requestActionMutation.isPending}
+                              onClick={() =>
+                                requestActionMutation.mutate({
+                                  conversationId: String(selectedConversation?.id),
+                                  action: 'accept',
+                                })
+                              }
+                            >
+                              Accept
+                            </Button>
+                            <Button
+                              variant="outline"
+                              className="h-10 rounded-xl font-bold"
+                              disabled={requestActionMutation.isPending}
+                              onClick={() =>
+                                requestActionMutation.mutate({
+                                  conversationId: String(selectedConversation?.id),
+                                  action: 'decline',
+                                })
+                              }
+                            >
+                              Decline
+                            </Button>
+                            <Button
+                              variant="outline"
+                              className="h-10 rounded-xl font-bold"
+                              disabled={requestActionMutation.isPending}
+                              onClick={() =>
+                                requestActionMutation.mutate({
+                                  conversationId: String(selectedConversation?.id),
+                                  action: 'block',
+                                })
+                              }
+                            >
+                              Block
+                            </Button>
+                          </div>
+                        )}
+                    </div>
                   </div>
+
+                  {hasBlockedParticipant && (
+                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
+                      Someone in this chat is blocked. Their messages are hidden from you.
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex-1 p-4 overflow-y-auto bg-slate-50">
@@ -912,6 +1373,10 @@ export default function Messages() {
                         const encryptedPayload = unpackEncryptedPayload(displayBody);
                         const readBy = Array.isArray(m?.read_by) ? m.read_by.map((x) => String(x).toLowerCase()) : [];
                         const otherHasRead = !!(mine && otherEmailNormalized && readBy.includes(otherEmailNormalized));
+                        const senderEmail = normalizeEmail(m?.sender_email);
+                        const senderPublicKey = isGroupConversation
+                          ? (senderEmail ? groupPublicKeys[senderEmail] : null)
+                          : otherPublicKey;
                         return (
                           <div key={String(m?.id)} className={cn('flex', mine ? 'justify-end' : 'justify-start')}>
                             <div
@@ -923,13 +1388,17 @@ export default function Messages() {
                               )}
                             >
                               <div className="text-sm font-semibold whitespace-pre-wrap">
-                                {encryptedPayload && otherPublicKey ? (
-                                  <EncryptedMessage
-                                    myEmail={myEmail}
-                                    otherPublicKey={otherPublicKey}
-                                    encryptedPayload={encryptedPayload}
-                                    messageId={String(m?.id || '')}
-                                  />
+                                {encryptedPayload ? (
+                                  senderPublicKey ? (
+                                    <EncryptedMessage
+                                      myEmail={myEmail}
+                                      senderPublicKey={senderPublicKey}
+                                      encryptedPayload={encryptedPayload}
+                                      messageId={String(m?.id || '')}
+                                    />
+                                  ) : (
+                                    <span className="opacity-80">[Encrypted message]</span>
+                                  )
                                 ) : (
                                   displayBody
                                 )}
@@ -981,7 +1450,7 @@ export default function Messages() {
                               </div>
 
                               {String(reactionPickerForId || '') === String(m?.id || '') ? (
-                                <div className={cn('mt-2 flex flex-wrap gap-2', mine ? 'text-white' : 'text-slate-900')}>
+                                <div className={cn('mt-2 flex flex-wrap items-center gap-2', mine ? 'text-white' : 'text-slate-900')}>
                                   {['👍', '❤️', '😂', '😮', '😢', '🔥'].map((emoji) => (
                                     <button
                                       key={emoji}
@@ -1000,6 +1469,32 @@ export default function Messages() {
                                       {emoji}
                                     </button>
                                   ))}
+                                  <div className="flex items-center gap-2">
+                                    <Input
+                                      value={customReactionDrafts[String(m?.id || '')] || ''}
+                                      onChange={(e) => updateCustomReaction(m?.id, e.target.value)}
+                                      placeholder="Custom emoji"
+                                      className={cn(
+                                        'h-8 w-24 text-xs font-bold rounded-lg border-2',
+                                        mine ? 'border-white/30 bg-white/10 text-white placeholder:text-white/60' : ''
+                                      )}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          e.preventDefault();
+                                          submitCustomReaction(m?.id);
+                                        }
+                                      }}
+                                    />
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      className={cn('h-8 px-2 rounded-lg text-xs font-black', mine && 'border-white/30 bg-white/10 text-white')}
+                                      onClick={() => submitCustomReaction(m?.id)}
+                                      disabled={reactionMutation.isPending}
+                                    >
+                                      Add
+                                    </Button>
+                                  </div>
                                 </div>
                               ) : null}
                             </div>
@@ -1018,6 +1513,11 @@ export default function Messages() {
                         This is a message request. Accept to reply.
                       </div>
                     )}
+                  {groupReadOnly ? (
+                    <div className="mb-3 text-sm font-bold text-slate-600">
+                      Only approved posters can send messages in this group. You can still react.
+                    </div>
+                  ) : null}
 
                   {pendingMediaFile ? (
                     <div className="mb-3 rounded-xl border-2 border-slate-200 p-3 bg-slate-50">
@@ -1054,7 +1554,7 @@ export default function Messages() {
                           <Button
                             className="h-10 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
                             onClick={() => sendMedia()}
-                            disabled={sendingMedia || cannotReply}
+                            disabled={sendingMedia || cannotReply || groupReadOnly}
                           >
                             {sendingMedia ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Send media'}
                           </Button>
@@ -1076,14 +1576,13 @@ export default function Messages() {
                         const file = e.target.files?.[0] || null;
                         e.target.value = '';
                         if (!file) return;
-                        const MAX_UPLOAD_MB = 5;
-                        const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif'];
-                        if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-                          toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-                          return;
-                        }
-                        if (!ALLOWED_MIME_TYPES.includes(file.type)) {
-                          toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF).');
+                        const validationError = validateFileUpload({
+                          file,
+                          maxBytes: MAX_UPLOAD_BYTES,
+                          allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+                        });
+                        if (validationError) {
+                          toast.error(validationError);
                           return;
                         }
                         setPendingMediaFile(file);
@@ -1095,7 +1594,7 @@ export default function Messages() {
                       variant="outline"
                       className="h-12 w-12 rounded-xl border-2 px-0"
                       onClick={() => mediaInputRef.current?.click()}
-                      disabled={cannotReply || sendingMedia}
+                      disabled={cannotReply || groupReadOnly || sendingMedia}
                       title="Send an image/GIF"
                       aria-label="Attach an image"
                     >
@@ -1106,7 +1605,7 @@ export default function Messages() {
                       onChange={(e) => setDraft(e.target.value)}
                       placeholder="Write a message..."
                       className="h-12 rounded-xl border-2"
-                      disabled={cannotReply}
+                      disabled={cannotReply || groupReadOnly}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
@@ -1118,7 +1617,8 @@ export default function Messages() {
                       onClick={() => sendMutation.mutate()}
                       disabled={
                         sendMutation.isPending ||
-                        cannotReply
+                        cannotReply ||
+                        groupReadOnly
                       }
                       className="h-12 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
                     >
@@ -1139,36 +1639,239 @@ export default function Messages() {
         </div>
       </div>
 
-      <Dialog open={composeOpen} onOpenChange={setComposeOpen}>
+      <ComposeModal
+        open={composeOpen}
+        onClose={() => setComposeOpen(false)}
+        currentUser={user}
+        onConversationStarted={handleConversationStarted}
+      />
+
+      <Dialog open={groupSettingsOpen} onOpenChange={setGroupSettingsOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle className="text-xl font-black">New message</DialogTitle>
+            <DialogTitle className="text-xl font-black">Group settings</DialogTitle>
           </DialogHeader>
-          <div className="space-y-3">
-            <div className="text-sm font-bold text-slate-700">Recipient email</div>
-            <Input
-              value={recipientEmail}
-              onChange={(e) => setRecipientEmail(e.target.value)}
-              placeholder="name@example.com"
-              className="h-12 rounded-xl border-2"
-            />
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" className="h-11 rounded-xl font-bold" onClick={() => setComposeOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                className="h-11 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
-                onClick={() => createConversationMutation.mutate()}
-                disabled={createConversationMutation.isPending}
-              >
-                {createConversationMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
+
+          {!selectedConversation ? (
+            <div className="text-sm text-slate-600 font-semibold">Select a group chat to manage it.</div>
+          ) : (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-xs font-black text-slate-500">Group name</label>
+                <Input
+                  value={groupNameDraft}
+                  onChange={(e) => setGroupNameDraft(e.target.value)}
+                  className="rounded-xl border-2"
+                />
+              </div>
+
+              <div className="flex items-center gap-3">
+                <Avatar className="h-12 w-12">
+                  <AvatarImage src={groupAvatarPreview || undefined} alt="Group avatar" />
+                  <AvatarFallback className="bg-slate-200 text-slate-700 font-black">
+                    {(groupNameDraft || selectedTitle || 'G')[0]?.toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="space-y-1">
+                  <label className="text-xs font-black text-slate-500" htmlFor="group-avatar-file">
+                    Group photo
+                  </label>
+                  <input
+                    id="group-avatar-file"
+                    type="file"
+                    accept={ALLOWED_IMAGE_MIME_TYPES.join(',')}
+                    onChange={handleGroupAvatarChange}
+                    className="text-xs"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-xs font-black text-slate-500">Posting permissions</div>
+                <div className="grid gap-2 text-sm font-semibold text-slate-700">
+                  {(isMovementGroup
+                    ? [
+                        { value: 'owner_only', label: 'Owner-only (noticeboard mode)' },
+                        { value: 'selected', label: 'Selected participants' },
+                        { value: 'all', label: 'All participants' },
+                      ]
+                    : [
+                        { value: 'all', label: 'All participants' },
+                        { value: 'admins', label: 'Admins only' },
+                        { value: 'selected', label: 'Selected participants' },
+                      ]).map((option) => (
+                    <label key={option.value} className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="group-post-mode"
+                        value={option.value}
+                        checked={groupPostMode === option.value}
+                        onChange={() => setGroupPostMode(option.value)}
+                        disabled={isMovementGroup && !isGroupOwner}
+                      />
+                      <span>{option.label}</span>
+                    </label>
+                  ))}
+                  {isMovementGroup && !isGroupOwner ? (
+                    <div className="text-xs text-slate-500">
+                      Only the movement owner can change posting permissions.
+                    </div>
+                  ) : null}
+                </div>
+                {groupPostMode === 'selected' ? (
+                  <div className="mt-2 space-y-2">
+                    <div className="text-xs font-black text-slate-500">Allowed posters</div>
+                    <div className="flex flex-wrap gap-2">
+                      {groupParticipants.map((email) => (
+                        <label key={email} className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                          <Checkbox
+                            checked={groupPosterSelection.includes(email)}
+                            onCheckedChange={() => toggleGroupPoster(email)}
+                          />
+                          {maskEmail(email)}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-xs font-black text-slate-500">Group admins</div>
+                <div className="flex flex-wrap gap-2">
+                  {groupParticipants.map((email) => {
+                    const isOwner = normalizeEmail(email) === normalizeEmail(selectedConversation?.created_by_email);
+                    return (
+                      <label key={email} className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                        <Checkbox
+                          checked={groupAdminSelection.includes(email)}
+                          onCheckedChange={() => toggleGroupAdmin(email)}
+                          disabled={!isGroupOwner || isOwner}
+                        />
+                        {maskEmail(email)} {isOwner ? '(owner)' : ''}
+                      </label>
+                    );
+                  })}
+                </div>
+                {!isGroupOwner ? (
+                  <div className="text-xs text-slate-500">Only the group owner can change admin roles.</div>
+                ) : null}
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-xs font-black text-slate-500">Participants</div>
+                <div className="text-xs text-slate-500">Group chats are limited to 10 participants total.</div>
+                <div className="space-y-2">
+                  {groupParticipants.map((email) => {
+                    const isOwner = normalizeEmail(email) === normalizeEmail(selectedConversation?.created_by_email);
+                    return (
+                      <div key={email} className="flex items-center justify-between text-sm font-semibold text-slate-700">
+                        <div>{maskEmail(email)} {isOwner ? '(owner)' : ''}</div>
+                        {(isMovementGroup ? isGroupOwner : isGroupAdminUser) && !isOwner ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-8 rounded-lg text-xs font-black"
+                            onClick={() => updateGroupParticipantsMutation.mutate({ remove: [email] })}
+                            disabled={updateGroupParticipantsMutation.isPending}
+                          >
+                            Remove
+                          </Button>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {(isMovementGroup ? isGroupOwner : isGroupAdminUser) ? (
+                  isMovementGroup ? (
+                    <div className="space-y-2 pt-2">
+                      <div className="text-xs font-black text-slate-500">Add verified participants</div>
+                      {verifiedEvidenceLoading ? (
+                        <div className="text-xs text-slate-500">Loading verified participants…</div>
+                      ) : verifiedParticipantEmails.length === 0 ? (
+                        <div className="text-xs text-slate-500">No verified participants available.</div>
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap gap-2">
+                            {verifiedParticipantEmails
+                              .filter((email) => !groupParticipants.includes(email))
+                              .map((email) => (
+                                <label key={email} className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                                  <Checkbox
+                                    checked={movementAddSelection.includes(email)}
+                                    onCheckedChange={() => toggleMovementAdd(email)}
+                                  />
+                                  {maskEmail(email)}
+                                </label>
+                              ))}
+                          </div>
+                          <Button
+                            type="button"
+                            className="h-9 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
+                            onClick={() =>
+                              updateGroupParticipantsMutation.mutate({ add: movementAddSelection })
+                            }
+                            disabled={!movementAddSelection.length || updateGroupParticipantsMutation.isPending}
+                          >
+                            Add selected
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2 pt-2">
+                      <div className="text-xs font-black text-slate-500">Add by email</div>
+                      <div className="flex gap-2">
+                        <Input
+                          value={groupAddEmail}
+                          onChange={(e) => setGroupAddEmail(e.target.value)}
+                          placeholder="name@example.com"
+                          className="rounded-xl border-2"
+                        />
+                        <Button
+                          type="button"
+                          className="h-10 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
+                          onClick={() =>
+                            updateGroupParticipantsMutation.mutate({
+                              add: groupAddEmail
+                                .split(',')
+                                .map((e) => normalizeEmail(e))
+                                .filter(Boolean),
+                            })
+                          }
+                          disabled={!groupAddEmail.trim() || updateGroupParticipantsMutation.isPending}
+                        >
+                          Add
+                        </Button>
+                      </div>
+                    </div>
+                  )
                 ) : (
-                  'Start'
+                  <div className="text-xs text-slate-500">Only group admins can manage participants.</div>
                 )}
-              </Button>
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 rounded-xl font-bold"
+                  onClick={() => setGroupSettingsOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  className="h-10 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
+                  onClick={() => updateGroupSettingsMutation.mutate()}
+                  disabled={updateGroupSettingsMutation.isPending}
+                >
+                  {updateGroupSettingsMutation.isPending ? 'Saving…' : 'Save settings'}
+                </Button>
+              </div>
             </div>
-          </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

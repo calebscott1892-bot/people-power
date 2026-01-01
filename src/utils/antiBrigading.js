@@ -1,5 +1,6 @@
 import { entities } from '@/api/appClient';
 import { createIncident } from '@/api/incidentsClient';
+import { isAdmin } from '@/utils/staff';
 
 function now() {
   return Date.now();
@@ -241,6 +242,9 @@ export async function checkActionAllowed({ email, action, contextId, accessToken
   const userEmail = normalizeEmail(email);
   if (!userEmail) {
     return { ok: false, retryAfterMs: 0, reason: 'Please log in to continue.' };
+  }
+  if (isAdmin(userEmail)) {
+    return { ok: true, retryAfterMs: 0, trustScore: 1, bypassed: true };
   }
 
   const trustScore = await getHeuristicTrustScore(userEmail);

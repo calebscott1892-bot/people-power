@@ -1,6 +1,8 @@
 // Lightweight backend status checker for People Power
 // Exports: checkBackendHealth, subscribeBackendStatus, getCurrentBackendStatus
 
+import { getServerBaseUrl } from '@/api/serverBase';
+
 const STATUS = {
   HEALTHY: 'healthy',
   DEGRADED: 'degraded',
@@ -9,14 +11,15 @@ const STATUS = {
 
 let currentStatus = STATUS.HEALTHY;
 const listeners = new Set();
-let lastCheck = 0;
 let checkTimeout = null;
 
 function notify(status) {
   if (currentStatus !== status) {
     currentStatus = status;
     listeners.forEach((fn) => {
-      try { fn(currentStatus); } catch {}
+      try { fn(currentStatus); } catch {
+        // Ignore listener failures to keep status updates flowing.
+      }
     });
   }
 }
@@ -31,16 +34,19 @@ export function subscribeBackendStatus(listener) {
 }
 
 export async function checkBackendHealth({ timeoutMs = 3000 } = {}) {
-  lastCheck = Date.now();
   let status = STATUS.HEALTHY;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch('/health', { signal: controller.signal });
+    const baseUrl = getServerBaseUrl();
+    const res = await fetch(`${baseUrl}/health`, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
     clearTimeout(timeout);
     if (!res.ok) status = STATUS.DEGRADED;
     else status = STATUS.HEALTHY;
-  } catch (e) {
+  } catch {
     status = STATUS.OFFLINE;
   }
   notify(status);

@@ -7,6 +7,8 @@ import { User, Loader2, Lock, TimerReset } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { format } from 'date-fns';
 import { useAuth } from '@/auth/AuthProvider';
+import { lookupUsersByEmail } from '@/api/usersClient';
+import { isAdmin as isAdminEmail } from '@/utils/staff';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -73,6 +75,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
   const [pendingPostText, setPendingPostText] = useState('');
 
   const accessToken = session?.access_token ? String(session.access_token) : null;
+  const [commentAuthors, setCommentAuthors] = useState({});
 
   const { data: commentSettings, isLoading: settingsLoading } = useQuery({
     queryKey: ['commentSettings', safeMovementId],
@@ -116,6 +119,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
         limit: 20,
         offset: pageParam,
         fields: ['id', 'movement_id', 'author_email', 'content', 'created_at'],
+        accessToken,
       });
     },
     getNextPageParam: (lastPage, pages) => {
@@ -130,6 +134,45 @@ export default function CommentSection({ movementId, movement, canModerate = fal
     const pages = Array.isArray(commentPages?.pages) ? commentPages.pages : [];
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
   }, [commentPages]);
+
+  useEffect(() => {
+    if (!accessToken) {
+      setCommentAuthors({});
+      return;
+    }
+    const emails = Array.from(
+      new Set(
+        comments
+          .map((c) => String(c?.author_email || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    );
+    if (!emails.length) {
+      setCommentAuthors({});
+      return;
+    }
+    let cancelled = false;
+    lookupUsersByEmail(emails, { accessToken })
+      .then((users) => {
+        if (cancelled) return;
+        const next = {};
+        for (const u of Array.isArray(users) ? users : []) {
+          const email = String(u?.email || '').trim().toLowerCase();
+          if (!email) continue;
+          next[email] = {
+            display_name: u?.display_name ?? null,
+            username: u?.username ?? null,
+          };
+        }
+        setCommentAuthors(next);
+      })
+      .catch(() => {
+        if (!cancelled) setCommentAuthors({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [comments, accessToken]);
 
   const postMutation = useMutation({
     mutationFn: async ({ text }) => {
@@ -354,11 +397,16 @@ export default function CommentSection({ movementId, movement, canModerate = fal
                     : 'Write a comment…'
               }
               className="w-full min-h-20 p-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-800 font-semibold outline-none"
-              disabled={locked || postMutation.isPending}
+              disabled={locked || postMutation.isPending || isOffline}
             />
+            {isOffline ? (
+              <div className="text-xs font-bold text-rose-700">
+                You appear to be offline — please reconnect before performing this action.
+              </div>
+            ) : null}
             <button
               onClick={attemptPost}
-              disabled={locked || postMutation.isPending}
+              disabled={locked || postMutation.isPending || isOffline}
               className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
             >
               {postMutation.isPending ? 'Posting…' : 'Post'}
@@ -387,7 +435,35 @@ export default function CommentSection({ movementId, movement, canModerate = fal
                       <User className="w-4 h-4 text-white" />
                     </div>
                     <div>
-                      <div className="text-sm font-black text-slate-900">{String(c?.author_email || 'Unknown')}</div>
+                    {(() => {
+                      const emailKey = String(c?.author_email || '').trim().toLowerCase();
+                      const authorProfile = emailKey ? commentAuthors[emailKey] : null;
+                      const authorLabel =
+                        authorProfile?.display_name ||
+                        (authorProfile?.username ? `@${authorProfile.username}` : 'Member');
+                      const authorPath = authorProfile?.username
+                        ? `/u/${encodeURIComponent(authorProfile.username)}`
+                        : null;
+                      const isAdminAuthor = emailKey ? isAdminEmail(emailKey) : false;
+                      const label = authorPath ? (
+                        <Link to={authorPath} className="text-sm font-black text-slate-900 hover:text-[#3A3DFF]">
+                          {authorLabel}
+                        </Link>
+                      ) : (
+                        <span className="text-sm font-black text-slate-900">{authorLabel}</span>
+                      );
+
+                      return (
+                        <div className="flex items-center gap-2">
+                          {label}
+                          {isAdminAuthor ? (
+                            <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                              Admin
+                            </span>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                       <div className="text-xs text-slate-500 font-semibold">
                         {c?.created_at ? format(new Date(c.created_at), 'MMM d, h:mm a') : ''}
                       </div>

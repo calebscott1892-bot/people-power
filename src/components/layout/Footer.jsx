@@ -7,6 +7,7 @@ export default function Footer() {
     { to: '/content-policy', label: 'Content Policy' },
     { to: '/community-guidelines', label: 'Community Guidelines' },
     { to: '/privacy-policy', label: 'Privacy Policy' },
+    { to: '/report', label: 'Report a problem' },
   ];
 
   const year = 2025;

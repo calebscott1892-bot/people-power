@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,17 +7,22 @@ import LocationPicker from './LocationPicker';
 import { Loader2, Upload, X, Plus } from 'lucide-react';
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
-import { entities, integrations } from '@/api/appClient';
+import { entities } from '@/api/appClient';
+import { uploadFile } from '@/api/uploadsClient';
+import { upsertMyProfile } from '@/api/userProfileClient';
 import ExpressionRewardsPanel from '@/components/challenges/ExpressionRewardsPanel';
 import { unlockExpressionReward } from '@/api/userChallengeStatsClient';
 import { readPrivateUserCoordinates, writePrivateUserCoordinates, sanitizePublicLocation } from '@/utils/locationPrivacy';
 import { exportMyData } from '@/api/userExportClient';
 import { useAuth } from '@/auth/AuthProvider';
+import { logError } from '@/utils/logError';
+import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from "@/components/ui/dialog";
 
 const suggestedSkills = [
@@ -29,8 +34,10 @@ const suggestedSkills = [
 
 export default function EditProfileModal({ open, onClose, profile, userEmail, userStats }) {
   const { session } = useAuth();
+  const photoInputRef = useRef(null);
   const [displayName, setDisplayName] = useState(profile?.display_name || '');
   const [username, setUsername] = useState(profile?.username || '');
+  const [usernameError, setUsernameError] = useState('');
   const [bio, setBio] = useState(profile?.bio || '');
   const [skills, setSkills] = useState(profile?.skills || []);
   const [skillInput, setSkillInput] = useState('');
@@ -38,8 +45,10 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [uploadingBanner, setUploadingBanner] = useState(false);
   const [photoUrl, setPhotoUrl] = useState(profile?.profile_photo_url || '');
   const [bannerUrl, setBannerUrl] = useState(profile?.banner_url || '');
-  const MAX_UPLOAD_MB = 5;
-  const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif'];
+  const [initialPhotoUrl, setInitialPhotoUrl] = useState(profile?.profile_photo_url || '');
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState('');
+  const [pendingPhotoFile, setPendingPhotoFile] = useState(null);
+  const [bannerPreviewUrl, setBannerPreviewUrl] = useState('');
   const [aiEnabled, setAiEnabled] = useState(() => {
     if (profile && typeof profile === 'object' && 'ai_features_enabled' in profile) {
       return !!profile.ai_features_enabled;
@@ -70,17 +79,54 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
 
     setLocation(sanitizePublicLocation(profile?.location) || null);
     setPrivateCoords(readPrivateUserCoordinates(userEmail) || (legacyLat != null && legacyLng != null ? { lat: legacyLat, lng: legacyLng } : null));
+    setPhotoUrl(profile?.profile_photo_url || '');
+    setInitialPhotoUrl(profile?.profile_photo_url || '');
+    setBannerUrl(profile?.banner_url || '');
+    setUsernameError('');
+    setPendingPhotoFile(null);
   }, [open, profile, userEmail]);
+
+  React.useEffect(() => {
+    if (!open) {
+      if (photoPreviewUrl) {
+        try {
+          URL.revokeObjectURL(photoPreviewUrl);
+        } catch {
+          // ignore
+        }
+      }
+      if (bannerPreviewUrl) {
+        try {
+          URL.revokeObjectURL(bannerPreviewUrl);
+        } catch {
+          // ignore
+        }
+      }
+      setPhotoPreviewUrl('');
+      setBannerPreviewUrl('');
+      setPendingPhotoFile(null);
+    }
+  }, [open, photoPreviewUrl, bannerPreviewUrl]);
 
   const updateProfileMutation = useMutation({
     mutationFn: async (data) => {
-      if (profile) {
-        await entities.UserProfile.update(profile.id, data);
-      } else {
-        await entities.UserProfile.create({
-          user_email: userEmail,
-          ...data
-        });
+      const accessToken = session?.access_token ? String(session.access_token) : null;
+      if (!accessToken) throw new Error('Please sign in to update your profile');
+
+      await upsertMyProfile(data, { accessToken });
+
+      // Keep local cache in sync for migration-mode reads.
+      try {
+        if (profile) {
+          await entities.UserProfile.update(profile.id, data);
+        } else {
+          await entities.UserProfile.create({
+            user_email: userEmail,
+            ...data
+          });
+        }
+      } catch (e) {
+        logError(e, 'Profile cache update failed');
       }
     },
     onSuccess: () => {
@@ -90,76 +136,151 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       } catch {
         // ignore
       }
+      setUsernameError('');
       toast.success('Profile updated!');
       onClose();
+    },
+    onError: (err) => {
+      if (err?.code === 'USERNAME_TAKEN') {
+        setUsernameError('That username is already taken.');
+        return;
+      }
+      toast.error(String(err?.message || 'Failed to update profile'));
     }
   });
 
   const handlePhotoUpload = async (e) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-      toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-      return;
-    }
-    if (file.type && !ALLOWED_IMAGE_TYPES.includes(file.type)) {
-      toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF).');
+    const validationError = validateFileUpload({
+      file,
+      maxBytes: MAX_UPLOAD_BYTES,
+      allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+    });
+    if (validationError) {
+      toast.error(validationError);
       return;
     }
 
-    setUploading(true);
-    try {
-      const { file_url } = await integrations.Core.UploadFile({ file });
-      setPhotoUrl(file_url);
-    } catch {
-      toast.error('Failed to upload photo');
-    } finally {
-      setUploading(false);
+    const preview = URL.createObjectURL(file);
+    if (photoPreviewUrl) {
+      try {
+        URL.revokeObjectURL(photoPreviewUrl);
+      } catch {
+        // ignore
+      }
     }
+    setPhotoPreviewUrl(preview);
+    setPendingPhotoFile(file);
   };
 
   const handleBannerUpload = async (e) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-      toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-      return;
-    }
-    if (file.type && !ALLOWED_IMAGE_TYPES.includes(file.type)) {
-      toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF).');
+    const validationError = validateFileUpload({
+      file,
+      maxBytes: MAX_UPLOAD_BYTES,
+      allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+    });
+    if (validationError) {
+      toast.error(validationError);
       return;
     }
 
+    const preview = URL.createObjectURL(file);
+    if (bannerPreviewUrl) {
+      try {
+        URL.revokeObjectURL(bannerPreviewUrl);
+      } catch {
+        // ignore
+      }
+    }
+    setBannerPreviewUrl(preview);
     setUploadingBanner(true);
     try {
-      const { file_url } = await integrations.Core.UploadFile({ file });
-      setBannerUrl(file_url);
-    } catch {
-      toast.error('Failed to upload banner');
+      const accessToken = session?.access_token ? String(session.access_token) : null;
+      if (!accessToken) throw new Error('Please sign in to upload an image');
+      const uploaded = await uploadFile(file, {
+        accessToken,
+        kind: 'banner',
+        allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+      });
+      const nextUrl = uploaded?.url ? String(uploaded.url) : '';
+      if (!nextUrl) throw new Error('Upload succeeded but no URL returned');
+      setBannerUrl(nextUrl);
+    } catch (e) {
+      logError(e, 'Profile banner upload failed');
+      toast.error(String(e?.message || 'Failed to upload banner'));
     } finally {
       setUploadingBanner(false);
+      if (preview) {
+        try {
+          URL.revokeObjectURL(preview);
+        } catch {
+          // ignore
+        }
+      }
+      setBannerPreviewUrl('');
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setUsernameError('');
+
     if (!displayName.trim()) {
       toast.error('Display name is required');
       return;
     }
 
+    const normalizedUsername = String(username || '').trim().toLowerCase();
+    if (normalizedUsername && !/^[a-z0-9_]{3,32}$/.test(normalizedUsername)) {
+      setUsernameError('Usernames must be 3–32 characters with letters, numbers, and underscores only.');
+      return;
+    }
+
+    // NOTE: Store city-level/approximate location only (no exact GPS) in the profile; precise coords stay on-device for local discovery.
     if (userEmail && privateCoords?.lat != null && privateCoords?.lng != null) {
       writePrivateUserCoordinates(userEmail, privateCoords);
     }
 
+    let nextPhotoUrl = photoUrl;
+    if (pendingPhotoFile) {
+      setUploading(true);
+      try {
+        const accessToken = session?.access_token ? String(session.access_token) : null;
+        if (!accessToken) throw new Error('Please sign in to upload an image');
+        const uploaded = await uploadFile(pendingPhotoFile, {
+          accessToken,
+          kind: 'avatar',
+          allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+        });
+        const uploadedUrl = uploaded?.url ? String(uploaded.url) : '';
+        if (!uploadedUrl) throw new Error('Upload succeeded but no URL returned');
+        nextPhotoUrl = uploadedUrl;
+        setPhotoUrl(uploadedUrl);
+        setPendingPhotoFile(null);
+      } catch (e) {
+        logError(e, 'Profile photo upload failed');
+        toast.error(String(e?.message || 'Failed to upload photo'));
+        setUploading(false);
+        return;
+      } finally {
+        setUploading(false);
+      }
+    }
+
     updateProfileMutation.mutate({
       display_name: displayName.trim(),
-      username: username.trim() || displayName.trim().toLowerCase().replace(/\s+/g, ''),
+      username: normalizedUsername || displayName.trim().toLowerCase().replace(/\s+/g, ''),
       bio: bio.trim(),
-      profile_photo_url: photoUrl,
+      profile_photo_url: nextPhotoUrl,
       banner_url: bannerUrl,
       skills,
       ai_features_enabled: aiEnabled,
+      // Store only coarse location fields (city/region/country), never raw GPS.
       location: sanitizePublicLocation(location),
       catchment_radius_km: catchmentRadius
     });
@@ -206,6 +327,9 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       <DialogContent className="sm:max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-xl font-black">Edit Profile</DialogTitle>
+          <DialogDescription className="text-sm text-slate-600 font-semibold">
+            Update your profile details, avatar, and location preferences.
+          </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4 mt-4">
@@ -213,15 +337,15 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
           <div>
             <label className="block text-sm font-bold text-slate-700 mb-2">Profile Banner</label>
             <div className="relative h-24 rounded-xl overflow-hidden">
-              {bannerUrl ? (
-                <img src={bannerUrl} alt="" className="w-full h-full object-cover" />
+              {bannerPreviewUrl || bannerUrl ? (
+                <img src={bannerPreviewUrl || bannerUrl} alt="" className="w-full h-full object-cover" />
               ) : (
                 <div className="w-full h-full bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
               )}
               <label className="absolute inset-0 flex items-center justify-center bg-black/40 hover:bg-black/50 transition-colors cursor-pointer">
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="image/png,image/jpeg,image/webp"
                   onChange={handleBannerUpload}
                   className="hidden"
                 />
@@ -241,31 +365,62 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
 
           {/* Profile Photo */}
           <div className="flex flex-col items-center gap-3">
-            {photoUrl ? (
-              <img src={photoUrl} alt="" className="w-32 h-32 rounded-2xl object-cover" />
+            {photoPreviewUrl || photoUrl ? (
+              <img src={photoPreviewUrl || photoUrl} alt="" className="w-24 h-24 sm:w-32 sm:h-32 rounded-full object-cover" />
             ) : (
-              <div className="w-32 h-32 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-2xl flex items-center justify-center">
-                <span className="text-white font-black text-4xl">
+              <div className="w-24 h-24 sm:w-32 sm:h-32 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-full flex items-center justify-center">
+                <span className="text-white font-black text-3xl sm:text-4xl">
                   {displayName[0]?.toUpperCase() || '?'}
                 </span>
               </div>
             )}
-            <label className="cursor-pointer">
-              <input
-                type="file"
-                accept="image/*"
-                onChange={handlePhotoUpload}
-                className="hidden"
-              />
-              <Button type="button" variant="outline" className="font-bold rounded-xl" disabled={uploading}>
-                {uploading ? (
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                ) : (
-                  <Upload className="w-4 h-4 mr-2" />
-                )}
-                Change Photo
+            {photoPreviewUrl || pendingPhotoFile || (photoUrl && photoUrl !== initialPhotoUrl) ? (
+              <div className="text-xs font-bold text-slate-500">
+                Avatar ready to save.
+              </div>
+            ) : null}
+            <input
+              ref={photoInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={handlePhotoUpload}
+              className="hidden"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              className="font-bold rounded-xl"
+              disabled={uploading}
+              onClick={() => photoInputRef.current?.click()}
+            >
+              {uploading ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4 mr-2" />
+              )}
+              Change Photo
+            </Button>
+            {photoUrl && photoUrl !== initialPhotoUrl ? (
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-9 text-xs font-bold text-slate-500"
+                onClick={() => {
+                  if (photoPreviewUrl) {
+                    try {
+                      URL.revokeObjectURL(photoPreviewUrl);
+                    } catch {
+                      // ignore
+                    }
+                  }
+                  setPhotoPreviewUrl('');
+                  setPhotoUrl(initialPhotoUrl);
+                  setPendingPhotoFile(null);
+                }}
+              >
+                Revert
               </Button>
-            </label>
+            ) : null}
           </div>
 
           <div>
@@ -285,11 +440,20 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-bold">@</span>
               <Input
                 value={username}
-                onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                onChange={(e) => {
+                  setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''));
+                  setUsernameError('');
+                }}
                 placeholder="username"
                 className="pl-8 rounded-xl border-2"
               />
             </div>
+            <p className="mt-1 text-xs text-slate-500 font-semibold">
+              Your username must be unique. No spaces; letters, numbers, underscores only.
+            </p>
+            {usernameError ? (
+              <p className="mt-1 text-xs font-bold text-rose-600">{usernameError}</p>
+            ) : null}
           </div>
 
           <div>
@@ -475,11 +639,14 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
             </Button>
             <Button
               type="submit"
-              disabled={updateProfileMutation.isPending}
+              disabled={updateProfileMutation.isPending || uploading || uploadingBanner}
               className="flex-1 bg-[#3A3DFF] hover:bg-[#2A2DDD] font-bold rounded-xl"
             >
               {updateProfileMutation.isPending ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Saving…
+                </span>
               ) : (
                 'Save'
               )}

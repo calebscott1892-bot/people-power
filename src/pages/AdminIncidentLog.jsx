@@ -1,9 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import AdminBackButton from '@/components/admin/AdminBackButton';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchAdminIncidents } from '@/api/incidentsClient';
-import { isStaff } from '@/utils/staff';
 
 const PAGE_SIZE = 50;
 
@@ -17,11 +16,10 @@ function formatWhen(value) {
 }
 
 export default function AdminIncidentLog() {
-  const { session } = useAuth();
+  const { session, isAdmin } = useAuth();
 
   const accessToken = session?.access_token ? String(session.access_token) : null;
-  const staffEmail = session?.user?.email ? String(session.user.email).trim().toLowerCase() : '';
-  const canView = !!accessToken && isStaff(staffEmail);
+  const canView = !!accessToken && !!isAdmin;
 
   const [draftQuery, setDraftQuery] = useState('');
   const [query, setQuery] = useState('');
@@ -46,9 +44,7 @@ export default function AdminIncidentLog() {
   return (
     <div className="max-w-6xl mx-auto px-4 py-12 space-y-6">
       <div className="flex items-center justify-between gap-3">
-        <Link to="/AdminReports" className="text-[#3A3DFF] font-bold">
-          &larr; Back to reports
-        </Link>
+        <AdminBackButton />
         <button
           type="button"
           onClick={() => refetch()}
@@ -63,6 +59,9 @@ export default function AdminIncidentLog() {
         <div>
           <h1 className="text-2xl font-black text-slate-900">Incident Log</h1>
           <p className="text-slate-600 font-semibold text-sm">Metadata-only safety incidents (read-only).</p>
+          <div className="inline-flex items-center mt-3 px-3 py-1 rounded-full bg-slate-900 text-white text-xs font-black uppercase">
+            Admin view – tools not available to regular users
+          </div>
         </div>
 
         {!accessToken ? (
@@ -70,7 +69,7 @@ export default function AdminIncidentLog() {
         ) : !canView ? (
           <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
             <div className="font-black text-slate-900">Not authorized</div>
-            <div className="text-sm font-semibold mt-1">Staff access required.</div>
+            <div className="text-sm font-semibold mt-1">Admin access required.</div>
           </div>
         ) : (
           <form

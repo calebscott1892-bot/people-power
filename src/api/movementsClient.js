@@ -50,14 +50,19 @@ async function safeReadJson(res) {
   }
 }
 
-export async function fetchMovementsPage({ limit = 20, offset = 0 } = {}) {
+export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken } = {}) {
   const base = BASE_URL.replace(/\/$/, '');
   const params = new URLSearchParams();
   if (limit != null) params.set('limit', String(limit));
   if (offset != null) params.set('offset', String(offset));
 
   const url = `${base}/movements${params.toString() ? `?${params.toString()}` : ''}`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${String(accessToken)}` } : {}),
+    },
+  });
   if (!res.ok) {
     throw new Error(`Failed to fetch movements: ${res.status}`);
   }
@@ -65,9 +70,9 @@ export async function fetchMovementsPage({ limit = 20, offset = 0 } = {}) {
   return normalizeMovements(data);
 }
 
-export async function fetchMovements() {
+export async function fetchMovements(options) {
   // Backwards-compatible: fetch the first page with server defaults.
-  return fetchMovementsPage({ limit: 50, offset: 0 });
+  return fetchMovementsPage({ limit: 50, offset: 0, accessToken: options?.accessToken });
 }
 
 export async function fetchMyFollowedMovements(options) {
@@ -95,16 +100,22 @@ export async function fetchMyFollowedMovements(options) {
   return normalizeMovements(body);
 }
 
-export async function fetchMovementById(id) {
+export async function fetchMovementById(id, options) {
   const movementId = normalizeId(id);
   if (!movementId) throw new Error('Movement ID is required');
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
 
   // Prefer GET /movements/:id if the server supports it.
   // If not supported (404), fall back to fetching all and searching.
   const directUrl = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
 
   try {
-    const res = await fetch(directUrl, { headers: { Accept: 'application/json' } });
+    const res = await fetch(directUrl, {
+      headers: {
+        Accept: 'application/json',
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+    });
     if (res.ok) {
       const body = await res.json();
       // body may be { movement }, { data }, or the movement object itself
@@ -119,12 +130,12 @@ export async function fetchMovementById(id) {
     if (res.status !== 404) {
       throw new Error(`Failed to fetch movement: ${res.status}`);
     }
-  } catch (e) {
-    // Network errors or parsing issues: fall back to list search
+  } catch (_err) {
     // Network errors or parsing issues: fall back to list search. Use structured logging if needed.
+    void _err;
   }
 
-  const all = await fetchMovements();
+  const all = await fetchMovements({ accessToken });
   const found =
     all.find((m) => normalizeId(m?.id) === movementId) ||
     all.find((m) => normalizeId(m?._id) === movementId) ||
@@ -190,6 +201,36 @@ export async function deleteMovement(id, options) {
   }
 
   return body ?? { ok: true };
+}
+
+export async function updateMovement(id, payload, options) {
+  const movementId = normalizeId(id);
+  if (!movementId) throw new Error('Movement ID is required');
+
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
+
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify(payload ?? {}),
+  });
+
+  const body = await safeReadJson(res);
+
+  if (!res.ok) {
+    const messageFromBody =
+      (body && typeof body === 'object' && (body.error || body.message)) || null;
+    const message =
+      messageFromBody ? String(messageFromBody) : `Failed to update movement: ${res.status}`;
+    throw new Error(message);
+  }
+
+  return body;
 }
 
 export async function fetchMovementVotes(id, options) {

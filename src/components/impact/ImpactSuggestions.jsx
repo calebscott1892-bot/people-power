@@ -11,8 +11,7 @@ export default function ImpactSuggestions({ movement }) {
     try {
       const boosts = Number(movement?.boosts || 0) || 0;
       const supporters = Number(movement?.supporters || 0) || 0;
-      const participants =
-        (Number(movement?.verified_participants || 0) || 0) + (Number(movement?.unverified_participants || 0) || 0);
+      const participants = Number(movement?.verified_participants || 0) || 0;
 
       const quickWins = [];
       if (supporters > participants) quickWins.push('Ask supporters to take one specific action (small, concrete, time-boxed).');

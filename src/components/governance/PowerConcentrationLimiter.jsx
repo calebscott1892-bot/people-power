@@ -1,7 +1,17 @@
 import { entities } from "@/api/appClient";
+import { isAdmin } from "@/utils/staff";
 
 // Prevents "movement monopolies" by capping simultaneous leadership roles
 export const checkLeadershipCap = async (userEmail, roleType) => {
+  if (isAdmin(userEmail)) {
+    return {
+      can_create: true,
+      current_count: 0,
+      cap: Number.POSITIVE_INFINITY,
+      message: null,
+      bypassed: true,
+    };
+  }
   // Get platform config
   const configs = await entities.PlatformConfig.filter({ config_key: 'leadership_caps' });
   const caps = configs.length > 0 ? configs[0].config_value : {
@@ -72,6 +82,9 @@ export const deactivateLeadershipRole = async (userEmail, roleType, movementId) 
 // Reduce algorithmic advantage for dominant actors
 export const applyDecentralizationBoost = (movements, userLeadershipCounts) => {
   return movements.map(movement => {
+    if (isAdmin(movement?.author_email)) {
+      return { ...movement };
+    }
     const creatorRoleCount = userLeadershipCounts[movement.author_email] || 0;
     
     // Apply diminishing returns for users with many leadership roles

@@ -59,7 +59,6 @@ export function logError(error, context, meta) {
 
   if (import.meta?.env?.DEV) {
     // Only log in development, not production
-    // eslint-disable-next-line no-console
     console.error('[PeoplePower]', payload);
   }
 

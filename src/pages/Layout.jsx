@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
-import { Link, useLocation, Outlet } from 'react-router-dom';
+import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Bell, Shield, Plus } from 'lucide-react';
+import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, Flag, LogOut } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -10,14 +10,12 @@ import { LanguageProvider, useLanguage } from '@/components/utils/LanguageContex
 import { useAuth } from '@/auth/AuthProvider';
 import ErrorBoundary from '@/components/shared/ErrorBoundary';
 import Footer from '@/components/layout/Footer';
-import { isStaff } from '@/utils/staff';
-
-function parseAdminEmails(raw) {
-  return String(raw || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-}
+import { useFeatureFlag } from '@/utils/featureFlags';
+import { useQuery } from '@tanstack/react-query';
+import { entities } from '@/api/appClient';
+import { fetchMyProfile } from '@/api/userProfileClient';
+import { toast } from 'sonner';
+import IntroScreen from '@/components/home/IntroScreen';
 
 function EarlyAccessBanner() {
   const [hidden, setHidden] = useState(false);
@@ -67,13 +65,41 @@ function EarlyAccessBanner() {
 
 function LayoutContent({ children }) {
   const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
-  const { user: authUser } = useAuth();
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [isStaffUser, setIsStaffUser] = useState(false);
+  const { user: authUser, session, isAdmin, logout } = useAuth();
+  const [showIntroAgain, setShowIntroAgain] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
   const { t } = useLanguage();
+  const userId = authUser?.id || authUser?.email || null;
+  const { enabled: multiLanguageEnabled } = useFeatureFlag('multi_language', userId);
+  const { enabled: dailyChallengesEnabled } = useFeatureFlag('daily_challenges', userId, {
+    defaultEnabled: true,
+    enableWhileLoading: true,
+  });
+  const profileEmail = authUser?.email ? String(authUser.email) : null;
+  const accessToken = session?.access_token ? String(session.access_token) : null;
 
-  const adminEmails = useMemo(() => parseAdminEmails(import.meta?.env?.VITE_ADMIN_EMAILS), []);
+  const { data: userProfile } = useQuery({
+    queryKey: ['userProfile', profileEmail],
+    enabled: !!profileEmail,
+    queryFn: async () => {
+      if (!profileEmail) return null;
+      try {
+        if (accessToken) {
+          const profile = await fetchMyProfile({ accessToken });
+          return profile || null;
+        }
+      } catch {
+        // fall back to local cached profile
+      }
+      try {
+        const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
+        return Array.isArray(profiles) && profiles.length > 0 ? profiles[0] : null;
+      } catch {
+        return null;
+      }
+    },
+  });
 
   const hideFooter = location.pathname === '/login';
 
@@ -83,15 +109,60 @@ function LayoutContent({ children }) {
     return () => unsub();
   }, []);
 
-  useEffect(() => {
-    const email = String(authUser?.email || '').trim().toLowerCase();
-    setIsAdmin(!!(email && adminEmails.includes(email)));
-    setIsStaffUser(!!(email && isStaff(email)));
-  }, [authUser, adminEmails]);
+  const profileLabel = useMemo(() => {
+    const base =
+      userProfile?.display_name ||
+      userProfile?.username ||
+      authUser?.user_metadata?.full_name ||
+      authUser?.full_name ||
+      authUser?.user_metadata?.name ||
+      authUser?.user_metadata?.username ||
+      '';
+    const trimmed = String(base).trim();
+    return trimmed || 'Account';
+  }, [authUser, userProfile]);
+
+  const profileInitial = useMemo(() => {
+    const base =
+      userProfile?.display_name ||
+      userProfile?.username ||
+      authUser?.user_metadata?.full_name ||
+      authUser?.full_name ||
+      authUser?.user_metadata?.name ||
+      authUser?.user_metadata?.username ||
+      '';
+    const trimmed = String(base).trim();
+    if (trimmed) return trimmed[0].toUpperCase();
+    return '?';
+  }, [authUser, userProfile]);
+
+  const profilePhotoUrl = useMemo(() => {
+    const raw =
+      userProfile?.profile_photo_url ||
+      userProfile?.avatar_url ||
+      authUser?.user_metadata?.profile_photo_url ||
+      authUser?.user_metadata?.avatar_url ||
+      authUser?.user_metadata?.picture ||
+      '';
+    const trimmed = String(raw || '').trim();
+    return trimmed || '';
+  }, [authUser, userProfile]);
+
+  // Logout: calls Supabase signOut and returns to home/intro.
+  const handleLogout = async () => {
+    try {
+      await logout();
+      toast.success('Signed out');
+      navigate('/');
+    } catch (e) {
+      toast.error(String(e?.message || "Couldn't sign out, please try again"));
+    }
+  };
 
   const navItems = [
     { name: t('home'), page: 'Home', icon: Home },
-    { name: t('challenges'), page: 'DailyChallenges', icon: Zap },
+    { name: t('search') || 'Search', page: 'Search', icon: Search },
+    { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
     { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
     { name: t('messages'), page: 'Messages', icon: MessageCircle },
@@ -134,6 +205,9 @@ function LayoutContent({ children }) {
             : 'People Power is experiencing issues. Some data may be out of date.'}
         </div>
       )}
+      {showIntroAgain ? (
+        <IntroScreen onContinue={() => setShowIntroAgain(false)} isExiting={false} />
+      ) : null}
       {/* Main scrollable content */}
       <div
         className="flex-1 overflow-x-hidden"
@@ -146,9 +220,12 @@ function LayoutContent({ children }) {
           <div className="max-w-7xl mx-auto px-4 sm:px-6">
             <div className="flex items-center justify-between h-14 sm:h-16 md:h-20">
               {/* Logo */}
-              <Link
-                to={createPageUrl('Home')}
-                className="flex items-center gap-2 md:gap-3 group"
+              <button
+                type="button"
+                onClick={() => setShowIntroAgain(true)}
+                className="flex items-center gap-2 md:gap-3 group cursor-pointer"
+                title="View welcome screen"
+                aria-label="View welcome screen"
               >
                 <motion.div
                   whileHover={{ rotate: 10, scale: 1.1 }}
@@ -164,48 +241,57 @@ function LayoutContent({ children }) {
                     Unite • Act • Transform
                   </span>
                 </div>
-              </Link>
+              </button>
 
               {/* Desktop - Language & Profile */}
               <div className="flex items-center gap-3">
-                <LanguageSwitcher />
+                {multiLanguageEnabled ? <LanguageSwitcher /> : null}
+                <Link
+                  to={createPageUrl('ReportCenter')}
+                  className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
+                  aria-label="Report a problem"
+                >
+                  <Flag className="w-4 h-4" />
+                  <span className="hidden md:inline text-xs font-bold">Report</span>
+                </Link>
                 {authUser ? (
                   <div className="flex items-center gap-3">
-                    {isStaffUser && (
+                    {isAdmin && (
                       <Link
-                        to={createPageUrl('AdminIncidentLog')}
-                        className="hidden md:flex items-center gap-2 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 rounded-xl font-bold transition-colors"
+                        to={createPageUrl('AdminDashboard')}
+                        className="hidden md:flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl font-bold transition-colors"
                       >
                         <Shield className="w-4 h-4" />
-                        Incidents
+                        {t('admin')}
                       </Link>
-                    )}
-                    {isAdmin && (
-                      <>
-                        <Link
-                          to={createPageUrl('SystemHealth')}
-                          className="hidden md:flex items-center gap-2 px-4 py-2 border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 rounded-xl font-bold transition-colors"
-                        >
-                          <Shield className="w-4 h-4" />
-                          System Health
-                        </Link>
-                        <Link
-                          to={createPageUrl('AdminDashboard')}
-                          className="hidden md:flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl font-bold transition-colors"
-                        >
-                          <Shield className="w-4 h-4" />
-                          {t('admin')}
-                        </Link>
-                      </>
                     )}
                     <Link to={createPageUrl('Profile')} className="flex items-center gap-2 hover:opacity-80 transition-opacity">
                       <span className="hidden sm:block text-sm font-bold text-slate-700">
-                        {authUser.full_name || authUser.email}
+                        {profileLabel}
                       </span>
-                      <div className="w-10 h-10 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-full flex items-center justify-center text-white font-black text-sm shadow-lg">
-                        {(authUser.full_name?.[0] || authUser.email?.[0] || '?').toUpperCase()}
+                      {isAdmin ? (
+                        <span className="hidden sm:inline-flex ml-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                          Admin
+                        </span>
+                      ) : null}
+                      {/* Avatar flow: local preview → authenticated upload on Save → profile_photo_url persisted via profile update. */}
+                      <div className="w-10 h-10 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-full flex items-center justify-center text-white font-black text-sm shadow-lg overflow-hidden">
+                        {profilePhotoUrl ? (
+                          <img src={profilePhotoUrl} alt={profileLabel} className="w-full h-full object-cover" />
+                        ) : (
+                          profileInitial
+                        )}
                       </div>
                     </Link>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 hover:text-slate-900 hover:bg-slate-50 font-bold text-xs sm:text-sm"
+                      aria-label="Sign out"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      <span className="hidden sm:inline">Sign out</span>
+                    </button>
                   </div>
                 ) : (
                   <Link

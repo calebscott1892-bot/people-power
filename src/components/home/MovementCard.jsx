@@ -1,18 +1,55 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { motion, useReducedMotion } from 'framer-motion';
 import { Flame, MapPin, TrendingUp, ThumbsDown, ThumbsUp, Users } from 'lucide-react';
+import { MapContainer, Marker, TileLayer } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
+
+// Ensure Leaflet marker icons resolve correctly in Vite builds.
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-shadow.png',
+});
 
 function toNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
 
-function formatAuthor(movement) {
-  const raw = movement?.author_email || movement?.author || movement?.creator_email || '';
-  const s = String(raw || '').trim();
-  if (!s) return 'Unknown';
-  return s;
+function sanitizePublicName(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  return s.includes('@') ? '' : s;
+}
+
+function getAuthorInfo(movement) {
+  const displayName =
+    sanitizePublicName(movement?.creator_display_name) ||
+    sanitizePublicName(movement?.author_display_name) ||
+    sanitizePublicName(movement?.creator_name) ||
+    sanitizePublicName(movement?.author_name) ||
+    '';
+  const usernameRaw = String(
+    movement?.creator_username ||
+    movement?.author_username ||
+    movement?.creator_handle ||
+    ''
+  ).trim();
+  const username = usernameRaw && !usernameRaw.includes('@') ? usernameRaw.replace(/^@/, '') : '';
+  const label = displayName || (username ? `@${username}` : 'Unknown creator');
+  const profilePath = username ? `/u/${encodeURIComponent(username)}` : null;
+  const authorEmail = String(
+    movement?.author_email ||
+    movement?.creator_email ||
+    movement?.owner_email ||
+    ''
+  ).trim();
+  const isAdminAuthor = authorEmail ? isAdminEmail(authorEmail) : false;
+  return { label, profilePath, isAdminAuthor };
 }
 
 function normalizeTags(movement) {
@@ -102,14 +139,17 @@ function getTeaser(movement) {
 
 export default function MovementCard({ movement }) {
   const reduceMotion = useReducedMotion();
+  const navigate = useNavigate();
   const id = movement?.id ?? movement?._id;
   const title = movement?.title || movement?.name || 'Untitled movement';
   const description = getTeaser(movement);
-  const author = formatAuthor(movement);
+  const author = getAuthorInfo(movement);
   const tags = normalizeTags(movement);
   const locationLabel = formatLocation(movement);
   const locationQuery = useMemo(() => locationQueryParts(movement), [movement]);
   const [coords, setCoords] = useState(null);
+  const hasCoords = Number.isFinite(coords?.lat) && Number.isFinite(coords?.lon);
+  const [mapError, setMapError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,6 +181,10 @@ export default function MovementCard({ movement }) {
     };
   }, [locationQuery, movement]);
 
+  useEffect(() => {
+    setMapError(false);
+  }, [coords?.lat, coords?.lon]);
+
   const boosts = toNumber(movement?.upvotes ?? movement?.boosts);
   const downvotes = toNumber(movement?.downvotes);
   const score = toNumber(movement?.score ?? movement?.momentum_score);
@@ -159,8 +203,19 @@ export default function MovementCard({ movement }) {
   if (!movement) return null;
 
   return (
-    <motion.div whileHover={reduceMotion ? undefined : { y: -4 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm w-full">
-      <Link to={to} className="block p-3 sm:p-4 space-y-3">
+    <motion.div whileHover={reduceMotion ? undefined : { y: -4 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm w-full max-w-md mx-auto">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => navigate(to)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            navigate(to);
+          }
+        }}
+        className="block p-3 sm:p-4 space-y-3 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#3A3DFF]/40 rounded-2xl"
+      >
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -172,8 +227,27 @@ export default function MovementCard({ movement }) {
                 </span>
               ) : null}
             </div>
-            <div className="text-xs font-bold text-slate-500 truncate">
-              By {author}{locationLabel ? ` • ${locationLabel}` : ''}
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-500 truncate">
+              <span>
+                By{' '}
+                {author.profilePath ? (
+                  <Link
+                    to={author.profilePath}
+                    className="hover:text-[#3A3DFF]"
+                    title={author.label}
+                  >
+                    {author.label}
+                  </Link>
+                ) : (
+                  <span>{author.label}</span>
+                )}
+              </span>
+              {author.isAdminAuthor ? (
+                <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                  Admin
+                </span>
+              ) : null}
+              {locationLabel ? <span>• {locationLabel}</span> : null}
             </div>
           </div>
 
@@ -200,49 +274,70 @@ export default function MovementCard({ movement }) {
 
         <p className="text-sm text-slate-600 line-clamp-3 sm:line-clamp-2">{String(description)}</p>
 
-        {locationLabel ? (
+        {hasCoords ? (
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="inline-flex items-center gap-2 text-xs font-black text-slate-700">
                 <MapPin className="w-4 h-4 text-slate-500" />
                 Map preview (city-level)
               </div>
-              <div className="text-xs font-bold text-slate-600 truncate">{locationLabel}</div>
+              <div className="text-xs font-bold text-slate-600 truncate">
+                {locationLabel || 'Location set'}
+              </div>
             </div>
 
-            <div className="mt-2 rounded-xl overflow-hidden border border-slate-200 bg-white">
-              {coords?.lat != null && coords?.lon != null ? (
-                <img
-                  alt="City-level map preview"
-                  loading="lazy"
-                  className="w-full h-20 sm:h-24 object-cover"
-                  src={`https://staticmap.openstreetmap.de/staticmap.php?center=${coords.lat},${coords.lon}&zoom=11&size=640x220&maptype=mapnik&markers=${coords.lat},${coords.lon},lightblue1`}
+            <div className="mt-2 h-24 sm:h-28 rounded-xl overflow-hidden border border-slate-200 bg-white relative">
+              <MapContainer
+                center={[coords.lat, coords.lon]}
+                zoom={11}
+                zoomControl={false}
+                scrollWheelZoom={false}
+                dragging={false}
+                doubleClickZoom={false}
+                touchZoom={false}
+                boxZoom={false}
+                keyboard={false}
+                attributionControl={false}
+                className="h-full w-full pointer-events-none"
+                style={{ height: '100%', width: '100%' }}
+              >
+                <TileLayer
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  eventHandlers={{
+                    tileerror: () => setMapError(true),
+                    tileload: () => setMapError(false),
+                  }}
                 />
-              ) : (
-                <div className="h-24 flex items-center justify-center">
-                  <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
-                    <span className="inline-flex w-2.5 h-2.5 rounded-full bg-[#3A3DFF]" />
-                    Loading city-level map…
-                  </div>
+                <Marker position={[coords.lat, coords.lon]} />
+              </MapContainer>
+              {mapError ? (
+                <div className="absolute inset-0 flex items-center justify-center bg-white/80 text-xs font-bold text-slate-600">
+                  Map preview unavailable
                 </div>
-              )}
+              ) : null}
             </div>
 
             <div className="mt-2 text-[11px] text-slate-500 font-semibold">
               Approximate city-level location only.
             </div>
           </div>
-        ) : null}
+        ) : (
+          <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-3 text-xs font-semibold text-slate-600">
+            No location set yet.
+          </div>
+        )}
 
         <div className="flex items-center gap-4 pt-1">
           <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
             <Users className="w-4 h-4 text-slate-500" />
-            Verified: {verifiedParticipants}
+            Participants: {verifiedParticipants}
           </div>
-          <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
-            <Users className="w-4 h-4 text-slate-400" />
-            Unverified: {unverifiedParticipants}
-          </div>
+          {unverifiedParticipants > 0 ? (
+            <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
+              <Users className="w-4 h-4 text-slate-400" />
+              Unverified interest: {unverifiedParticipants}
+            </div>
+          ) : null}
           <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
             <Users className="w-4 h-4 text-[#FFC947]" />
             Supporters: {supporters}
@@ -264,7 +359,7 @@ export default function MovementCard({ movement }) {
           <div>Community-generated. Not verified by People Power.</div>
           <div>Always act safely and responsibly.</div>
         </div>
-      </Link>
+      </div>
     </motion.div>
   );
 }

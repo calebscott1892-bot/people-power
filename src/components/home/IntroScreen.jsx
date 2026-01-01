@@ -2,6 +2,7 @@ import React from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Zap, ArrowRight } from 'lucide-react';
 import { Button } from "@/components/ui/button";
+import { Link } from 'react-router-dom';
 
 export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
   const reduceMotion = useReducedMotion();
@@ -149,18 +150,27 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
               </p>
             </div>
 
-            <motion.div
-              whileHover={reduceMotion ? undefined : { scale: 1.05 }}
-              whileTap={reduceMotion ? undefined : { scale: 0.95 }}
-            >
-              <Button
-                onClick={onContinue}
-                className="h-12 sm:h-16 px-8 sm:px-12 bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-2xl font-black text-base sm:text-xl shadow-2xl shadow-yellow-400/40 uppercase tracking-wider"
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4">
+              <motion.div
+                whileHover={reduceMotion ? undefined : { scale: 1.05 }}
+                whileTap={reduceMotion ? undefined : { scale: 0.95 }}
               >
-                Continue
-                <ArrowRight className="w-6 h-6 ml-2" strokeWidth={3} />
+                <Button
+                  onClick={onContinue}
+                  className="h-12 sm:h-16 px-8 sm:px-12 bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-2xl font-black text-base sm:text-xl shadow-2xl shadow-yellow-400/40 uppercase tracking-wider"
+                >
+                  Continue
+                  <ArrowRight className="w-6 h-6 ml-2" strokeWidth={3} />
+                </Button>
+              </motion.div>
+              <Button
+                asChild
+                variant="outline"
+                className="h-12 sm:h-16 w-full sm:w-auto px-8 sm:px-10 rounded-2xl font-black text-base sm:text-xl bg-slate-900 text-white border border-slate-900 hover:bg-slate-800 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-900"
+              >
+                <Link to="/login">Sign in / Create account</Link>
               </Button>
-            </motion.div>
+            </div>
           </motion.div>
         </div>
       </motion.div>

@@ -1,4 +1,5 @@
 import { entities } from '@/api/appClient';
+import { getAwTimeKey, getAwTimeKeyNDaysAgo } from '@/utils/awTime';
 
 function normalizeEmail(email) {
   const s = String(email || '').trim().toLowerCase();
@@ -61,13 +62,11 @@ export async function unlockExpressionReward(userEmail, reward) {
 }
 
 function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  return getAwTimeKey();
 }
 
 function yesterdayKey() {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() - 1);
-  return d.toISOString().slice(0, 10);
+  return getAwTimeKeyNDaysAgo(1);
 }
 
 function getEffectiveCurrentStreak(stats) {
@@ -94,10 +93,17 @@ export async function recordChallengeCompletion(userEmail, challenge, completion
   const challengeId = String(challenge.id);
   const points = Number(challenge?.points || 0) || 0;
 
-  const evidenceType = String(completionPayload?.evidence_type || 'none');
   const evidenceText = completionPayload?.evidence_text ? String(completionPayload.evidence_text) : null;
   const evidenceImageUrl = completionPayload?.evidence_image_url ? String(completionPayload.evidence_image_url) : null;
-  const isVerified = evidenceType !== 'none' && (evidenceType === 'text' || evidenceType === 'image');
+  const derivedEvidenceType = (() => {
+    const hasText = !!(evidenceText && evidenceText.trim());
+    const hasImage = !!evidenceImageUrl;
+    if (hasText && hasImage) return 'text_image';
+    if (hasText) return 'text';
+    if (hasImage) return 'image';
+    return String(completionPayload?.evidence_type || 'none');
+  })();
+  const isVerified = !!(evidenceText && evidenceText.trim()) || !!evidenceImageUrl;
 
   // Prevent duplicate completion of the same challenge on the same day.
   const existingToday = await entities.ChallengeCompletion.filter({
@@ -112,7 +118,7 @@ export async function recordChallengeCompletion(userEmail, challenge, completion
     challenge_id: challengeId,
     date: t,
     points,
-    evidence_type: evidenceType,
+    evidence_type: derivedEvidenceType,
     evidence_text: evidenceText,
     evidence_image_url: evidenceImageUrl,
     is_verified: !!isVerified,

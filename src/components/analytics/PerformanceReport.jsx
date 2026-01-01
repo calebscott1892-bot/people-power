@@ -27,7 +27,7 @@ export default function PerformanceReport({ movement }) {
     setGenerating(true);
     try {
       const daysSinceLaunch = Math.floor((Date.now() - new Date(movement.created_date)) / (1000 * 60 * 60 * 24));
-      const totalParticipants = (movement.verified_participants || 0) + (movement.unverified_participants || 0);
+      const totalParticipants = movement.verified_participants || 0;
 
       const payloadHash = hashPayload({
         movementId: movement?.id ?? movement?._id ?? null,

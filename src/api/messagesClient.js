@@ -25,6 +25,15 @@
  * @property {string|null} last_message_body
  * @property {string|null} last_message_at
  * @property {number|null} unread_count
+ * @property {boolean|null} is_group
+ * @property {string|null} group_name
+ * @property {string|null} group_avatar_url
+ * @property {string|null} group_type
+ * @property {string|null} movement_id
+ * @property {string|null} created_by_email
+ * @property {string[]|null} group_admin_emails
+ * @property {'owner_only'|'admins'|'selected'|'all'|string|null} group_post_mode
+ * @property {string[]|null} group_posters
  *
  * @typedef {Object} Message
  * @property {string} id
@@ -421,6 +430,127 @@ export async function createConversation(recipientEmail, options) {
     if (myEmail) return localFindOrCreateConversation(myEmail, recipientEmail);
     throw e;
   }
+}
+
+export async function createGroupConversation(payload, options) {
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const url = `${BASE_URL.replace(/\/$/, '')}/conversations/group`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...authHeaders(accessToken),
+    },
+    body: JSON.stringify(payload || {}),
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const messageFromBody =
+      (body && typeof body === 'object' && (body.error || body.message)) || null;
+    const message = messageFromBody
+      ? String(messageFromBody)
+      : `Failed to create group chat: ${res.status}`;
+    throw new Error(message);
+  }
+
+  return body;
+}
+
+export async function createMovementGroupConversation(movementId, participantEmails, options) {
+  const id = normalizeId(movementId);
+  if (!id) throw new Error('Movement ID is required');
+
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/group-chat`;
+
+  const payload = Array.isArray(participantEmails) && participantEmails.length
+    ? { participant_emails: participantEmails }
+    : {};
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...authHeaders(accessToken),
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const messageFromBody =
+      (body && typeof body === 'object' && (body.error || body.message)) || null;
+    const message = messageFromBody
+      ? String(messageFromBody)
+      : `Failed to create group chat: ${res.status}`;
+    throw new Error(message);
+  }
+
+  return body;
+}
+
+export async function updateGroupSettings(conversationId, payload, options) {
+  const id = normalizeId(conversationId);
+  if (!id) throw new Error('Conversation ID is required');
+
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const url = `${BASE_URL.replace(/\/$/, '')}/conversations/${encodeURIComponent(id)}/group`;
+
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...authHeaders(accessToken),
+    },
+    body: JSON.stringify(payload || {}),
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const messageFromBody =
+      (body && typeof body === 'object' && (body.error || body.message)) || null;
+    const message = messageFromBody
+      ? String(messageFromBody)
+      : `Failed to update group: ${res.status}`;
+    throw new Error(message);
+  }
+
+  return body;
+}
+
+export async function updateGroupParticipants(conversationId, payload, options) {
+  const id = normalizeId(conversationId);
+  if (!id) throw new Error('Conversation ID is required');
+
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const url = `${BASE_URL.replace(/\/$/, '')}/conversations/${encodeURIComponent(id)}/participants`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...authHeaders(accessToken),
+    },
+    body: JSON.stringify(payload || {}),
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const messageFromBody =
+      (body && typeof body === 'object' && (body.error || body.message)) || null;
+    const message = messageFromBody
+      ? String(messageFromBody)
+      : `Failed to update participants: ${res.status}`;
+    throw new Error(message);
+  }
+
+  return body;
 }
 
 export async function fetchMessages(conversationId, options) {

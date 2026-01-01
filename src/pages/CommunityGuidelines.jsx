@@ -1,7 +1,8 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { HeartHandshake, Sparkles, ArrowLeft } from 'lucide-react';
+import { HeartHandshake, Sparkles } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import BackButton from '@/components/shared/BackButton';
 
 export default function CommunityGuidelines() {
   const sections = [
@@ -86,13 +87,10 @@ export default function CommunityGuidelines() {
                 <p className="text-sm sm:text-base font-semibold mt-1">Building a Respectful, Safe, and Powerful Community</p>
               </div>
             </div>
-            <Link
-              to="/legal-hub"
+            <BackButton
               className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900 border border-slate-900/20 bg-white/40 hover:bg-white/60 px-3 py-2 rounded-full"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back
-            </Link>
+              iconClassName="w-4 h-4"
+            />
           </div>
         </div>
 

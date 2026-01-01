@@ -1,10 +1,9 @@
 import React from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
-import { isStaff } from '@/utils/staff';
 
 export default function RequireStaff() {
-  const { user, loading } = useAuth();
+  const { user, loading, isStaff } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -20,8 +19,7 @@ export default function RequireStaff() {
     return <Navigate to="/login" replace state={{ from }} />;
   }
 
-  const email = String(user?.email || '').trim().toLowerCase();
-  if (!isStaff(email)) {
+  if (!isStaff) {
     return (
       <div className="max-w-3xl mx-auto px-4 py-12">
         <div className="p-6 rounded-2xl border border-slate-200 bg-white shadow-sm">

@@ -5,35 +5,51 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from 'framer-motion';
-import { integrations } from '@/api/appClient';
+import { useAuth } from '@/auth/AuthProvider';
+import { uploadFile } from '@/api/uploadsClient';
+import { ALLOWED_UPLOAD_MIME_TYPES, MAX_UPLOAD_BYTES, MAX_UPLOAD_MB, validateFileUpload } from '@/utils/uploadLimits';
 
 export default function EvidenceUploader({ evidence, onChange }) {
+  const { session } = useAuth();
+  const accessToken = session?.access_token ? String(session.access_token) : null;
   const [uploading, setUploading] = useState(false);
   const [acknowledged, setAcknowledged] = useState(evidence.user_acknowledges_unverified || false);
-  const MAX_UPLOAD_MB = 5;
-  const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'];
 
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files || []);
+    e.target.value = '';
     if (files.length === 0) return;
 
     for (const file of files) {
-      if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-        toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-        return;
-      }
-      if (!ALLOWED_MIME_TYPES.includes(file.type)) {
-        toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF) or PDF.');
+      const validationError = validateFileUpload({
+        file,
+        maxBytes: MAX_UPLOAD_BYTES,
+        allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+      });
+      if (validationError) {
+        toast.error(validationError);
         return;
       }
     }
 
+    if (!accessToken) {
+      toast.error('Please sign in to upload evidence.');
+      return;
+    }
+
     setUploading(true);
     try {
-      const uploadPromises = files.map((file) => integrations.Core.UploadFile({ file }));
+      const uploadPromises = files.map((file) =>
+        uploadFile(file, {
+          accessToken,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+        })
+      );
       const results = await Promise.all(uploadPromises);
-      
-      const newUrls = results.map(r => r.file_url);
+
+      const newUrls = results.map((r) => r?.url).filter(Boolean);
+      if (newUrls.length === 0) throw new Error('Upload failed');
       onChange({
         ...evidence,
         evidence_urls: [...(evidence.evidence_urls || []), ...newUrls],
@@ -119,7 +135,7 @@ export default function EvidenceUploader({ evidence, onChange }) {
           type="file"
           id="evidence-upload"
           multiple
-          accept=".pdf,.jpg,.jpeg,.png,.gif"
+          accept=".pdf,.jpg,.jpeg,.png,.gif,.webp"
           onChange={handleFileUpload}
           className="hidden"
           disabled={!acknowledged || uploading}
@@ -146,7 +162,7 @@ export default function EvidenceUploader({ evidence, onChange }) {
           </Button>
         </label>
         <p className="text-xs text-slate-500 mt-2 text-center">
-          PDF or image (JPG/PNG/GIF) • Max {MAX_UPLOAD_MB}MB per file
+          PDF or image (JPG/PNG/GIF/WEBP) • Max {MAX_UPLOAD_MB}MB per file
         </p>
       </div>
 

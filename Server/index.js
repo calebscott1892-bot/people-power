@@ -1,5 +1,5 @@
 // --- Initialization: Fastify, dotenv, uuid ---
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const fastify = require('fastify')({
   // NOTE: Safety: enforce a global payload ceiling to deter oversized bodies.
   bodyLimit: 10 * 1024 * 1024, // 10MB
@@ -26,16 +26,62 @@ fastify.get('/health', async (_request, _reply) => {
   };
 });
 
+fastify.get('/debug/storage-mode', async (_request, _reply) => {
+  return {
+    storageMode,
+    hasDatabaseUrl: !!process.env.DATABASE_URL,
+  };
+});
+
 const RATE_LIMITS = {
   global: { max: 100, timeWindow: 5 * 60 * 1000 }, // 5 minutes
+  admin: { max: 60, timeWindow: 60 * 1000 }, // 1 minute
   movementCreate: { max: 5, timeWindow: 60 * 60 * 1000 }, // 1 hour
+  conversationCreate: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
   messageSend: { max: 60, timeWindow: 60 * 1000 }, // 1 minute
   reportCreate: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
   petitionSign: { max: 30, timeWindow: 60 * 60 * 1000 }, // 1 hour
   upload: { max: 20, timeWindow: 60 * 60 * 1000 }, // 1 hour
   evidenceSubmit: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
   commentCreate: { max: 30, timeWindow: 60 * 60 * 1000 }, // 1 hour
+  search: { max: 60, timeWindow: 60 * 1000 }, // 1 minute
 };
+
+// NOTE: Safety: enforce max size / length to prevent abuse & excessive resource use.
+const MAX_TEXT_LENGTHS = {
+  movementTitle: 120,
+  movementSummary: 1000,
+  movementDescription: 4000,
+  movementDescriptionHtml: 8000,
+  movementClaim: 1200,
+  movementClaimEvidenceUrl: 800,
+  movementClaimEvidenceFilename: 260,
+  movementClaimEvidenceMime: 120,
+  movementMediaUrl: 800,
+  movementTag: 48,
+  locationLabel: 120,
+  challengeTitle: 140,
+  challengeDescription: 1200,
+  challengeCategory: 60,
+  reportContentType: 80,
+  reportContentId: 120,
+  reportCategory: 80,
+  reportTitle: 140,
+  reportDetails: 2000,
+  reportBugDetails: 1000,
+  reportEvidenceUrl: 800,
+  profileDisplayName: 120,
+  profileUsername: 32,
+  profileBio: 1000,
+  profilePhotoUrl: 800,
+  profileBannerUrl: 800,
+  profileSkill: 80,
+  messageCiphertext: 100000,
+};
+
+const E2EE_BODY_PREFIX = 'pp_e2ee_v1:';
+const MAX_GROUP_PARTICIPANTS = 10;
+const GROUP_POST_MODES = new Set(['owner_only', 'admins', 'selected', 'all']);
 
 function rateLimitKeyGenerator(request) {
   const authHeader = request.headers?.authorization ? String(request.headers.authorization) : '';
@@ -44,11 +90,37 @@ function rateLimitKeyGenerator(request) {
   return `${ip}:${token || 'anon'}`;
 }
 
+const adminRateLimitCache = new Map();
+
+async function isAdminRateLimitAllowList(request) {
+  const authHeader = request.headers?.authorization ? String(request.headers.authorization) : '';
+  const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+  if (!token) return false;
+
+  const cached = adminRateLimitCache.get(token);
+  if (cached && cached.expiresAt > Date.now()) return cached.isAdmin;
+
+  try {
+    if (!supabase?.auth?.getUser) return false;
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data?.user) {
+      adminRateLimitCache.set(token, { isAdmin: false, expiresAt: Date.now() + 60 * 1000 });
+      return false;
+    }
+    const isAdmin = getStaffRoleForUser(data.user) === 'admin';
+    adminRateLimitCache.set(token, { isAdmin, expiresAt: Date.now() + 5 * 60 * 1000 });
+    return isAdmin;
+  } catch {
+    return false;
+  }
+}
+
 fastify.register(require('@fastify/rate-limit'), {
   global: true,
   max: RATE_LIMITS.global.max,
   timeWindow: RATE_LIMITS.global.timeWindow,
   keyGenerator: rateLimitKeyGenerator,
+  allowList: isAdminRateLimitAllowList,
   errorResponseBuilder: () => ({ error: 'Too many requests, please slow down.' }),
 });
 
@@ -59,8 +131,10 @@ const ALLOWED_UPLOAD_MIME_TYPES = [
   'image/jpeg',
   'image/jpg',
   'image/gif',
+  'image/webp',
   'application/pdf',
 ];
+const IMAGE_ONLY_UPLOAD_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
 
 // --- Core requires ---
 const { Pool } = require('pg');
@@ -79,9 +153,10 @@ const HOST = process.env.HOST || '0.0.0.0';
 // All await statements must be inside async functions or route handlers.
 
 // Create or update a feature flag
-fastify.post('/admin/feature-flags', async (request, reply) => {
+fastify.post('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
   const { name, enabled, rollout_percentage, description } = request.body || {};
   if (!name) return reply.code(400).send({ error: 'Flag name required' });
   await ensureFeatureFlagsTable();
@@ -99,20 +174,135 @@ fastify.post('/admin/feature-flags', async (request, reply) => {
 });
 
 // Delete a feature flag
-fastify.delete('/admin/feature-flags/:id', async (request, reply) => {
+fastify.delete('/admin/feature-flags/:id', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
   const id = String(request.params.id);
   await ensureFeatureFlagsTable();
   await pool.query('DELETE FROM feature_flags WHERE id = $1', [id]);
   return reply.send({ ok: true });
 });
 
+// List all feature flags (admin-only)
+fastify.get('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const authedUser = await requireAdminUser(request, reply);
+  if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  await ensureFeatureFlagsTable();
+  const res = await pool.query('SELECT * FROM feature_flags ORDER BY updated_at DESC');
+  return reply.send({ flags: res.rows });
+});
+
 // Fetch all feature flags (public, for frontend)
 fastify.get('/feature-flags', async (_request, reply) => {
+  if (!hasDatabaseUrl) return reply.send({ flags: [] });
   await ensureFeatureFlagsTable();
   const res = await pool.query('SELECT * FROM feature_flags');
   return reply.send({ flags: res.rows });
+});
+
+// --- Admin Daily Challenges ---
+fastify.get('/admin/challenges', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const authedUser = await requireAdminUser(request, reply);
+  if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  await ensureChallengesTable();
+  const res = await pool.query('SELECT * FROM challenges ORDER BY updated_at DESC');
+  return reply.send({ challenges: res.rows || [] });
+});
+
+fastify.post('/admin/challenges', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const authedUser = await requireAdminUser(request, reply);
+  if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+
+  const schema = z.object({
+    id: z.string().optional(),
+    title: z.string().min(1).max(MAX_TEXT_LENGTHS.challengeTitle),
+    description: z.string().max(MAX_TEXT_LENGTHS.challengeDescription).optional().nullable(),
+    category: z.string().min(1).max(MAX_TEXT_LENGTHS.challengeCategory),
+    start_date: z.string().optional().nullable(),
+    end_date: z.string().optional().nullable(),
+    status: z.enum(['active', 'archived']).optional(),
+  });
+
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid challenge payload' });
+
+  const category = String(parsed.data.category).trim().toLowerCase();
+  if (!ALLOWED_CHALLENGE_CATEGORIES.has(category)) {
+    return reply.code(400).send({ error: 'Invalid challenge category' });
+  }
+
+  const normalizeDate = (value) => {
+    const s = value == null ? '' : String(value).trim();
+    if (!s) return null;
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+  };
+
+  const startDate = normalizeDate(parsed.data.start_date);
+  const endDate = normalizeDate(parsed.data.end_date);
+  if (startDate && endDate && endDate < startDate) {
+    return reply.code(400).send({ error: 'end_date must be after start_date' });
+  }
+
+  await ensureChallengesTable();
+
+  const id = parsed.data.id ? String(parsed.data.id) : randomUUID();
+  const now = nowIso();
+  const title = cleanText(parsed.data.title, MAX_TEXT_LENGTHS.challengeTitle);
+  const description = parsed.data.description
+    ? cleanText(parsed.data.description, MAX_TEXT_LENGTHS.challengeDescription)
+    : null;
+  const status = parsed.data.status || 'active';
+
+  const res = await pool.query(
+    `INSERT INTO challenges (id, title, description, category, start_date, end_date, status, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+     ON CONFLICT (id) DO UPDATE
+       SET title = $2,
+           description = $3,
+           category = $4,
+           start_date = $5,
+           end_date = $6,
+           status = $7,
+           updated_at = $8
+     RETURNING *`,
+    [id, title, description, category, startDate, endDate, status, now]
+  );
+
+  return reply.send({ challenge: res.rows?.[0] || null });
+});
+
+fastify.delete('/admin/challenges/:id', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const authedUser = await requireAdminUser(request, reply);
+  if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  const id = String(request.params?.id || '').trim();
+  if (!id) return reply.code(400).send({ error: 'Challenge id is required' });
+  await ensureChallengesTable();
+  await pool.query(
+    'UPDATE challenges SET status = $2, updated_at = NOW() WHERE id = $1',
+    [id, 'archived']
+  );
+  return reply.send({ ok: true });
+});
+
+// Public challenges feed (non-admin)
+fastify.get('/challenges', async (_request, reply) => {
+  if (!hasDatabaseUrl) return reply.send({ challenges: [] });
+  await ensureChallengesTable();
+  const today = nowIso().slice(0, 10);
+  const res = await pool.query(
+    `SELECT * FROM challenges
+     WHERE status != 'archived'
+       AND (start_date IS NULL OR start_date <= $1)
+       AND (end_date IS NULL OR end_date >= $1)
+     ORDER BY start_date NULLS LAST, created_at DESC`,
+    [today]
+  );
+  return reply.send({ challenges: res.rows || [] });
 });
 // --- Feature Flags Table ---
 async function ensureFeatureFlagsTable() {
@@ -131,22 +321,43 @@ async function ensureFeatureFlagsTable() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_feature_flags_name ON feature_flags (name)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_feature_flags_updated_at ON feature_flags (updated_at DESC)');
 }
+
+async function ensureChallengesTable() {
+  if (!hasDatabaseUrl) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS challenges (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NULL,
+      category TEXT NOT NULL,
+      start_date DATE NULL,
+      end_date DATE NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges (status)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_challenges_dates ON challenges (start_date, end_date)');
+}
 // --- Research Mode Config API (admin-only) ---
 
 
 // List all research configs
-fastify.get('/admin/research-mode-configs', async (request, reply) => {
+fastify.get('/admin/research-mode-configs', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
   await ensureResearchModeConfigTable();
   const res = await pool.query('SELECT * FROM research_mode_configs ORDER BY updated_at DESC');
   return reply.send({ configs: res.rows });
 });
 
 // Create or update a research config
-fastify.post('/admin/research-mode-configs', async (request, reply) => {
+fastify.post('/admin/research-mode-configs', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
   const { scope, scope_id, enabled_features } = request.body || {};
   if (!['user','movement','global'].includes(scope)) return reply.code(400).send({ error: 'Invalid scope' });
   if ((scope === 'user' || scope === 'movement') && !scope_id) return reply.code(400).send({ error: 'scope_id required' });
@@ -165,9 +376,10 @@ fastify.post('/admin/research-mode-configs', async (request, reply) => {
 });
 
 // Delete a research config
-fastify.delete('/admin/research-mode-configs/:id', async (request, reply) => {
+fastify.delete('/admin/research-mode-configs/:id', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
+  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
   const id = String(request.params.id);
   await ensureResearchModeConfigTable();
   await pool.query('DELETE FROM research_mode_configs WHERE id = $1', [id]);
@@ -177,6 +389,7 @@ fastify.delete('/admin/research-mode-configs/:id', async (request, reply) => {
 // Fetch merged research flags for a user or movement (public, but only returns enabled features)
 fastify.get('/research-flags', async (request, reply) => {
   const { user_id, movement_id } = request.query || {};
+  if (!hasDatabaseUrl) return reply.send({ enabled: false, features: [] });
   await ensureResearchModeConfigTable();
   // Fetch global
   const configs = [];
@@ -208,10 +421,11 @@ async function ensureResearchModeConfigTable() {
     );
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS idx_research_mode_scope ON research_mode_configs (scope, scope_id)');
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_research_mode_scope_unique ON research_mode_configs (scope, scope_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_research_mode_updated_at ON research_mode_configs (updated_at DESC)');
 }
 // GET /admin/community-health (admin-only, aggregate stats, no private content)
-fastify.get('/admin/community-health', async (request, reply) => {
+fastify.get('/admin/community-health', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
   if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
@@ -255,7 +469,7 @@ fastify.get('/admin/community-health', async (request, reply) => {
           const res = await pool.query(sql, [since, until]);
           results[key] = res.rows?.[0]?.count ?? 0;
         }
-      } catch (e) {
+      } catch {
         results[key] = null;
       }
     }
@@ -335,7 +549,9 @@ fastify.get('/movements/:id/locks', async (request, reply) => {
   try {
     const ownerEmail = await getMovementOwnerEmail(movementId);
     isOwner = ownerEmail && ownerEmail === email;
-  } catch {}
+  } catch {
+    // Ignore lookup failures; fall back to staff-only access.
+  }
   if (!isOwner && staffRole !== 'admin') return reply.code(403).send({ error: 'Not allowed' });
   const locks = await getMovementLocks(movementId);
   return reply.send({ locks });
@@ -353,11 +569,20 @@ fastify.post('/movements/:id/locks', async (request, reply) => {
   try {
     const ownerEmail = await getMovementOwnerEmail(movementId);
     isOwner = ownerEmail && ownerEmail === email;
-  } catch {}
+  } catch {
+    // Ignore lookup failures; fall back to staff-only access.
+  }
   if (!isOwner && staffRole !== 'admin') return reply.code(403).send({ error: 'Not allowed' });
   const { field, locked } = request.body || {};
   if (!['title','description','claims'].includes(field)) return reply.code(400).send({ error: 'Invalid field' });
   const locks = await setMovementLock(movementId, field, !!locked);
+  await logCollaboratorAction({
+    movement_id: movementId,
+    actor_user_id: authedUser.id || authedUser.email,
+    action_type: 'change_settings',
+    target_id: field,
+    metadata: { locked: !!locked }
+  });
   return reply.send({ locks });
 });
 // Utility: Get user trust score (returns 0-100, fallback 50)
@@ -368,7 +593,9 @@ async function getUserTrustScore(email) {
     const res = await pool.query('SELECT trust_score FROM profiles WHERE email = $1 LIMIT 1', [email]);
     const score = res.rows?.[0]?.trust_score;
     if (typeof score === 'number') return score;
-  } catch {}
+  } catch {
+    // Ignore trust lookup errors; use default score.
+  }
   return 50;
 }
 
@@ -386,7 +613,9 @@ fastify.get('/movements/:id/collaborator-actions', async (request, reply) => {
   try {
     const ownerEmail = await getMovementOwnerEmail(movementId);
     isOwner = ownerEmail && ownerEmail === email;
-  } catch {}
+  } catch {
+    // Ignore lookup failures; fall back to staff-only access.
+  }
   if (!isOwner && staffRole !== 'admin') return reply.code(403).send({ error: 'Not allowed' });
   let logs = [];
   if (!hasDatabaseUrl) {
@@ -442,7 +671,7 @@ async function logCollaboratorAction({ movement_id, actor_user_id, action_type, 
   return record;
 }
 // GET /admin/migrations (admin-only)
-fastify.get('/admin/migrations', async (request, reply) => {
+fastify.get('/admin/migrations', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
 
@@ -480,7 +709,7 @@ async function exportTableToJson(table) {
 }
 
 // POST /admin/backup (admin-only)
-fastify.post('/admin/backup', async (request, reply) => {
+fastify.post('/admin/backup', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
 
@@ -497,19 +726,30 @@ fastify.post('/admin/backup', async (request, reply) => {
       'movement_petitions',
       'movement_resources',
       'users',
-      'profiles'
+      'profiles',
+      'user_profiles'
     ];
     const data = {};
+    const errors = {};
     for (const t of tables) {
-      data[t] = await exportTableToJson(t);
+      try {
+        data[t] = await exportTableToJson(t);
+      } catch (e) {
+        errors[t] = String(e?.message || 'Export failed');
+        data[t] = [];
+      }
     }
     const fileName = `backup_${started_at.replace(/[:.]/g, '-')}.json`;
     const filePath = path.join(backupsDir, fileName);
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
     finished_at = nowIso();
-    status = 'success';
-    message = `Backup completed: ${fileName}`;
-    details = { tables, counts: Object.fromEntries(Object.entries(data).map(([k,v])=>[k,v.length])) };
+    status = Object.keys(errors).length ? 'failed' : 'success';
+    message = Object.keys(errors).length ? `Backup completed with errors: ${fileName}` : `Backup completed: ${fileName}`;
+    details = {
+      tables,
+      counts: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v.length])),
+      errors: Object.keys(errors).length ? errors : undefined
+    };
     backupFile = fileName;
   } catch (e) {
     finished_at = nowIso();
@@ -531,6 +771,64 @@ fastify.post('/admin/backup', async (request, reply) => {
   } else {
     return reply.code(500).send({ error: message });
   }
+});
+// Admin-only purge for movement data (use with extreme caution).
+fastify.post('/admin/purge/movements', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const authedUser = await requireAdminUser(request, reply);
+  if (!authedUser) return;
+
+  const confirm = String(request.body?.confirm || request.query?.confirm || '').trim().toLowerCase();
+  if (confirm !== 'true') {
+    return reply.code(400).send({ error: 'Confirmation required. Pass confirm=true to purge movement data.' });
+  }
+
+  try {
+    if (hasDatabaseUrl) {
+      await pool.query('DELETE FROM movement_votes');
+      await pool.query('DELETE FROM movement_comments');
+      await pool.query('DELETE FROM movement_comment_settings');
+      await pool.query('DELETE FROM movement_resources');
+      await pool.query('DELETE FROM movement_event_rsvps');
+      await pool.query('DELETE FROM movement_events');
+      await pool.query('DELETE FROM movement_petition_signatures');
+      await pool.query('DELETE FROM movement_petitions');
+      await pool.query('DELETE FROM movement_impact_updates');
+      await pool.query('DELETE FROM movement_tasks');
+      await pool.query('DELETE FROM movement_discussions');
+      await pool.query('DELETE FROM movement_evidence');
+      await pool.query('DELETE FROM collaborators');
+      await pool.query('DELETE FROM movement_follows');
+      await pool.query('DELETE FROM movement_locks');
+      await pool.query('DELETE FROM conversations WHERE movement_id IS NOT NULL');
+      await pool.query('DELETE FROM messages WHERE conversation_id NOT IN (SELECT id FROM conversations)');
+      await pool.query('DELETE FROM movements');
+    }
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to purge movement data');
+    return reply.code(500).send({ error: 'Failed to purge movement data' });
+  }
+
+  // Memory fallback cleanup
+  memoryMovements.length = 0;
+  memoryVotes.clear();
+  memoryMovementFollows.clear();
+  memoryCommentsByMovement.clear();
+  memoryCommentSettingsByMovement.clear();
+  memoryMovementResourcesByMovement.clear();
+  memoryMovementEventsByMovement.clear();
+  memoryMovementPetitionsByMovement.clear();
+  memoryMovementImpactUpdatesByMovement.clear();
+  memoryMovementEvidenceByMovement.clear();
+  memoryMovementTasksByMovement.clear();
+  memoryMovementDiscussionsByMovement.clear();
+  memoryEventRsvpsByEvent.clear();
+  memoryPetitionSignaturesByPetition.clear();
+  memoryCollaboratorsByMovement.clear();
+  if (memoryMovementLocks?.clear) memoryMovementLocks.clear();
+  memoryConversations.length = 0;
+  memoryMessagesByConversation.clear();
+
+  return reply.send({ ok: true, purged: true });
 });
 // ...existing code...
 
@@ -609,11 +907,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Comma-separated list of admin emails.
 // Example: ADMIN_EMAILS="admin@example.com,other@example.com"
+const DEFAULT_ADMIN_EMAILS = ['calebscott1892@gmail.com'];
 const ADMIN_EMAILS = new Set(
   String(process.env.ADMIN_EMAILS || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean)
+    .concat(DEFAULT_ADMIN_EMAILS.map((e) => String(e).trim().toLowerCase()))
 );
 
 // Comma-separated list of moderator emails.
@@ -625,12 +925,207 @@ const MODERATOR_EMAILS = new Set(
     .filter(Boolean)
 );
 
+// Report email notifications (optional; best-effort only).
+const REPORT_EMAIL_FROM = String(process.env.REPORT_EMAIL_FROM || process.env.EMAIL_FROM || '').trim();
+const REPORT_EMAIL_REPLY_TO = String(process.env.REPORT_EMAIL_REPLY_TO || process.env.EMAIL_REPLY_TO || '').trim();
+const RESEND_API_KEY = String(process.env.RESEND_API_KEY || '').trim();
+const SMTP_HOST = String(process.env.SMTP_HOST || '').trim();
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = String(process.env.SMTP_USER || '').trim();
+const SMTP_PASS = String(process.env.SMTP_PASS || '').trim();
+const SMTP_SECURE = String(process.env.SMTP_SECURE || '').trim().toLowerCase() === 'true';
+let smtpTransport = null;
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function canSendReportEmail() {
+  if (!REPORT_EMAIL_FROM) return false;
+  if (RESEND_API_KEY) return true;
+  return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
+}
+
+async function getSmtpTransport() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !REPORT_EMAIL_FROM) return null;
+  if (smtpTransport) return smtpTransport;
+  try {
+    const nodemailer = require('nodemailer');
+    smtpTransport = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: Number.isFinite(SMTP_PORT) ? SMTP_PORT : 587,
+      secure: SMTP_SECURE,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+    return smtpTransport;
+  } catch (e) {
+    fastify.log.error({ err: e }, 'SMTP transport unavailable');
+    return null;
+  }
+}
+
+async function sendReportEmail({ to, subject, text, html }) {
+  const recipient = normalizeEmail(to);
+  if (!recipient || !canSendReportEmail()) return;
+
+  if (RESEND_API_KEY) {
+    const payload = {
+      from: REPORT_EMAIL_FROM,
+      to: [recipient],
+      subject,
+      text,
+      html,
+      reply_to: REPORT_EMAIL_REPLY_TO || undefined,
+    };
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        fastify.log.warn({ status: res.status, body }, 'Report email send failed (Resend)');
+      }
+      return;
+    } catch (e) {
+      fastify.log.error({ err: e }, 'Report email send failed (Resend)');
+      return;
+    }
+  }
+
+  const transport = await getSmtpTransport();
+  if (!transport) return;
+  try {
+    await transport.sendMail({
+      from: REPORT_EMAIL_FROM,
+      to: recipient,
+      subject,
+      text,
+      html,
+      replyTo: REPORT_EMAIL_REPLY_TO || undefined,
+    });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Report email send failed (SMTP)');
+  }
+}
+
+function buildReportReceiptEmail(report) {
+  const reportId = report?.id ? String(report.id) : 'unknown';
+  const reportType = String(report?.report_type || 'abuse').toLowerCase();
+  const typeLabel = reportType === 'bug' ? 'site issue' : 'behaviour report';
+  const category = String(report?.report_category || '').trim();
+  const title = String(report?.report_title || '').trim();
+  const summary = title || category || 'report';
+  const safeSummary = escapeHtml(summary.slice(0, 120));
+  const subject = `We received your ${typeLabel}`;
+  const text = `Thanks for your report. We’re reviewing it now.\nReport ID: ${reportId}\nSummary: ${summary}\n\nIf you have more details, you can reply to this email.`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <p>Thanks for your report. We’re reviewing it now.</p>
+      <p><strong>Report ID:</strong> ${escapeHtml(reportId)}</p>
+      <p><strong>Summary:</strong> ${safeSummary}</p>
+      <p>If you have more details, you can reply to this email.</p>
+    </div>
+  `;
+  return { subject, text, html };
+}
+
+function buildReportResolvedEmail(report) {
+  const reportId = report?.id ? String(report.id) : 'unknown';
+  const reportType = String(report?.report_type || 'abuse').toLowerCase();
+  const typeLabel = reportType === 'bug' ? 'site issue' : 'behaviour report';
+  const subject = `Your ${typeLabel} has been marked resolved`;
+  const text = `Thanks again for your report. It has been marked as resolved.\nReport ID: ${reportId}\n\nWe appreciate your help in keeping People Power safe and functional.`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <p>Thanks again for your report. It has been marked as resolved.</p>
+      <p><strong>Report ID:</strong> ${escapeHtml(reportId)}</p>
+      <p>We appreciate your help in keeping People Power safe and functional.</p>
+    </div>
+  `;
+  return { subject, text, html };
+}
+
+function buildMovementDeletedEmail({ movementTitle, movementId, deletedByEmail }) {
+  const safeTitle = escapeHtml(String(movementTitle || 'a movement').slice(0, 140));
+  const safeId = escapeHtml(String(movementId || '').slice(0, 80));
+  const safeBy = escapeHtml(String(deletedByEmail || '').slice(0, 160));
+  const subject = `Movement removed: ${safeTitle}`;
+  const text = `A movement you were verified in has been removed by its organizer.\n` +
+    `Movement: ${movementTitle || 'Unknown'}\n` +
+    `Movement ID: ${safeId}\n` +
+    (safeBy ? `Removed by: ${safeBy}\n` : '') +
+    `\nIf you believe this was a mistake, you can reach out to the organizer.`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <p>A movement you were verified in has been removed by its organizer.</p>
+      <p><strong>Movement:</strong> ${safeTitle}</p>
+      ${safeId ? `<p><strong>Movement ID:</strong> ${safeId}</p>` : ''}
+      ${safeBy ? `<p><strong>Removed by:</strong> ${safeBy}</p>` : ''}
+      <p>If you believe this was a mistake, you can reach out to the organizer.</p>
+    </div>
+  `;
+  return { subject, text, html };
+}
+
+async function notifyVerifiedParticipantsOnDeletion({ movementId, movementTitle, deletedByEmail }) {
+  const recipients = await listVerifiedParticipantEmails(movementId);
+  const filtered = recipients.filter((email) => normalizeEmail(email) !== normalizeEmail(deletedByEmail));
+  if (!filtered.length) return { sent: 0, mode: 'none' };
+  if (!canSendReportEmail()) {
+    fastify.log.info(
+      { event: 'movement_deleted_notice_skipped', movement_id: movementId, recipients: filtered.length },
+      'Email notifications disabled'
+    );
+    return { sent: 0, mode: 'disabled' };
+  }
+  const message = buildMovementDeletedEmail({ movementTitle, movementId, deletedByEmail });
+  const results = await Promise.allSettled(
+    filtered.map((email) => sendReportEmail({ to: email, ...message }))
+  );
+  const sent = results.filter((r) => r.status === 'fulfilled').length;
+  return { sent, mode: 'email' };
+}
+
 function getStaffRoleForEmail(email) {
   const normalized = String(email || '').trim().toLowerCase();
   if (!normalized) return null;
   if (ADMIN_EMAILS.has(normalized)) return 'admin';
   if (MODERATOR_EMAILS.has(normalized)) return 'moderator';
   return null;
+}
+
+function normalizeStaffRole(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'admin' || raw === 'moderator') return raw;
+  return null;
+}
+
+function getStaffRoleForUser(user) {
+  const claimed =
+    normalizeStaffRole(user?.app_metadata?.role) ||
+    normalizeStaffRole(user?.user_metadata?.role) ||
+    normalizeStaffRole(user?.role);
+  if (claimed) return claimed;
+  return getStaffRoleForEmail(user?.email);
+}
+
+function isAdminUser(user) {
+  return getStaffRoleForUser(user) === 'admin';
+}
+
+function isStaffUser(user) {
+  const role = getStaffRoleForUser(user);
+  return role === 'admin' || role === 'moderator';
 }
 
 // NOTE: Debug routes are dev-only; keep disabled unless explicitly enabled.
@@ -660,8 +1155,41 @@ const ALLOWED_TAGS = new Set([
   'other',
 ]);
 
-const hasDatabaseUrl = !!process.env.DATABASE_URL;
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const ALLOWED_CHALLENGE_CATEGORIES = new Set([
+  'kindness',
+  'civic_literacy',
+  'community_care',
+  'community',
+  'environment',
+  'wellbeing',
+]);
+
+const DATABASE_URL = process.env.DATABASE_URL;
+let storageMode = 'memory';
+let hasDatabaseUrl = !!DATABASE_URL;
+const pool = new Pool({ connectionString: DATABASE_URL });
+
+async function checkDatabaseConnection() {
+  if (!hasDatabaseUrl) {
+    storageMode = 'memory';
+    console.info('[storage] mode=memory');
+    return;
+  }
+  try {
+    await pool.query('SELECT 1');
+    storageMode = 'postgres';
+    hasDatabaseUrl = true;
+    console.info('[storage] Postgres connection ok');
+    console.info('[storage] mode=postgres');
+  } catch (err) {
+    const message = err?.message ? String(err.message) : 'unknown error';
+    const code = err?.code ? String(err.code) : 'unknown';
+    console.error(`[storage] Postgres connection failed, falling back to memory: ${code} ${message}`);
+    storageMode = 'memory';
+    hasDatabaseUrl = false;
+    console.info('[storage] mode=memory');
+  }
+}
 
 const uploadsDir = path.join(__dirname, 'uploads');
 try {
@@ -702,6 +1230,14 @@ const memoryPublicKeys = new Map();
 // Map<followerEmail, Set<followingEmail>>
 const memoryUserFollows = new Map();
 
+// User profiles (memory fallback)
+// Map<email, profileRecord>
+const memoryUserProfiles = new Map();
+
+// User blocks (memory fallback)
+// Map<blockerEmail, Set<blockedEmail>>
+const memoryUserBlocks = new Map();
+
 // Movement follows (memory fallback)
 // Map<movementId, Set<followerEmail>>
 const memoryMovementFollows = new Map();
@@ -735,6 +1271,11 @@ const memoryPetitionSignaturesByPetition = new Map();
 // Movement collaborators/invites (memory fallback)
 // Map<movementId, Array<{id,movement_id,user_email,role,status,invited_by,created_date,accepted_date}>>
 const memoryCollaboratorsByMovement = new Map();
+
+// Reports (memory fallback)
+// Array<{id, reporter_email, reported_content_type, reported_content_id, report_category, report_details, report_type, report_title, evidence_urls, status, created_at, updated_at}>
+const memoryReports = [];
+let memoryReportSeq = 1;
 
 
 // Migration/Backup logs (memory fallback)
@@ -828,13 +1369,16 @@ function normalizeTags(tags) {
 }
 
 function cleanText(value, maxLen = 4000) {
-  const s = String(value ?? '').trim();
-  if (!s) return '';
-  const trimmed = s.slice(0, Math.max(0, maxLen));
+  const raw = String(value ?? '');
+  if (!raw.trim()) return '';
+  const trimmed = raw.slice(0, Math.max(0, maxLen));
+  // Preserve E2EE payloads verbatim so ciphertext is not corrupted.
+  if (trimmed.startsWith(E2EE_BODY_PREFIX)) return trimmed;
+  const cleaned = trimmed.trim();
   try {
-    return profanityFilter.clean(trimmed);
+    return profanityFilter.clean(cleaned);
   } catch {
-    return trimmed;
+    return cleaned;
   }
 }
 
@@ -862,6 +1406,8 @@ async function ensureReportsTable() {
       reported_content_id TEXT NOT NULL,
       report_category TEXT NOT NULL,
       report_details TEXT NULL,
+      report_type TEXT NULL,
+      report_title TEXT NULL,
       evidence_urls TEXT[] NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       moderator_email TEXT NULL,
@@ -873,6 +1419,8 @@ async function ensureReportsTable() {
   `);
 
   await pool.query('ALTER TABLE reports ADD COLUMN IF NOT EXISTS evidence_urls TEXT[] NULL');
+  await pool.query('ALTER TABLE reports ADD COLUMN IF NOT EXISTS report_type TEXT NULL');
+  await pool.query('ALTER TABLE reports ADD COLUMN IF NOT EXISTS report_title TEXT NULL');
 
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_reports_status_created_at ON reports (status, created_at DESC)'
@@ -1065,6 +1613,15 @@ async function ensureMessagesTables() {
       requester_email TEXT NULL,
       request_status TEXT NOT NULL DEFAULT 'accepted',
       blocked_by_email TEXT NULL,
+      is_group BOOLEAN NOT NULL DEFAULT FALSE,
+      group_name TEXT NULL,
+      group_avatar_url TEXT NULL,
+      group_type TEXT NULL,
+      movement_id TEXT NULL,
+      created_by_email TEXT NULL,
+      group_admin_emails TEXT[] NOT NULL DEFAULT '{}',
+      group_post_mode TEXT NOT NULL DEFAULT 'owner_only',
+      group_posters TEXT[] NOT NULL DEFAULT '{}',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -1084,12 +1641,22 @@ async function ensureMessagesTables() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at ON messages (conversation_id, created_at DESC)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_conversations_participants_gin ON conversations USING GIN (participant_emails)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conversations_movement_id ON conversations (movement_id)');
 
   // Ensure new request-related columns exist even if the table predates them.
   await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_request BOOLEAN NOT NULL DEFAULT FALSE");
   await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS requester_email TEXT NULL");
   await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS request_status TEXT NOT NULL DEFAULT 'accepted'");
   await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS blocked_by_email TEXT NULL");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group BOOLEAN NOT NULL DEFAULT FALSE");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT NULL");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_avatar_url TEXT NULL");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_type TEXT NULL");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS movement_id TEXT NULL");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS created_by_email TEXT NULL");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_admin_emails TEXT[] NOT NULL DEFAULT '{}'");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_post_mode TEXT NOT NULL DEFAULT 'owner_only'");
+  await pool.query("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_posters TEXT[] NOT NULL DEFAULT '{}'");
 
   // Ensure new message-related columns exist even if the table predates them.
   await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reactions JSONB NOT NULL DEFAULT '{}'::jsonb");
@@ -1107,6 +1674,94 @@ async function ensureUserFollowsTable() {
   `);
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_follows_follower ON user_follows (follower_email)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_follows_following ON user_follows (following_email)');
+}
+
+async function ensureUserProfilesTable() {
+  if (!hasDatabaseUrl) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      id TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL UNIQUE,
+      display_name TEXT NULL,
+      username TEXT NULL,
+      bio TEXT NULL,
+      profile_photo_url TEXT NULL,
+      banner_url TEXT NULL,
+      location JSONB NULL,
+      catchment_radius_km INT NULL,
+      skills TEXT[] NULL,
+      ai_features_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles (user_email)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_username ON user_profiles (username)');
+  try {
+    await pool.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_username_lower ON user_profiles (LOWER(username)) WHERE username IS NOT NULL'
+    );
+  } catch (e) {
+    fastify.log.warn({ err: e }, 'Failed to ensure unique username index');
+  }
+}
+
+async function ensureUserBlocksTable() {
+  if (!hasDatabaseUrl) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_email TEXT NOT NULL,
+      blocked_email TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (blocker_email, blocked_email)
+    );
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_blocks_blocker ON user_blocks (blocker_email)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks (blocked_email)');
+}
+
+async function getUserBlockSets(email) {
+  const me = normalizeEmail(email);
+  const empty = { blocked: new Set(), blockedBy: new Set() };
+  if (!me) return empty;
+
+  if (!hasDatabaseUrl) {
+    const blocked = memoryUserBlocks.get(me) || new Set();
+    const blockedBy = new Set();
+    for (const [blocker, list] of memoryUserBlocks.entries()) {
+      if (list && list.has(me)) blockedBy.add(blocker);
+    }
+    return { blocked: new Set(blocked), blockedBy };
+  }
+
+  await ensureUserBlocksTable();
+  const blockedRes = await pool.query('SELECT blocked_email FROM user_blocks WHERE blocker_email = $1', [me]);
+  const blockedByRes = await pool.query('SELECT blocker_email FROM user_blocks WHERE blocked_email = $1', [me]);
+
+  const blocked = new Set(
+    (Array.isArray(blockedRes.rows) ? blockedRes.rows : [])
+      .map((r) => normalizeEmail(r?.blocked_email))
+      .filter(Boolean)
+  );
+  const blockedBy = new Set(
+    (Array.isArray(blockedByRes.rows) ? blockedByRes.rows : [])
+      .map((r) => normalizeEmail(r?.blocker_email))
+      .filter(Boolean)
+  );
+
+  return { blocked, blockedBy };
+}
+
+function isBlockedForViewer(targetEmail, viewerBlocks) {
+  const target = normalizeEmail(targetEmail);
+  if (!target || !viewerBlocks) return false;
+  return viewerBlocks.blocked.has(target) || viewerBlocks.blockedBy.has(target);
+}
+
+function isBlockedByViewer(targetEmail, viewerBlocks) {
+  const target = normalizeEmail(targetEmail);
+  if (!target || !viewerBlocks) return false;
+  return viewerBlocks.blocked.has(target);
 }
 
 async function doesUserFollow(followerEmail, followingEmail) {
@@ -1570,6 +2225,55 @@ function memoryUpdateEvidenceById(evidenceId, patch) {
   return null;
 }
 
+function memoryCountApprovedEvidenceParticipants(movementId) {
+  const id = String(movementId || '').trim();
+  if (!id) return 0;
+  const list = memoryListExtras(memoryMovementEvidenceByMovement, id);
+  const unique = new Set();
+  for (const ev of list) {
+    if (String(ev?.status || '').toLowerCase() !== 'approved') continue;
+    const email = normalizeEmail(ev?.submitter_email);
+    if (email) unique.add(email);
+  }
+  return unique.size;
+}
+
+function updateMemoryMovementVerifiedParticipants(movementId) {
+  const id = String(movementId || '').trim();
+  if (!id) return 0;
+  const count = memoryCountApprovedEvidenceParticipants(id);
+  const idx = memoryMovements.findIndex((m) => String(m?.id) === id);
+  if (idx !== -1) {
+    memoryMovements[idx] = { ...memoryMovements[idx], verified_participants: count };
+  }
+  return count;
+}
+
+async function updateMovementVerifiedParticipants(movementId) {
+  const id = String(movementId || '').trim();
+  if (!id) return 0;
+  if (!hasDatabaseUrl) {
+    return updateMemoryMovementVerifiedParticipants(id);
+  }
+
+  try {
+    await ensureMovementEvidenceTable();
+    await ensureMovementExtrasColumns();
+    const res = await pool.query(
+      `SELECT COUNT(DISTINCT submitter_email)::int AS count
+       FROM movement_evidence
+       WHERE movement_id = $1 AND status = 'approved'`,
+      [id]
+    );
+    const count = res.rows?.[0]?.count ?? 0;
+    await pool.query('UPDATE movements SET verified_participants = $1 WHERE id = $2', [count, id]);
+    return count;
+  } catch (e) {
+    fastify.log.warn({ err: e, movement_id: id }, 'Failed to update verified participant count');
+    return 0;
+  }
+}
+
 function memoryDeleteResourceById(resourceId) {
   const id = String(resourceId || '').trim();
   if (!id) return false;
@@ -1705,6 +2409,51 @@ async function getMovementOwnerEmail(movementId) {
   }
 }
 
+async function getMovementTitle(movementId) {
+  const id = String(movementId || '').trim();
+  if (!id) return null;
+
+  const fromMemory = memoryMovements.find((m) => String(m?.id) === id) || null;
+  if (fromMemory?.title) return String(fromMemory.title);
+
+  if (!hasDatabaseUrl) return null;
+  try {
+    const res = await pool.query('SELECT title FROM movements WHERE id = $1 LIMIT 1', [id]);
+    return res.rows?.[0]?.title ? String(res.rows[0].title) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function listVerifiedParticipantEmails(movementId) {
+  const id = String(movementId || '').trim();
+  if (!id) return [];
+
+  if (!hasDatabaseUrl) {
+    const list = memoryListExtras(memoryMovementEvidenceByMovement, id)
+      .filter((e) => String(e?.status || '') === 'approved')
+      .map((e) => normalizeEmail(e?.submitter_email))
+      .filter(Boolean);
+    return Array.from(new Set(list));
+  }
+
+  try {
+    await ensureMovementEvidenceTable();
+    const res = await pool.query(
+      `SELECT DISTINCT submitter_email
+       FROM movement_evidence
+       WHERE movement_id = $1 AND status = $2 AND submitter_email IS NOT NULL`,
+      [id, 'approved']
+    );
+    const list = (res.rows || [])
+      .map((r) => normalizeEmail(r?.submitter_email))
+      .filter(Boolean);
+    return Array.from(new Set(list));
+  } catch {
+    return [];
+  }
+}
+
 async function getMovementCollaboratorRole(movementId, userEmail) {
   const id = String(movementId || '').trim();
   const email = normalizeEmail(userEmail);
@@ -1733,6 +2482,16 @@ async function getMovementCollaboratorRole(movementId, userEmail) {
 function normalizeEmail(value) {
   const s = String(value ?? '').trim().toLowerCase();
   return s || null;
+}
+
+function normalizeUsername(value) {
+  const s = String(value ?? '').trim().toLowerCase();
+  return s || null;
+}
+
+function isValidUsername(value) {
+  if (!value) return false;
+  return /^[a-z0-9_]{3,32}$/.test(String(value));
 }
 
 function sanitizeProfileLocation(location) {
@@ -1782,6 +2541,80 @@ function sanitizeUserProfileRecord(record) {
   }
 
   return out;
+}
+
+async function getPublicProfilesByEmail(emails) {
+  const list = Array.from(
+    new Set(
+      (Array.isArray(emails) ? emails : [])
+        .map((e) => normalizeEmail(e))
+        .filter(Boolean)
+    )
+  );
+  const lookup = new Map();
+  if (!list.length) return lookup;
+
+  if (!hasDatabaseUrl) {
+    for (const email of list) {
+      const profile = memoryUserProfiles.get(email);
+      if (profile) {
+        lookup.set(email, {
+          display_name: profile?.display_name ?? null,
+          username: profile?.username ?? null,
+          profile_photo_url: profile?.profile_photo_url ?? null,
+        });
+      }
+    }
+    return lookup;
+  }
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query(
+      `SELECT user_email, display_name, username, profile_photo_url
+       FROM user_profiles
+       WHERE user_email = ANY($1)`,
+      [list]
+    );
+    for (const row of Array.isArray(res.rows) ? res.rows : []) {
+      const email = normalizeEmail(row?.user_email);
+      if (!email) continue;
+      lookup.set(email, {
+        display_name: row?.display_name ?? null,
+        username: row?.username ?? null,
+        profile_photo_url: row?.profile_photo_url ?? null,
+      });
+    }
+  } catch (e) {
+    fastify.log.warn({ err: e }, 'Failed to load public profiles for movement authors');
+  }
+
+  return lookup;
+}
+
+async function attachCreatorProfilesToMovements(movements) {
+  const list = Array.isArray(movements) ? movements : [];
+  const emails = list
+    .map((m) => m?.author_email || m?.creator_email || null)
+    .map((e) => normalizeEmail(e))
+    .filter(Boolean);
+  const lookup = await getPublicProfilesByEmail(emails);
+
+  return list.map((movement) => {
+    const email = normalizeEmail(movement?.author_email || movement?.creator_email || '');
+    const profile = email ? lookup.get(email) : null;
+    const displayName = profile?.display_name ?? null;
+    const username = profile?.username ?? null;
+    const photo = profile?.profile_photo_url ?? null;
+    return {
+      ...movement,
+      creator_display_name: displayName,
+      creator_username: username,
+      creator_profile_photo_url: photo,
+      author_display_name: displayName,
+      author_username: username,
+    };
+  });
 }
 
 function sanitizeAuthUser(user) {
@@ -1855,6 +2688,123 @@ function memoryEnsureConversationBetweenWithRequest(a, b, requestMeta) {
   return next;
 }
 
+function memoryFindGroupConversation(movementId, groupType) {
+  const id = String(movementId || '').trim();
+  const type = String(groupType || '').trim();
+  if (!id || !type) return null;
+  return (
+    memoryConversations.find(
+      (c) =>
+        c?.is_group &&
+        String(c?.movement_id || '') === id &&
+        String(c?.group_type || '') === type
+    ) || null
+  );
+}
+
+function memoryCreateGroupConversation({
+  participant_emails,
+  group_name,
+  group_type,
+  movement_id,
+  created_by_email,
+  group_avatar_url,
+  group_admin_emails,
+  group_post_mode,
+  group_posters,
+}) {
+  const list = Array.isArray(participant_emails)
+    ? participant_emails.map((e) => normalizeEmail(e)).filter(Boolean)
+    : [];
+  const unique = Array.from(new Set(list));
+  if (unique.length < 2) return null;
+
+  const owner = created_by_email ? normalizeEmail(created_by_email) : null;
+  const admins = normalizeEmailList(group_admin_emails);
+  if (owner && !admins.includes(owner)) admins.unshift(owner);
+
+  const created = {
+    id: randomUUID(),
+    participant_emails: unique,
+    is_request: false,
+    requester_email: null,
+    request_status: 'accepted',
+    blocked_by_email: null,
+    is_group: true,
+    group_name: group_name ? String(group_name) : null,
+    group_avatar_url: group_avatar_url ? String(group_avatar_url) : null,
+    group_type: group_type ? String(group_type) : null,
+    movement_id: movement_id ? String(movement_id) : null,
+    created_by_email: owner,
+    group_admin_emails: admins,
+    group_post_mode: GROUP_POST_MODES.has(String(group_post_mode || '')) ? String(group_post_mode) : 'owner_only',
+    group_posters: normalizeEmailList(group_posters),
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+  memoryConversations.unshift(created);
+  memoryMessagesByConversation.set(created.id, []);
+  return created;
+}
+
+function normalizeEmailList(list, { max = 50 } = {}) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const value of list) {
+    const email = normalizeEmail(value);
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    out.push(email);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function getGroupAdmins(convo) {
+  const admins = normalizeEmailList(convo?.group_admin_emails);
+  const owner = normalizeEmail(convo?.created_by_email);
+  if (owner && !admins.includes(owner)) admins.push(owner);
+  return admins;
+}
+
+function getGroupPostMode(convo) {
+  const mode = String(convo?.group_post_mode || '').trim();
+  return GROUP_POST_MODES.has(mode) ? mode : 'owner_only';
+}
+
+function canManageGroup(convo, email) {
+  const me = normalizeEmail(email);
+  if (!me || !convo?.is_group) return false;
+  return getGroupAdmins(convo).includes(me);
+}
+
+function canPostToGroup(convo, email) {
+  const me = normalizeEmail(email);
+  if (!me || !convo?.is_group) return false;
+  const mode = getGroupPostMode(convo);
+  const admins = getGroupAdmins(convo);
+  const owner = normalizeEmail(convo?.created_by_email);
+  if (mode === 'all') return true;
+  if (mode === 'admins') return admins.includes(me);
+  if (mode === 'owner_only') return owner ? owner === me : admins.includes(me);
+  const posters = normalizeEmailList(convo?.group_posters);
+  return admins.includes(me) || posters.includes(me);
+}
+
+function normalizeGroupAvatarUrl(value) {
+  const raw = safeString(value, { max: MAX_TEXT_LENGTHS.profilePhotoUrl });
+  if (!raw) return null;
+  if (raw.startsWith('/uploads/')) return raw;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
 function getOtherParticipantEmail(convo, myEmail) {
   const me = normalizeEmail(myEmail);
   const list = Array.isArray(convo?.participant_emails) ? convo.participant_emails : [];
@@ -1893,7 +2843,7 @@ function memoryListMessages(conversationId) {
 function memoryAppendMessage(conversationId, senderEmail, body) {
   const convo = getMemoryConversationById(conversationId);
   if (!convo) return null;
-  const cleanBody = cleanText(body);
+  const cleanBody = cleanText(body, MAX_TEXT_LENGTHS.messageCiphertext);
   if (!cleanBody) return null;
 
   const message = {
@@ -1910,6 +2860,17 @@ function memoryAppendMessage(conversationId, senderEmail, body) {
   memoryMessagesByConversation.set(String(conversationId), list);
   convo.updated_at = nowIso();
   return message;
+}
+
+function memoryFindMessageById(messageId) {
+  const id = String(messageId || '');
+  if (!id) return null;
+  for (const list of memoryMessagesByConversation.values()) {
+    if (!Array.isArray(list)) continue;
+    const found = list.find((m) => String(m?.id) === id);
+    if (found) return found;
+  }
+  return null;
 }
 
 function memoryToggleMessageReaction(messageId, actorEmail, emoji) {
@@ -2030,12 +2991,29 @@ async function requireVerifiedUser(request, reply) {
   return user;
 }
 
+async function getOptionalAuthedEmail(request) {
+  const authHeader = request.headers?.authorization ? String(request.headers.authorization) : '';
+  const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : null;
+  if (!token) return null;
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data?.user?.email) return null;
+    return normalizeEmail(data.user.email);
+  } catch {
+    return null;
+  }
+}
+
 async function requireStaffUser(request, reply) {
   const user = await requireVerifiedUser(request, reply);
   if (!user) return null;
 
-  const role = getStaffRoleForEmail(user.email);
+  const role = getStaffRoleForUser(user);
   if (!role) {
+    fastify.log.info(
+      { event: 'staff_access_denied', user_email: String(user?.email || ''), path: safePathFromRequest(request) },
+      'Staff access denied'
+    );
     reply.code(403).send({ error: 'Staff access required' });
     return null;
   }
@@ -2047,8 +3025,17 @@ async function requireAdminUser(request, reply) {
   const user = await requireStaffUser(request, reply);
   if (!user) return null;
 
-  const role = getStaffRoleForEmail(user.email);
+  const role = getStaffRoleForUser(user);
   if (role !== 'admin') {
+    fastify.log.info(
+      {
+        event: 'admin_access_denied',
+        user_email: String(user?.email || ''),
+        role: role || 'user',
+        path: safePathFromRequest(request),
+      },
+      'Admin access denied'
+    );
     reply.code(403).send({ error: 'Admin access required' });
     return null;
   }
@@ -2152,15 +3139,27 @@ function buildInsertForMovements(columns, payload) {
 }
 
 // ✅ CORS: explicitly allow your frontend origin
+const explicitCorsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+
 fastify.register(require('@fastify/cors'), {
   origin: (origin, cb) => {
     // allow curl / server-to-server (no origin)
     if (!origin) return cb(null, true);
     try {
       const url = new URL(origin);
-      const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-      const isHttp = url.protocol === 'http:';
-      if (isLocalhost && isHttp) return cb(null, true);
+      const host = url.hostname;
+      const isLocalhost = host === 'localhost' || host === '127.0.0.1';
+      const isAllowedHost =
+        isLocalhost ||
+        host === 'peoplepower.app' ||
+        host === 'www.peoplepower.app' ||
+        host.endsWith('.pages.dev') ||
+        explicitCorsOrigins.includes(origin) ||
+        explicitCorsOrigins.includes(host);
+      if (isAllowedHost) return cb(null, true);
     } catch {
       // ignore
     }
@@ -2186,6 +3185,20 @@ fastify.register(require('@fastify/static'), {
   decorateReply: false,
 });
 
+function readMultipartField(fields, name) {
+  if (!fields || !name) return null;
+  const entry = fields[name];
+  if (!entry) return null;
+  if (Array.isArray(entry)) {
+    const value = entry[0]?.value;
+    return value != null ? String(value) : null;
+  }
+  if (typeof entry === 'object' && 'value' in entry) {
+    return entry.value != null ? String(entry.value) : null;
+  }
+  return null;
+}
+
 async function ensureMovementExtrasColumns() {
   if (!hasDatabaseUrl) return;
   try {
@@ -2194,6 +3207,7 @@ async function ensureMovementExtrasColumns() {
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_country TEXT');
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_lat DOUBLE PRECISION');
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_lon DOUBLE PRECISION');
+    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS verified_participants INT NOT NULL DEFAULT 0');
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS media_urls JSONB');
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS claims JSONB');
     movementsColumnsCache = null;
@@ -2205,6 +3219,11 @@ async function ensureMovementExtrasColumns() {
 fastify.post('/uploads', { config: { rateLimit: RATE_LIMITS.upload } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
+
+  const contentLengthHeader = request.headers?.['content-length'];
+  if (contentLengthHeader && Number(contentLengthHeader) > MAX_UPLOAD_BYTES) {
+    return reply.code(413).send({ error: 'File too large' });
+  }
 
   let file;
   try {
@@ -2223,12 +3242,20 @@ fastify.post('/uploads', { config: { rateLimit: RATE_LIMITS.upload } }, async (r
   if (file.file.bytesRead && file.file.bytesRead > MAX_UPLOAD_BYTES) {
     return reply.code(413).send({ error: 'File too large' });
   }
-  if (file.fields && file.fields['content-length'] && parseInt(file.fields['content-length'], 10) > MAX_UPLOAD_BYTES) {
-    return reply.code(413).send({ error: 'File too large' });
-  }
 
   // Enforce MIME type
-  if (!ALLOWED_UPLOAD_MIME_TYPES.includes(file.mimetype)) {
+  const mime = file.mimetype ? String(file.mimetype).toLowerCase() : '';
+  if (!mime) {
+    return reply.code(415).send({ error: 'Unsupported file type' });
+  }
+  const kind = readMultipartField(file.fields, 'kind');
+  const normalizedKind = kind ? String(kind).trim().toLowerCase() : null;
+  const imageOnlyKind = normalizedKind === 'avatar' || normalizedKind === 'banner' || normalizedKind === 'group_avatar';
+  if (imageOnlyKind) {
+    if (!IMAGE_ONLY_UPLOAD_MIME_TYPES.includes(mime)) {
+      return reply.code(415).send({ error: 'Unsupported image type' });
+    }
+  } else if (!ALLOWED_UPLOAD_MIME_TYPES.includes(mime)) {
     return reply.code(415).send({ error: 'Unsupported file type' });
   }
 
@@ -2245,6 +3272,8 @@ fastify.post('/uploads', { config: { rateLimit: RATE_LIMITS.upload } }, async (r
   }
 
   return reply.send({
+    ok: true,
+    kind: normalizedKind || null,
     url: `/uploads/${storedName}`,
     filename: originalName,
     mime: file.mimetype,
@@ -2435,6 +3464,14 @@ fastify.get('/movements', async (request, reply) => {
     const limit = parseIntParam(request.query?.limit, 20, { min: 1, max: 100 });
     const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
     const fields = normalizeFields(request.query?.fields);
+    const viewerEmail = await getOptionalAuthedEmail(request);
+    const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
+
+    const canViewMovement = (movement) => {
+      if (!viewerBlocks) return true;
+      const authorEmail = normalizeEmail(movement?.author_email || movement?.creator_email || '');
+      return !isBlockedForViewer(authorEmail, viewerBlocks);
+    };
 
     function sortByCreatedDesc(a, b) {
       const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
@@ -2451,12 +3488,15 @@ fastify.get('/movements', async (request, reply) => {
             upvotes: summary.upvotes,
             downvotes: summary.downvotes,
             score: summary.score,
+            verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
         })
+        .filter(canViewMovement)
         .sort(sortByCreatedDesc);
 
       const page = merged.slice(offset, offset + limit);
-      return reply.send(page.map((m) => projectRecord(m, fields)));
+      const enriched = await attachCreatorProfilesToMovements(page);
+      return reply.send(enriched.map((m) => projectRecord(m, fields)));
     }
 
     try {
@@ -2491,12 +3531,14 @@ fastify.get('/movements', async (request, reply) => {
             upvotes: summary.upvotes,
             downvotes: summary.downvotes,
             score: summary.score,
+            verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
         });
 
-      const merged = [...rows, ...mergedMemory].sort(sortByCreatedDesc);
+      const merged = [...rows, ...mergedMemory].filter(canViewMovement).sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
-      return reply.send(page.map((m) => projectRecord(m, fields)));
+      const enriched = await attachCreatorProfilesToMovements(page);
+      return reply.send(enriched.map((m) => projectRecord(m, fields)));
     } catch (e) {
       fastify.log.warn({ err: e }, 'DB query failed for GET /movements; using memory fallback');
       const merged = memoryMovements
@@ -2507,11 +3549,14 @@ fastify.get('/movements', async (request, reply) => {
             upvotes: summary.upvotes,
             downvotes: summary.downvotes,
             score: summary.score,
+            verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
         })
+        .filter(canViewMovement)
         .sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
-      return reply.send(page.map((m) => projectRecord(m, fields)));
+      const enriched = await attachCreatorProfilesToMovements(page);
+      return reply.send(enriched.map((m) => projectRecord(m, fields)));
     }
   } catch (err) {
     fastify.log.error({ err }, 'GET /movements failed; returning fallback');
@@ -2538,10 +3583,23 @@ fastify.get('/movements/:id', async (request, reply) => {
   const id = request.params?.id ? String(request.params.id) : null;
   if (!id) return reply.code(400).send({ error: 'Movement id is required' });
 
+  const viewerEmail = await getOptionalAuthedEmail(request);
+  const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
+  const isHiddenForViewer = (movement) => {
+    if (!viewerBlocks) return false;
+    const authorEmail = normalizeEmail(movement?.author_email || movement?.creator_email || '');
+    return isBlockedForViewer(authorEmail, viewerBlocks);
+  };
+
   if (!hasDatabaseUrl) {
     const found = memoryMovements.find((m) => String(m.id) === id) || null;
     if (!found) return reply.code(404).send({ error: 'Movement not found' });
-    return found;
+    if (isHiddenForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
+    const enriched = (await attachCreatorProfilesToMovements([{
+      ...found,
+      verified_participants: memoryCountApprovedEvidenceParticipants(found?.id),
+    }]))[0];
+    return enriched;
   }
 
   try {
@@ -2551,10 +3609,19 @@ fastify.get('/movements/:id', async (request, reply) => {
       // DB is reachable but the movement might have been created via the
       // in-memory fallback path.
       const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
-      if (fromMemory) return fromMemory;
+      if (fromMemory) {
+        if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+        const enriched = (await attachCreatorProfilesToMovements([{
+          ...fromMemory,
+          verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
+        }]))[0];
+        return enriched;
+      }
       return reply.code(404).send({ error: 'Movement not found' });
     }
-    return row;
+    if (isHiddenForViewer(row)) return reply.code(404).send({ error: 'Movement not found' });
+    const enriched = (await attachCreatorProfilesToMovements([row]))[0];
+    return enriched;
   } catch (e) {
     fastify.log.warn({ err: e }, 'DB query failed for GET /movements/:id; using list fallback');
     try {
@@ -2562,10 +3629,19 @@ fastify.get('/movements/:id', async (request, reply) => {
       const found = all.rows.find((m) => String(m.id) === id) || null;
       if (!found) {
         const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
-        if (fromMemory) return fromMemory;
+        if (fromMemory) {
+        if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+        const enriched = (await attachCreatorProfilesToMovements([{
+          ...fromMemory,
+          verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
+        }]))[0];
+        return enriched;
+        }
         return reply.code(404).send({ error: 'Movement not found' });
       }
-      return found;
+      if (isHiddenForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
+      const enriched = (await attachCreatorProfilesToMovements([found]))[0];
+      return enriched;
     } catch (e2) {
       fastify.log.error({ err: e2 }, 'DB fallback failed for GET /movements/:id');
       return reply.code(500).send({ error: 'Failed to load movement' });
@@ -2685,13 +3761,18 @@ fastify.get('/me/followed-movements', async (request, reply) => {
 
   const myEmail = normalizeEmail(authedUser.email);
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
+  const viewerBlocks = await getUserBlockSets(myEmail);
 
   if (!hasDatabaseUrl) {
     const followedIds = new Set();
     for (const [movementId, set] of memoryMovementFollows.entries()) {
       if (set && set.has(myEmail)) followedIds.add(String(movementId));
     }
-    const movements = memoryMovements.filter((m) => followedIds.has(String(m?.id)));
+    const movements = memoryMovements.filter((m) => {
+      if (!followedIds.has(String(m?.id))) return false;
+      const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || '');
+      return !isBlockedForViewer(authorEmail, viewerBlocks);
+    });
     return reply.send({ movements });
   }
 
@@ -2726,7 +3807,12 @@ fastify.get('/me/followed-movements', async (request, reply) => {
       [myEmail]
     );
 
-    return reply.send({ movements: Array.isArray(result.rows) ? result.rows : [] });
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    const filtered = rows.filter((m) => {
+      const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || '');
+      return !isBlockedForViewer(authorEmail, viewerBlocks);
+    });
+    return reply.send({ movements: filtered });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load followed movements');
     return reply.code(500).send({ error: 'Failed to load followed movements' });
@@ -2851,6 +3937,14 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
   const id = request.params?.id ? String(request.params.id) : null;
   if (!id) return reply.code(400).send({ error: 'Movement id is required' });
 
+  const viewerEmail = await getOptionalAuthedEmail(request);
+  const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
+  const isVisibleComment = (comment) => {
+    if (!viewerBlocks) return true;
+    const authorEmail = normalizeEmail(comment?.author_email || '');
+    return !isBlockedForViewer(authorEmail, viewerBlocks);
+  };
+
   function parseIntParam(value, fallback, { min = 0, max = 200 } = {}) {
     const n = Number.parseInt(String(value ?? ''), 10);
     if (!Number.isFinite(n)) return fallback;
@@ -2889,7 +3983,7 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
   if (!hasDatabaseUrl) {
     const list = memoryCommentsByMovement.get(String(id)) || [];
     const sorted = [...list].sort(sortByCreatedDesc);
-    const page = sorted.slice(offset, offset + limit);
+    const page = sorted.filter(isVisibleComment).slice(offset, offset + limit);
     return reply.send({ comments: page.map((c) => projectRecord(c, fields)) });
   }
 
@@ -2900,7 +3994,8 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
       [String(id), limit, offset]
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
-    return reply.send({ comments: rows.map((c) => projectRecord(c, fields)) });
+    const filtered = rows.filter(isVisibleComment);
+    return reply.send({ comments: filtered.map((c) => projectRecord(c, fields)) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load comments');
     return reply.code(500).send({ error: 'Failed to load comments' });
@@ -2922,6 +4017,11 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
+  const blockSets = await getUserBlockSets(email);
+  const ownerEmail = await getMovementOwnerEmail(id);
+  if (ownerEmail && isBlockedForViewer(ownerEmail, blockSets)) {
+    return reply.code(403).send({ error: 'Not allowed' });
+  }
 
   const content = cleanText(parsed.data.content);
 
@@ -3247,21 +4347,63 @@ fastify.delete('/resources/:id', async (request, reply) => {
     const existing = findMemoryResourceById(resourceId);
     if (!existing) return reply.code(404).send({ error: 'Resource not found' });
     const owner = normalizeEmail(existing.created_by_email);
-    if (!isAdmin && owner !== email) return reply.code(403).send({ error: 'Not allowed' });
+    const movementId = existing.movement_id ? String(existing.movement_id) : null;
+    const movementOwner = movementId ? await getMovementOwnerEmail(movementId) : null;
+    const isOwner = movementOwner && movementOwner === email;
+    const trustScore = await getUserTrustScore(email);
+    if (!isOwner && !isAdmin && trustScore < TRUST_SCORE_THRESHOLD) {
+      await logCollaboratorAction({
+        movement_id: movementId || 'unknown',
+        actor_user_id: authedUser.id || authedUser.email,
+        action_type: 'blocked_action',
+        target_id: resourceId,
+        metadata: { reason: 'low_trust_delete_resource', trustScore }
+      });
+      return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
+    }
+    if (!isAdmin && owner !== email && !isOwner) return reply.code(403).send({ error: 'Not allowed' });
     memoryDeleteResourceById(resourceId);
+    await logCollaboratorAction({
+      movement_id: movementId || 'unknown',
+      actor_user_id: authedUser.id || authedUser.email,
+      action_type: 'delete_resource',
+      target_id: resourceId,
+      metadata: null
+    });
     return reply.send({ ok: true });
   }
 
   try {
     await ensureMovementExtrasTables();
-    const existingRes = await pool.query('SELECT id, created_by_email FROM movement_resources WHERE id = $1 LIMIT 1', [String(resourceId)]);
+    const existingRes = await pool.query('SELECT id, movement_id, created_by_email FROM movement_resources WHERE id = $1 LIMIT 1', [String(resourceId)]);
     const existing = existingRes.rows?.[0] || null;
     if (!existing) return reply.code(404).send({ error: 'Resource not found' });
 
     const owner = normalizeEmail(existing.created_by_email);
-    if (!isAdmin && owner !== email) return reply.code(403).send({ error: 'Not allowed' });
+    const movementId = existing.movement_id ? String(existing.movement_id) : null;
+    const movementOwner = movementId ? await getMovementOwnerEmail(movementId) : null;
+    const isOwner = movementOwner && movementOwner === email;
+    const trustScore = await getUserTrustScore(email);
+    if (!isOwner && !isAdmin && trustScore < TRUST_SCORE_THRESHOLD) {
+      await logCollaboratorAction({
+        movement_id: movementId || 'unknown',
+        actor_user_id: authedUser.id || authedUser.email,
+        action_type: 'blocked_action',
+        target_id: resourceId,
+        metadata: { reason: 'low_trust_delete_resource', trustScore }
+      });
+      return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
+    }
+    if (!isAdmin && owner !== email && !isOwner) return reply.code(403).send({ error: 'Not allowed' });
 
     await pool.query('DELETE FROM movement_resources WHERE id = $1', [String(resourceId)]);
+    await logCollaboratorAction({
+      movement_id: movementId || 'unknown',
+      actor_user_id: authedUser.id || authedUser.email,
+      action_type: 'delete_resource',
+      target_id: resourceId,
+      metadata: null
+    });
     return reply.send({ ok: true });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to delete resource');
@@ -3465,7 +4607,11 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
   };
 
   if (!hasDatabaseUrl) {
-    return reply.code(201).send({ evidence: memoryAppendExtra(memoryMovementEvidenceByMovement, id, row) });
+    const saved = memoryAppendExtra(memoryMovementEvidenceByMovement, id, row);
+    if (String(saved?.status || '') === 'approved') {
+      updateMemoryMovementVerifiedParticipants(id);
+    }
+    return reply.code(201).send({ evidence: saved });
   }
 
   try {
@@ -3490,7 +4636,11 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
         row.verified_at,
       ]
     );
-    return reply.code(201).send({ evidence: inserted.rows?.[0] || row });
+    const evidence = inserted.rows?.[0] || row;
+    if (String(evidence?.status || '') === 'approved') {
+      await updateMovementVerifiedParticipants(id);
+    }
+    return reply.code(201).send({ evidence });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to submit movement evidence');
     return reply.code(500).send({ error: 'Failed to submit evidence' });
@@ -3536,6 +4686,7 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
       verified_at: now,
       updated_at: now,
     });
+    updateMemoryMovementVerifiedParticipants(movementId);
     return reply.send({ evidence: updated || { id: evidenceId } });
   }
 
@@ -3553,10 +4704,141 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
     );
     const row = updated.rows?.[0] || null;
     if (!row) return reply.code(404).send({ error: 'Evidence not found' });
+    await updateMovementVerifiedParticipants(movementId);
     return reply.send({ evidence: row });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to verify movement evidence');
     return reply.code(500).send({ error: 'Failed to verify evidence' });
+  }
+});
+
+// Create a movement author group chat with verified participants only.
+fastify.post('/movements/:id/group-chat', { config: { rateLimit: RATE_LIMITS.conversationCreate } }, async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const movementId = request.params?.id ? String(request.params.id) : null;
+  if (!movementId) return reply.code(400).send({ error: 'Movement id is required' });
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const schema = z.object({
+    participant_emails: z.array(z.string().email()).max(20).optional().nullable(),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const ownerEmail = await getMovementOwnerEmail(movementId);
+  if (!ownerEmail) return reply.code(404).send({ error: 'Movement not found' });
+
+  const owner = normalizeEmail(ownerEmail);
+  if (email !== owner) {
+    return reply.code(403).send({ error: 'Only the movement owner can create this group chat' });
+  }
+
+  const verifiedEmails = await listVerifiedParticipantEmails(movementId);
+  const verifiedSet = new Set(verifiedEmails);
+  if (!verifiedSet.size) {
+    return reply.code(400).send({ error: 'No verified participants yet' });
+  }
+
+  const requested = Array.isArray(parsed.data.participant_emails)
+    ? parsed.data.participant_emails.map((e) => normalizeEmail(e)).filter(Boolean)
+    : verifiedEmails;
+
+  const invalid = requested.filter((e) => !verifiedSet.has(e));
+  if (invalid.length) {
+    return reply.code(400).send({ error: 'Only verified participants can be added', invalid });
+  }
+
+  const participantSet = new Set([owner, ...requested]);
+  const participants = Array.from(participantSet).sort();
+
+  if (participants.length > MAX_GROUP_PARTICIPANTS) {
+    return reply.code(400).send({ error: `Group chat is limited to ${MAX_GROUP_PARTICIPANTS} participants` });
+  }
+  if (participants.length < 2) {
+    return reply.code(400).send({ error: 'At least one verified participant is required' });
+  }
+
+  const groupType = 'movement_verified';
+  const movementTitle = await getMovementTitle(movementId);
+  const groupName = movementTitle
+    ? `Movement: ${cleanText(movementTitle, MAX_TEXT_LENGTHS.movementTitle)}`
+    : 'Verified participants group';
+
+  if (!hasDatabaseUrl) {
+    const existing = memoryFindGroupConversation(movementId, groupType);
+    if (existing) return reply.send(existing);
+
+    const missing = participants.filter((p) => !memoryPublicKeys.get(p));
+    if (missing.length) {
+      return reply.code(409).send({ error: 'Missing public keys', missing });
+    }
+
+    const created = memoryCreateGroupConversation({
+      participant_emails: participants,
+      group_name: groupName,
+      group_type: groupType,
+      movement_id: movementId,
+      created_by_email: email,
+      group_admin_emails: [email],
+      group_post_mode: 'owner_only',
+      group_posters: [],
+    });
+    if (!created) return reply.code(500).send({ error: 'Failed to create group chat' });
+    return reply.code(201).send(created);
+  }
+
+  try {
+    await ensureMessagesTables();
+    const existing = await pool.query(
+      `SELECT *
+       FROM conversations
+       WHERE is_group = TRUE AND movement_id = $1 AND group_type = $2
+       LIMIT 1`,
+      [String(movementId), groupType]
+    );
+    if (existing.rows?.[0]) return reply.send(existing.rows[0]);
+
+    await ensurePublicKeysTable();
+    const keyRes = await pool.query(
+      'SELECT email FROM user_public_keys WHERE email = ANY($1::text[])',
+      [participants]
+    );
+    const found = new Set((keyRes.rows || []).map((r) => normalizeEmail(r?.email)));
+    const missing = participants.filter((p) => !found.has(p));
+    if (missing.length) {
+      return reply.code(409).send({ error: 'Missing public keys', missing });
+    }
+
+    const id = randomUUID();
+    const created = await pool.query(
+      `INSERT INTO conversations
+       (id, participant_emails, is_request, requester_email, request_status, is_group, group_name, group_type, movement_id, created_by_email, group_admin_emails, group_post_mode, group_posters)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING *`,
+      [
+        id,
+        participants,
+        false,
+        null,
+        'accepted',
+        true,
+        groupName,
+        groupType,
+        String(movementId),
+        email,
+        [email],
+        'owner_only',
+        [],
+      ]
+    );
+    return reply.code(201).send(created.rows?.[0] ?? { id });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to create group chat');
+    return reply.code(500).send({ error: 'Failed to create group chat' });
   }
 });
 
@@ -4545,29 +5827,34 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
 
   const schema = z
     .object({
-      title: z.string().min(1),
-      description: z.string().min(1).optional(),
-      description_html: z.string().min(1).optional(),
-      summary: z.string().min(1).optional(),
-      tags: z.union([z.array(z.string()), z.string()]).optional(),
+      title: z.string().min(1).max(MAX_TEXT_LENGTHS.movementTitle),
+      description: z.string().min(1).max(MAX_TEXT_LENGTHS.movementDescription).optional(),
+      description_html: z.string().min(1).max(MAX_TEXT_LENGTHS.movementDescriptionHtml).optional(),
+      summary: z.string().min(1).max(MAX_TEXT_LENGTHS.movementSummary).optional(),
+      tags: z
+        .union([
+          z.array(z.string().max(MAX_TEXT_LENGTHS.movementTag)),
+          z.string().max(500),
+        ])
+        .optional(),
       author_email: z.string().email().optional().nullable(),
-      location_city: z.string().max(120).optional(),
-      location_country: z.string().max(120).optional(),
+      location_city: z.string().max(MAX_TEXT_LENGTHS.locationLabel).optional(),
+      location_country: z.string().max(MAX_TEXT_LENGTHS.locationLabel).optional(),
       location_lat: z.number().optional(),
       location_lon: z.number().optional(),
-      media_urls: z.array(z.string()).optional(),
+      media_urls: z.array(z.string().max(MAX_TEXT_LENGTHS.movementMediaUrl)).optional(),
       claims: z
         .array(
           z.object({
             id: z.string().optional(),
-            text: z.string().min(1),
+            text: z.string().min(1).max(MAX_TEXT_LENGTHS.movementClaim),
             classification: z.enum(['opinion', 'experience', 'call_to_action', 'factual']).optional(),
             evidence: z
               .array(
                 z.object({
-                  url: z.string().min(1),
-                  filename: z.string().optional(),
-                  mime: z.string().optional(),
+                  url: z.string().min(1).max(MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+                  filename: z.string().max(MAX_TEXT_LENGTHS.movementClaimEvidenceFilename).optional(),
+                  mime: z.string().max(MAX_TEXT_LENGTHS.movementClaimEvidenceMime).optional(),
                   size: z.number().optional(),
                 })
               )
@@ -4598,29 +5885,33 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
 
   const payload = {
     ...raw,
-    title: cleanText(raw.title),
-    description: raw.description ? cleanText(raw.description) : undefined,
-    summary: raw.summary ? cleanText(raw.summary) : undefined,
-    description_html: raw.description_html ? String(raw.description_html) : undefined,
+    title: cleanText(raw.title, MAX_TEXT_LENGTHS.movementTitle),
+    description: raw.description ? cleanText(raw.description, MAX_TEXT_LENGTHS.movementDescription) : undefined,
+    summary: raw.summary ? cleanText(raw.summary, MAX_TEXT_LENGTHS.movementSummary) : undefined,
+    description_html: raw.description_html ? String(raw.description_html).slice(0, MAX_TEXT_LENGTHS.movementDescriptionHtml) : undefined,
     tags: normalizeTags(raw.tags).filter((t) => ALLOWED_TAGS.has(t)),
     author_email: authedUser.email ?? null,
-    location_city: raw.location_city ? String(raw.location_city).trim() : undefined,
-    location_country: raw.location_country ? String(raw.location_country).trim() : undefined,
+    location_city: raw.location_city ? cleanText(raw.location_city, MAX_TEXT_LENGTHS.locationLabel) : undefined,
+    location_country: raw.location_country ? cleanText(raw.location_country, MAX_TEXT_LENGTHS.locationLabel) : undefined,
     location_lat: roundCoord(raw.location_lat),
     location_lon: roundCoord(raw.location_lon),
-    media_urls: Array.isArray(raw.media_urls) ? raw.media_urls.map((u) => String(u)) : undefined,
+    media_urls: Array.isArray(raw.media_urls)
+      ? raw.media_urls.map((u) => String(u).slice(0, MAX_TEXT_LENGTHS.movementMediaUrl))
+      : undefined,
     claims: Array.isArray(raw.claims)
       ? raw.claims.map((c) => ({
           id: c.id ? String(c.id) : undefined,
-          text: cleanText(c.text),
+          text: cleanText(c.text, MAX_TEXT_LENGTHS.movementClaim),
           classification: c.classification ? String(c.classification) : undefined,
           evidence: Array.isArray(c.evidence)
             ? c.evidence
                 .filter((e) => e && typeof e === 'object')
                 .map((e) => ({
-                  url: String(e.url || ''),
-                  filename: e.filename ? String(e.filename) : undefined,
-                  mime: e.mime ? String(e.mime) : undefined,
+                  url: String(e.url || '').slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+                  filename: e.filename
+                    ? String(e.filename).slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceFilename)
+                    : undefined,
+                  mime: e.mime ? String(e.mime).slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceMime) : undefined,
                   size: typeof e.size === 'number' ? e.size : undefined,
                 }))
                 .filter((e) => e.url)
@@ -4645,6 +5936,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       claims: payload.claims,
       created_at: new Date().toISOString(),
       momentum_score: 0,
+      verified_participants: 0,
     };
     memoryMovements.unshift(created);
     fastify.log.info(
@@ -4656,7 +5948,8 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       },
       'Movement created'
     );
-    return reply.code(201).send(created);
+    const enriched = (await attachCreatorProfilesToMovements([created]))[0] || created;
+    return reply.code(201).send(enriched);
   }
 
   try {
@@ -4677,7 +5970,8 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       },
       'Movement created'
     );
-    return reply.code(201).send(row);
+    const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
+    return reply.code(201).send(enriched);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create movement');
 
@@ -4698,6 +5992,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       claims: payload.claims,
       created_at: new Date().toISOString(),
       momentum_score: 0,
+      verified_participants: 0,
     };
     memoryMovements.unshift(created);
     fastify.log.info(
@@ -4709,7 +6004,203 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       },
       'Movement created'
     );
-    return reply.code(201).send(created);
+    const enriched = (await attachCreatorProfilesToMovements([created]))[0] || created;
+    return reply.code(201).send(enriched);
+  }
+});
+
+// Update a movement (owner/admin only).
+fastify.patch('/movements/:id', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const id = request.params?.id ? String(request.params.id) : null;
+  if (!id) return reply.code(400).send({ error: 'Movement id is required' });
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const schema = z.object({
+    title: z.string().min(1).max(MAX_TEXT_LENGTHS.movementTitle).optional(),
+    description: z.string().max(MAX_TEXT_LENGTHS.movementDescription).optional(),
+    description_html: z.string().max(MAX_TEXT_LENGTHS.movementDescriptionHtml).optional(),
+    summary: z.string().max(MAX_TEXT_LENGTHS.movementSummary).optional(),
+    tags: z.union([
+      z.array(z.string().max(MAX_TEXT_LENGTHS.movementTag)),
+      z.string().max(500),
+    ]).optional(),
+    location_city: z.string().max(MAX_TEXT_LENGTHS.locationLabel).optional().nullable(),
+    location_country: z.string().max(MAX_TEXT_LENGTHS.locationLabel).optional().nullable(),
+    location_lat: z.number().optional().nullable(),
+    location_lon: z.number().optional().nullable(),
+    media_urls: z.array(z.string().max(MAX_TEXT_LENGTHS.movementMediaUrl)).optional().nullable(),
+    claims: z.array(
+      z.object({
+        id: z.string().optional(),
+        text: z.string().min(1).max(MAX_TEXT_LENGTHS.movementClaim),
+        classification: z.enum(['opinion', 'experience', 'call_to_action', 'factual']).optional(),
+        evidence: z.array(
+          z.object({
+            url: z.string().min(1).max(MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+            filename: z.string().max(MAX_TEXT_LENGTHS.movementClaimEvidenceFilename).optional(),
+            mime: z.string().max(MAX_TEXT_LENGTHS.movementClaimEvidenceMime).optional(),
+            size: z.number().optional(),
+          })
+        ).optional(),
+      })
+    ).optional().nullable(),
+  });
+
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid movement payload' });
+  }
+
+  const raw = parsed.data || {};
+  const hasAnyField = Object.keys(raw).length > 0;
+  if (!hasAnyField) {
+    return reply.code(400).send({ error: 'No fields provided' });
+  }
+
+  const cleanOptional = (value, max) => {
+    if (value == null) return undefined;
+    const cleaned = cleanText(String(value), max);
+    return cleaned ? cleaned : null;
+  };
+
+  const roundCoord = (v) => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
+    return Number(v.toFixed(2));
+  };
+
+  const payload = {
+    title: raw.title != null ? cleanText(raw.title, MAX_TEXT_LENGTHS.movementTitle) : undefined,
+    description: raw.description != null ? cleanOptional(raw.description, MAX_TEXT_LENGTHS.movementDescription) : undefined,
+    summary: raw.summary != null ? cleanOptional(raw.summary, MAX_TEXT_LENGTHS.movementSummary) : undefined,
+    description_html: raw.description_html != null ? String(raw.description_html).slice(0, MAX_TEXT_LENGTHS.movementDescriptionHtml) : undefined,
+    tags: raw.tags != null ? normalizeTags(raw.tags).filter((t) => ALLOWED_TAGS.has(t)) : undefined,
+    location_city: raw.location_city != null ? cleanOptional(raw.location_city, MAX_TEXT_LENGTHS.locationLabel) : undefined,
+    location_country: raw.location_country != null ? cleanOptional(raw.location_country, MAX_TEXT_LENGTHS.locationLabel) : undefined,
+    location_lat: raw.location_lat != null ? roundCoord(raw.location_lat) : undefined,
+    location_lon: raw.location_lon != null ? roundCoord(raw.location_lon) : undefined,
+    media_urls: raw.media_urls != null
+      ? (Array.isArray(raw.media_urls)
+        ? raw.media_urls.map((u) => String(u).slice(0, MAX_TEXT_LENGTHS.movementMediaUrl)).filter(Boolean)
+        : null)
+      : undefined,
+    claims: raw.claims != null
+      ? (Array.isArray(raw.claims)
+        ? raw.claims.map((c) => ({
+            id: c.id ? String(c.id) : undefined,
+            text: cleanText(c.text, MAX_TEXT_LENGTHS.movementClaim),
+            classification: c.classification ? String(c.classification) : undefined,
+            evidence: Array.isArray(c.evidence)
+              ? c.evidence
+                  .filter((e) => e && typeof e === 'object')
+                  .map((e) => ({
+                    url: String(e.url || '').slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+                    filename: e.filename
+                      ? String(e.filename).slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceFilename)
+                      : undefined,
+                    mime: e.mime ? String(e.mime).slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceMime) : undefined,
+                    size: typeof e.size === 'number' ? e.size : undefined,
+                  }))
+                  .filter((e) => e.url)
+              : undefined,
+          }))
+        : null)
+      : undefined,
+  };
+
+  const staffRole = getStaffRoleForEmail(email);
+
+  // Memory-backed movements
+  const memIdx = memoryMovements.findIndex((m) => String(m?.id) === id);
+  if (memIdx !== -1) {
+    const existing = memoryMovements[memIdx];
+    const ownerEmail = normalizeEmail(existing?.author_email);
+    const isOwner = ownerEmail && ownerEmail === email;
+    if (!isOwner && staffRole !== 'admin') {
+      return reply.code(403).send({ error: 'Not allowed' });
+    }
+
+    const next = { ...existing };
+    for (const [key, value] of Object.entries(payload)) {
+      if (value !== undefined) next[key] = value;
+    }
+    next.updated_at = nowIso();
+    memoryMovements[memIdx] = next;
+    const enriched = (await attachCreatorProfilesToMovements([next]))[0] || next;
+    return reply.send(enriched);
+  }
+
+  if (!hasDatabaseUrl) {
+    return reply.code(404).send({ error: 'Movement not found' });
+  }
+
+  try {
+    const existingRes = await pool.query('SELECT * FROM movements WHERE id = $1 LIMIT 1', [id]);
+    const existing = existingRes.rows?.[0] || null;
+    if (!existing) return reply.code(404).send({ error: 'Movement not found' });
+
+    const ownerEmail = normalizeEmail(existing?.author_email);
+    const isOwner = ownerEmail && ownerEmail === email;
+    if (!isOwner && staffRole !== 'admin') {
+      return reply.code(403).send({ error: 'Not allowed' });
+    }
+
+    const columns = await getMovementsColumns();
+    const byName = new Map(columns.map((c) => [c.column_name, c]));
+    const updates = [];
+    const values = [];
+
+    const pushUpdate = (key, value, cast) => {
+      if (!byName.has(key)) return;
+      values.push(value);
+      const idx = values.length;
+      updates.push(`${key} = ${cast ? `$${idx}${cast}` : `$${idx}`}`);
+    };
+
+    for (const [key, value] of Object.entries(payload)) {
+      if (value === undefined) continue;
+      if (key === 'tags') {
+        const col = byName.get('tags');
+        if (col?.data_type === 'ARRAY' || col?.udt_name === '_text') {
+          pushUpdate('tags', value, '');
+        } else if (col?.data_type === 'json' || col?.data_type === 'jsonb') {
+          pushUpdate('tags', value, '::jsonb');
+        } else {
+          pushUpdate('tags', Array.isArray(value) ? value.join(',') : value, '');
+        }
+        continue;
+      }
+      if (key === 'media_urls' || key === 'claims') {
+        const col = byName.get(key);
+        if (col?.data_type === 'json' || col?.data_type === 'jsonb') {
+          pushUpdate(key, value, '::jsonb');
+        } else {
+          pushUpdate(key, value, '');
+        }
+        continue;
+      }
+      pushUpdate(key, value, '');
+    }
+
+    if (!updates.length) {
+      return reply.code(400).send({ error: 'No fields provided' });
+    }
+
+    updates.push('updated_at = NOW()');
+    values.push(id);
+    const query = `UPDATE movements SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING *`;
+    const updatedRes = await pool.query(query, values);
+    const updated = updatedRes.rows?.[0] || null;
+    if (!updated) return reply.code(500).send({ error: 'Failed to update movement' });
+    const enriched = (await attachCreatorProfilesToMovements([updated]))[0] || updated;
+    return reply.send(enriched);
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to update movement');
+    return reply.code(500).send({ error: 'Failed to update movement' });
   }
 });
 
@@ -4720,15 +6211,50 @@ fastify.delete('/movements/:id', async (request, reply) => {
   const id = request.params?.id ? String(request.params.id) : null;
   if (!id) return reply.code(400).send({ error: 'Movement id is required' });
 
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+  const staffRole = getStaffRoleForEmail(email);
+
   // Memory-backed movements
   const memIdx = memoryMovements.findIndex((m) => String(m?.id) === id);
   if (memIdx !== -1) {
     const m = memoryMovements[memIdx];
-    if (String(m?.author_email || '') !== String(authedUser.email || '')) {
+    const ownerEmail = normalizeEmail(m?.author_email);
+    const movementTitle = m?.title ? String(m.title) : 'Movement';
+    const isOwner = ownerEmail && ownerEmail === email;
+    const trustScore = await getUserTrustScore(email);
+    if (!isOwner && staffRole !== 'admin' && trustScore < TRUST_SCORE_THRESHOLD) {
+      await logCollaboratorAction({
+        movement_id: id,
+        actor_user_id: authedUser.id || authedUser.email,
+        action_type: 'blocked_action',
+        target_id: id,
+        metadata: { reason: 'low_trust_delete_movement', trustScore }
+      });
+      return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
+    }
+    if (!isOwner && staffRole !== 'admin') {
       return reply.code(403).send({ error: 'Not allowed' });
     }
     memoryMovements.splice(memIdx, 1);
-    return reply.code(200).send({ ok: true });
+    await logCollaboratorAction({
+      movement_id: id,
+      actor_user_id: authedUser.id || authedUser.email,
+      action_type: 'delete_movement',
+      target_id: id,
+      metadata: null
+    });
+    let notifyResult = { sent: 0, mode: 'none' };
+    try {
+      notifyResult = await notifyVerifiedParticipantsOnDeletion({
+        movementId: id,
+        movementTitle,
+        deletedByEmail: email,
+      });
+    } catch {
+      // ignore notification failures
+    }
+    return reply.code(200).send({ ok: true, notified_count: notifyResult.sent, notification_mode: notifyResult.mode });
   }
 
   if (!hasDatabaseUrl) {
@@ -4740,12 +6266,43 @@ fastify.delete('/movements/:id', async (request, reply) => {
     const row = existing.rows?.[0] || null;
     if (!row) return reply.code(404).send({ error: 'Movement not found' });
 
-    if (String(row?.author_email || '') !== String(authedUser.email || '')) {
+    const ownerEmail = normalizeEmail(row?.author_email);
+    const movementTitle = row?.title ? String(row.title) : 'Movement';
+    const isOwner = ownerEmail && ownerEmail === email;
+    const trustScore = await getUserTrustScore(email);
+    if (!isOwner && staffRole !== 'admin' && trustScore < TRUST_SCORE_THRESHOLD) {
+      await logCollaboratorAction({
+        movement_id: id,
+        actor_user_id: authedUser.id || authedUser.email,
+        action_type: 'blocked_action',
+        target_id: id,
+        metadata: { reason: 'low_trust_delete_movement', trustScore }
+      });
+      return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
+    }
+    if (!isOwner && staffRole !== 'admin') {
       return reply.code(403).send({ error: 'Not allowed' });
     }
 
     await pool.query('DELETE FROM movements WHERE id = $1', [id]);
-    return reply.code(200).send({ ok: true });
+    await logCollaboratorAction({
+      movement_id: id,
+      actor_user_id: authedUser.id || authedUser.email,
+      action_type: 'delete_movement',
+      target_id: id,
+      metadata: null
+    });
+    let notifyResult = { sent: 0, mode: 'none' };
+    try {
+      notifyResult = await notifyVerifiedParticipantsOnDeletion({
+        movementId: id,
+        movementTitle,
+        deletedByEmail: email,
+      });
+    } catch {
+      // ignore notification failures
+    }
+    return reply.code(200).send({ ok: true, notified_count: notifyResult.sent, notification_mode: notifyResult.mode });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to delete movement');
     return reply.code(500).send({ error: 'Failed to delete movement' });
@@ -4757,11 +6314,27 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
   if (!authedUser) return;
 
   const schema = z.object({
-    reported_content_type: z.string().min(1),
-    reported_content_id: z.string().min(1),
-    report_category: z.string().min(1),
-    report_details: z.string().max(2000).optional().nullable(),
-    evidence_urls: z.array(z.string().min(1)).max(6).optional(),
+    report_type: z.enum(['abuse', 'bug']).optional(),
+    report_title: z.string().max(MAX_TEXT_LENGTHS.reportTitle).optional().nullable(),
+    reported_content_type: z.string().min(1).max(MAX_TEXT_LENGTHS.reportContentType),
+    reported_content_id: z.string().min(1).max(MAX_TEXT_LENGTHS.reportContentId),
+    report_category: z.string().min(1).max(MAX_TEXT_LENGTHS.reportCategory),
+    report_details: z.string().max(MAX_TEXT_LENGTHS.reportDetails).optional().nullable(),
+    evidence_urls: z.array(z.string().min(1).max(MAX_TEXT_LENGTHS.reportEvidenceUrl)).max(6).optional(),
+  }).superRefine((data, ctx) => {
+    const type = data.report_type || 'abuse';
+    if (type === 'bug') {
+      if (!data.report_title || !String(data.report_title).trim()) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Bug reports require a title', path: ['report_title'] });
+      }
+      const details = data.report_details ? String(data.report_details).trim() : '';
+      if (!details) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Bug reports require details', path: ['report_details'] });
+      }
+      if (details.length > MAX_TEXT_LENGTHS.reportBugDetails) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Bug report details are too long', path: ['report_details'] });
+      }
+    }
   });
 
   const parsed = schema.safeParse(request.body ?? {});
@@ -4769,23 +6342,112 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
     return reply.code(400).send({ error: 'Invalid report payload' });
   }
 
+  const createMemoryReport = async () => {
+    const reportType = parsed.data.report_type || 'abuse';
+    const reportTitle = parsed.data.report_title
+      ? cleanText(parsed.data.report_title, MAX_TEXT_LENGTHS.reportTitle)
+      : null;
+    const reportDetails = parsed.data.report_details
+      ? cleanText(
+          parsed.data.report_details,
+          reportType === 'bug' ? MAX_TEXT_LENGTHS.reportBugDetails : MAX_TEXT_LENGTHS.reportDetails
+        )
+      : null;
+    const evidenceUrls = Array.isArray(parsed.data.evidence_urls)
+      ? parsed.data.evidence_urls.map((u) => String(u)).filter(Boolean).slice(0, 6)
+      : null;
+    const reporterEmail = String(authedUser.email || '');
+    const now = nowIso();
+    const isRepeatReport = memoryReports.some(
+      (r) =>
+        normalizeEmail(r?.reporter_email) === normalizeEmail(reporterEmail) &&
+        String(r?.reported_content_type) === String(parsed.data.reported_content_type) &&
+        String(r?.reported_content_id) === String(parsed.data.reported_content_id)
+    );
+    const fallbackReport = {
+      id: String(memoryReportSeq++),
+      reporter_email: reporterEmail,
+      reported_content_type: String(parsed.data.reported_content_type),
+      reported_content_id: String(parsed.data.reported_content_id),
+      report_category: String(parsed.data.report_category),
+      report_details: reportDetails,
+      report_type: reportType,
+      report_title: reportTitle,
+      evidence_urls: evidenceUrls,
+      evidence_file_url: evidenceUrls?.[0] ? String(evidenceUrls[0]) : null,
+      status: 'pending',
+      priority: 'normal',
+      is_repeat_report: isRepeatReport,
+      created_at: now,
+      updated_at: now,
+      moderator_email: null,
+      moderator_notes: null,
+      action_taken: null,
+    };
+    memoryReports.unshift(fallbackReport);
+
+    try {
+      await logIncident({
+        event_type: 'report_created',
+        actor_user_id: String(authedUser.id || ''),
+        actor_email: reporterEmail,
+        trigger_system: 'user_report',
+        human_reviewed: false,
+        related_entity_type: 'report',
+        related_entity_id: String(fallbackReport.id),
+        context: {
+          reported_content_type: String(parsed.data.reported_content_type),
+          reported_content_id: String(parsed.data.reported_content_id),
+          report_category: String(parsed.data.report_category),
+          report_type: reportType,
+        },
+      });
+    } catch (e) {
+      // Never fail report creation if incident logging fails.
+      fastify.log.error({ err: e }, 'Failed to log incident for report fallback');
+    }
+
+    return fallbackReport;
+  };
+
   if (!hasDatabaseUrl) {
-    return reply.code(503).send({ error: 'Reporting is unavailable (database not configured)' });
+    const fallbackReport = await createMemoryReport();
+    const receipt = buildReportReceiptEmail(fallbackReport);
+    void sendReportEmail({
+      to: fallbackReport?.reporter_email,
+      subject: receipt.subject,
+      text: receipt.text,
+      html: receipt.html,
+    });
+    return reply.code(201).send(fallbackReport);
   }
 
   try {
     await ensureReportsTable();
+    const reportType = parsed.data.report_type || 'abuse';
+    const reportTitle = parsed.data.report_title
+      ? cleanText(parsed.data.report_title, MAX_TEXT_LENGTHS.reportTitle)
+      : null;
+    const reportDetails = parsed.data.report_details
+      ? cleanText(
+          parsed.data.report_details,
+          reportType === 'bug' ? MAX_TEXT_LENGTHS.reportBugDetails : MAX_TEXT_LENGTHS.reportDetails
+        )
+      : null;
+
     const result = await pool.query(
       `INSERT INTO reports
-        (reporter_email, reported_content_type, reported_content_id, report_category, report_details, evidence_urls, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+        (reporter_email, reported_content_type, reported_content_id, report_category, report_details, report_type, report_title, evidence_urls, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
        RETURNING *`,
       [
         String(authedUser.email || ''),
         String(parsed.data.reported_content_type),
         String(parsed.data.reported_content_id),
         String(parsed.data.report_category),
-        parsed.data.report_details ? String(parsed.data.report_details) : null,
+        reportDetails,
+        reportType,
+        reportTitle,
         Array.isArray(parsed.data.evidence_urls)
           ? parsed.data.evidence_urls.map((u) => String(u)).filter(Boolean).slice(0, 6)
           : null,
@@ -4817,23 +6479,50 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
           reported_content_type: String(parsed.data.reported_content_type),
           reported_content_id: String(parsed.data.reported_content_id),
           report_category: String(parsed.data.report_category),
+          report_type: reportType,
         },
       });
     }
 
+    if (row) {
+      const receipt = buildReportReceiptEmail(row);
+      void sendReportEmail({
+        to: row?.reporter_email,
+        subject: receipt.subject,
+        text: receipt.text,
+        html: receipt.html,
+      });
+    }
     return reply.code(201).send(row ?? { ok: true });
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to create report');
-    return reply.code(500).send({ error: 'Failed to submit report' });
+    fastify.log.error({ err: e }, 'Failed to create report; using memory fallback');
+    try {
+      const fallbackReport = await createMemoryReport();
+      const receipt = buildReportReceiptEmail(fallbackReport);
+      void sendReportEmail({
+        to: fallbackReport?.reporter_email,
+        subject: receipt.subject,
+        text: receipt.text,
+        html: receipt.html,
+      });
+      return reply.code(201).send(fallbackReport);
+    } catch (fallbackError) {
+      fastify.log.error({ err: fallbackError }, 'Memory fallback failed for report');
+      return reply.code(201).send({ ok: true, mode: 'fallback' });
+    }
   }
 });
 
-fastify.get('/reports', async (request, reply) => {
-  const staffUser = await requireStaffUser(request, reply);
+fastify.get('/reports', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const staffUser = await requireAdminUser(request, reply);
   if (!staffUser) return;
 
   if (!hasDatabaseUrl) {
-    return reply.code(503).send({ error: 'Reporting is unavailable (database not configured)' });
+    const status = request.query?.status ? String(request.query.status) : null;
+    const rows = Array.isArray(memoryReports) ? memoryReports : [];
+    const filtered = status ? rows.filter((r) => String(r?.status || '') === status) : rows;
+    const ordered = [...filtered].sort((a, b) => String(b?.created_at || '').localeCompare(String(a?.created_at || '')));
+    return reply.send(ordered);
   }
 
   const status = request.query?.status ? String(request.query.status) : null;
@@ -4854,8 +6543,8 @@ fastify.get('/reports', async (request, reply) => {
   }
 });
 
-fastify.patch('/reports/:id', async (request, reply) => {
-  const staffUser = await requireStaffUser(request, reply);
+fastify.patch('/reports/:id', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const staffUser = await requireAdminUser(request, reply);
   if (!staffUser) return;
 
   const staffRole = getStaffRoleForEmail(staffUser.email);
@@ -4882,11 +6571,56 @@ fastify.patch('/reports/:id', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
-    return reply.code(503).send({ error: 'Reporting is unavailable (database not configured)' });
+    const idStr = String(rawId || '');
+    const row = memoryReports.find((r) => String(r?.id) === idStr);
+    if (!row) return reply.code(404).send({ error: 'Report not found' });
+
+    const previousStatus = String(row.status || '');
+    if (parsed.data.status) row.status = String(parsed.data.status);
+    if (parsed.data.moderator_notes !== undefined) {
+      row.moderator_notes = parsed.data.moderator_notes == null ? null : String(parsed.data.moderator_notes);
+    }
+    if (parsed.data.action_taken !== undefined) {
+      row.action_taken = parsed.data.action_taken == null ? null : String(parsed.data.action_taken);
+    }
+    row.moderator_email = String(staffUser.email || '');
+    row.updated_at = nowIso();
+
+    await logIncident({
+      event_type: 'moderation_action_applied',
+      actor_user_id: String(staffUser.id || ''),
+      actor_email: String(staffUser.email || ''),
+      trigger_system: 'moderation',
+      human_reviewed: true,
+      related_entity_type: 'report',
+      related_entity_id: String(row.id),
+      context: {
+        status: row.status == null ? null : String(row.status),
+        action_taken: row.action_taken == null ? null : String(row.action_taken),
+      },
+    });
+
+    if (parsed.data.status === 'resolved' && previousStatus !== 'resolved') {
+      const resolved = buildReportResolvedEmail(row);
+      void sendReportEmail({
+        to: row?.reporter_email,
+        subject: resolved.subject,
+        text: resolved.text,
+        html: resolved.html,
+      });
+    }
+
+    return reply.send(row);
   }
 
   try {
     await ensureReportsTable();
+
+    const previousRes = await pool.query(
+      'SELECT status, reporter_email, report_type, report_category, report_title FROM reports WHERE id = $1 LIMIT 1',
+      [id]
+    );
+    const previousRow = previousRes.rows?.[0] || null;
 
     const fields = [];
     const values = [];
@@ -4946,6 +6680,16 @@ fastify.patch('/reports/:id', async (request, reply) => {
       },
     });
 
+    if (parsed.data.status === 'resolved' && String(previousRow?.status || '') !== 'resolved') {
+      const resolved = buildReportResolvedEmail(row || previousRow);
+      void sendReportEmail({
+        to: row?.reporter_email || previousRow?.reporter_email,
+        subject: resolved.subject,
+        text: resolved.text,
+        html: resolved.html,
+      });
+    }
+
     return reply.send(row);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to update report');
@@ -4991,8 +6735,8 @@ fastify.post('/incidents', async (request, reply) => {
   return reply.code(201).send({ ok: true, incident: created });
 });
 
-fastify.get('/admin/incidents', async (request, reply) => {
-  const staffUser = await requireStaffUser(request, reply);
+fastify.get('/admin/incidents', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
+  const staffUser = await requireAdminUser(request, reply);
   if (!staffUser) return;
 
   function parseIntParam(value, fallback, { min = 0, max = 1000 } = {}) {
@@ -5078,6 +6822,7 @@ fastify.get('/conversations', async (request, reply) => {
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
 
   const type = request.query?.type ? String(request.query.type) : null;
+  const viewerBlocks = await getUserBlockSets(myEmail);
 
   function parseIntParam(value, fallback, { min = 0, max = 500 } = {}) {
     const n = Number.parseInt(String(value ?? ''), 10);
@@ -5108,13 +6853,48 @@ fastify.get('/conversations', async (request, reply) => {
   const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
   const fields = normalizeFields(request.query?.fields);
 
+  function getOtherParticipants(convo) {
+    const participants = Array.isArray(convo?.participant_emails) ? convo.participant_emails : [];
+    return participants
+      .map((e) => normalizeEmail(e))
+      .filter((e) => e && e !== myEmail);
+  }
+
+  function hasBlockedRelation(convo) {
+    return getOtherParticipants(convo).some((e) => isBlockedForViewer(e, viewerBlocks));
+  }
+
+  function hasBlockedByViewer(convo) {
+    return getOtherParticipants(convo).some((e) => isBlockedByViewer(e, viewerBlocks));
+  }
+
+  function shouldHideDirectConversation(convo) {
+    if (convo?.is_group) return false;
+    const other = getOtherParticipants(convo)[0];
+    if (!other) return false;
+    return isBlockedForViewer(other, viewerBlocks);
+  }
+
+  function annotateConversation(convo) {
+    const blockedRelation = hasBlockedRelation(convo);
+    if (!blockedRelation) return convo;
+    const patch = {
+      ...convo,
+      last_message_body: null,
+    };
+    if (hasBlockedByViewer(convo)) {
+      patch.has_blocked_participant = true;
+    }
+    return patch;
+  }
+
   if (!hasDatabaseUrl) {
     const list = memoryListConversationsForUser(myEmail).filter((c) => {
       const status = String(c?.request_status || 'accepted');
       const blockedBy = normalizeEmail(c?.blocked_by_email);
       if (status !== 'blocked') return true;
       return !blockedBy || blockedBy === myEmail;
-    });
+    }).filter((c) => !shouldHideDirectConversation(c)).map(annotateConversation);
     const filtered =
       type === 'requests'
         ? list.filter((c) => c?.request_status === 'pending')
@@ -5165,7 +6945,9 @@ fastify.get('/conversations', async (request, reply) => {
     );
 
     const rows = result.rows || [];
-    return reply.send(Array.isArray(rows) ? rows.map((c) => projectRecord(c, fields)) : []);
+    const filtered = Array.isArray(rows) ? rows.filter((c) => !shouldHideDirectConversation(c)) : [];
+    const annotated = filtered.map(annotateConversation);
+    return reply.send(annotated.map((c) => projectRecord(c, fields)));
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load conversations');
     return reply.code(500).send({ error: 'Failed to load conversations' });
@@ -5214,6 +6996,10 @@ fastify.post('/conversations', async (request, reply) => {
   const recipient = normalizeEmail(parsed.data.recipient_email);
   if (!myEmail || !recipient) return reply.code(400).send({ error: 'Invalid emails' });
   if (myEmail === recipient) return reply.code(400).send({ error: 'Cannot message yourself' });
+  const viewerBlocks = await getUserBlockSets(myEmail);
+  if (isBlockedForViewer(recipient, viewerBlocks)) {
+    return reply.code(404).send({ error: 'User not found' });
+  }
 
   // DM rules: you can DM people you follow; otherwise this becomes a message request.
   let isRequest = true;
@@ -5261,6 +7047,329 @@ fastify.post('/conversations', async (request, reply) => {
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create conversation');
     return reply.code(500).send({ error: 'Failed to create conversation' });
+  }
+});
+
+// Create a general-purpose group chat (max 10 participants, E2EE-ready).
+fastify.post('/conversations/group', { config: { rateLimit: RATE_LIMITS.conversationCreate } }, async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const schema = z.object({
+    group_name: z.string().min(1).max(120),
+    participant_emails: z.array(z.string().email()).min(1).max(MAX_GROUP_PARTICIPANTS),
+    group_avatar_url: z.string().max(MAX_TEXT_LENGTHS.profilePhotoUrl).optional().nullable(),
+    group_post_mode: z.enum(['owner_only', 'admins', 'selected', 'all']).optional(),
+    group_posters: z.array(z.string().email()).optional().nullable(),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const myEmail = normalizeEmail(authedUser.email);
+  if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  const requested = normalizeEmailList(parsed.data.participant_emails, { max: MAX_GROUP_PARTICIPANTS });
+  const participantSet = new Set([myEmail, ...requested]);
+  const participants = Array.from(participantSet).sort();
+  if (participants.length < 2) {
+    return reply.code(400).send({ error: 'At least one other participant is required' });
+  }
+  if (participants.length > MAX_GROUP_PARTICIPANTS) {
+    return reply.code(400).send({ error: `Group chat is limited to ${MAX_GROUP_PARTICIPANTS} participants` });
+  }
+
+  const groupName = safeString(parsed.data.group_name, { max: 120 });
+  if (!groupName) return reply.code(400).send({ error: 'Group name is required' });
+
+  const groupAvatarUrl = normalizeGroupAvatarUrl(parsed.data.group_avatar_url);
+  const groupPostMode = GROUP_POST_MODES.has(parsed.data.group_post_mode) ? parsed.data.group_post_mode : 'all';
+  const posters = normalizeEmailList(parsed.data.group_posters);
+  const allowedPosters = posters.filter((email) => participants.includes(email));
+
+  if (!hasDatabaseUrl) {
+    const missing = participants.filter((p) => !memoryPublicKeys.get(p));
+    if (missing.length) {
+      return reply.code(409).send({ error: 'Missing public keys', missing });
+    }
+    const created = memoryCreateGroupConversation({
+      participant_emails: participants,
+      group_name: groupName,
+      group_type: 'custom',
+      movement_id: null,
+      created_by_email: myEmail,
+      group_avatar_url: groupAvatarUrl,
+      group_admin_emails: [myEmail],
+      group_post_mode: groupPostMode,
+      group_posters: allowedPosters,
+    });
+    if (!created) return reply.code(500).send({ error: 'Failed to create group chat' });
+    return reply.code(201).send(created);
+  }
+
+  try {
+    await ensureMessagesTables();
+    await ensurePublicKeysTable();
+    const keyRes = await pool.query(
+      'SELECT email FROM user_public_keys WHERE email = ANY($1::text[])',
+      [participants]
+    );
+    const found = new Set((keyRes.rows || []).map((r) => normalizeEmail(r?.email)));
+    const missing = participants.filter((p) => !found.has(p));
+    if (missing.length) {
+      return reply.code(409).send({ error: 'Missing public keys', missing });
+    }
+
+    const id = randomUUID();
+    const created = await pool.query(
+      `INSERT INTO conversations
+       (id, participant_emails, is_request, requester_email, request_status, is_group, group_name, group_avatar_url, group_type, movement_id, created_by_email, group_admin_emails, group_post_mode, group_posters)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       RETURNING *`,
+      [
+        id,
+        participants,
+        false,
+        null,
+        'accepted',
+        true,
+        groupName,
+        groupAvatarUrl,
+        'custom',
+        null,
+        myEmail,
+        [myEmail],
+        groupPostMode,
+        allowedPosters,
+      ]
+    );
+    return reply.code(201).send(created.rows?.[0] ?? { id });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to create group chat');
+    return reply.code(500).send({ error: 'Failed to create group chat' });
+  }
+});
+
+// Update group chat settings (name/avatar/post permissions/admins).
+fastify.patch('/conversations/:id/group', { config: { rateLimit: RATE_LIMITS.conversationCreate } }, async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const conversationId = request.params?.id ? String(request.params.id) : null;
+  if (!conversationId) return reply.code(400).send({ error: 'Conversation id is required' });
+
+  const schema = z.object({
+    group_name: z.string().max(120).optional(),
+    group_avatar_url: z.string().max(MAX_TEXT_LENGTHS.profilePhotoUrl).optional().nullable(),
+    group_post_mode: z.enum(['owner_only', 'admins', 'selected', 'all']).optional(),
+    group_posters: z.array(z.string().email()).optional(),
+    group_admin_emails: z.array(z.string().email()).optional(),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const myEmail = normalizeEmail(authedUser.email);
+  if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  function applyGroupPatch(convo) {
+    if (!convo?.is_group) return null;
+
+    const isMovementGroup = String(convo?.group_type || '') === 'movement_verified';
+    const owner = normalizeEmail(convo?.created_by_email);
+    const isOwner = owner && owner === myEmail;
+    const canManage = canManageGroup(convo, myEmail);
+    if (!canManage) return { error: 'Group admin access required', code: 403 };
+
+    const next = { ...convo };
+
+    if (parsed.data.group_name != null) {
+      const name = safeString(parsed.data.group_name, { max: 120 });
+      if (!name) return { error: 'Group name is required', code: 400 };
+      next.group_name = name;
+    }
+
+    if (parsed.data.group_avatar_url !== undefined) {
+      const url = normalizeGroupAvatarUrl(parsed.data.group_avatar_url);
+      next.group_avatar_url = url;
+    }
+
+    if (parsed.data.group_admin_emails) {
+      if (!isOwner) return { error: 'Only the group owner can update admin roles', code: 403 };
+      const admins = normalizeEmailList(parsed.data.group_admin_emails);
+      if (owner && !admins.includes(owner)) admins.unshift(owner);
+      next.group_admin_emails = admins;
+    }
+
+    if (parsed.data.group_post_mode) {
+      if (isMovementGroup && !isOwner) {
+        return { error: 'Only the movement owner can update posting permissions', code: 403 };
+      }
+      next.group_post_mode = parsed.data.group_post_mode;
+    }
+
+    if (parsed.data.group_posters) {
+      if (isMovementGroup && !isOwner) {
+        return { error: 'Only the movement owner can update posting permissions', code: 403 };
+      }
+      const participants = normalizeEmailList(convo?.participant_emails);
+      next.group_posters = normalizeEmailList(parsed.data.group_posters).filter((email) => participants.includes(email));
+    }
+
+    return { next };
+  }
+
+  if (!hasDatabaseUrl) {
+    const convo = getMemoryConversationById(conversationId);
+    if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
+    const result = applyGroupPatch(convo);
+    if (result?.error) return reply.code(result.code || 400).send({ error: result.error });
+    const idx = memoryConversations.findIndex((c) => String(c?.id) === String(conversationId));
+    if (idx !== -1) memoryConversations[idx] = { ...result.next, updated_at: nowIso() };
+    return reply.send(memoryConversations[idx] || result.next);
+  }
+
+  try {
+    await ensureMessagesTables();
+    const convoRes = await pool.query('SELECT * FROM conversations WHERE id = $1 LIMIT 1', [conversationId]);
+    const convo = convoRes.rows?.[0] || null;
+    if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
+    if (!(convo.participant_emails || []).map((x) => String(x).toLowerCase()).includes(myEmail)) {
+      return reply.code(403).send({ error: 'Not allowed' });
+    }
+
+    const result = applyGroupPatch(convo);
+    if (result?.error) return reply.code(result.code || 400).send({ error: result.error });
+
+    const updated = await pool.query(
+      `UPDATE conversations
+       SET group_name = $2,
+           group_avatar_url = $3,
+           group_admin_emails = $4,
+           group_post_mode = $5,
+           group_posters = $6,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        conversationId,
+        result.next.group_name,
+        result.next.group_avatar_url,
+        normalizeEmailList(result.next.group_admin_emails),
+        getGroupPostMode(result.next),
+        normalizeEmailList(result.next.group_posters),
+      ]
+    );
+    return reply.send(updated.rows?.[0] || { ok: true });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to update group settings');
+    return reply.code(500).send({ error: 'Failed to update group settings' });
+  }
+});
+
+// Add/remove group participants (admins only; movement groups are owner-only).
+fastify.post('/conversations/:id/participants', { config: { rateLimit: RATE_LIMITS.conversationCreate } }, async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const conversationId = request.params?.id ? String(request.params.id) : null;
+  if (!conversationId) return reply.code(400).send({ error: 'Conversation id is required' });
+
+  const schema = z.object({
+    add_emails: z.array(z.string().email()).optional(),
+    remove_emails: z.array(z.string().email()).optional(),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const myEmail = normalizeEmail(authedUser.email);
+  if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  async function applyParticipantPatch(convo) {
+    if (!convo?.is_group) return { error: 'Not a group chat', code: 400 };
+    const isMovementGroup = String(convo?.group_type || '') === 'movement_verified';
+    const owner = normalizeEmail(convo?.created_by_email);
+    const isOwner = owner && owner === myEmail;
+    const canManage = isMovementGroup ? isOwner : canManageGroup(convo, myEmail);
+    if (!canManage) return { error: 'Group admin access required', code: 403 };
+
+    const participants = normalizeEmailList(convo?.participant_emails, { max: 200 });
+    const add = normalizeEmailList(parsed.data.add_emails);
+    const remove = normalizeEmailList(parsed.data.remove_emails);
+
+    if (isMovementGroup && add.length) {
+      const verified = await listVerifiedParticipantEmails(convo?.movement_id);
+      const verifiedSet = new Set(verified);
+      const invalid = add.filter((email) => !verifiedSet.has(email));
+      if (invalid.length) return { error: 'Only verified participants can be added', code: 400, invalid };
+    }
+
+    const nextSet = new Set(participants);
+    for (const email of add) nextSet.add(email);
+    for (const email of remove) {
+      if (email && email !== owner) nextSet.delete(email);
+    }
+
+    const next = Array.from(nextSet);
+    if (next.length > MAX_GROUP_PARTICIPANTS) {
+      return { error: `Group chat is limited to ${MAX_GROUP_PARTICIPANTS} participants`, code: 400 };
+    }
+    if (owner && !next.includes(owner)) next.push(owner);
+
+    const nextAdmins = getGroupAdmins(convo).filter((email) => next.includes(email));
+    if (owner && !nextAdmins.includes(owner)) nextAdmins.unshift(owner);
+
+    const nextPosters = normalizeEmailList(convo?.group_posters).filter((email) => next.includes(email));
+
+    return {
+      nextParticipants: next,
+      nextAdmins,
+      nextPosters,
+    };
+  }
+
+  if (!hasDatabaseUrl) {
+    const convo = getMemoryConversationById(conversationId);
+    if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
+    const result = await applyParticipantPatch(convo);
+    if (result?.error) return reply.code(result.code || 400).send({ error: result.error, invalid: result.invalid });
+    const idx = memoryConversations.findIndex((c) => String(c?.id) === String(conversationId));
+    if (idx !== -1) {
+      memoryConversations[idx] = {
+        ...convo,
+        participant_emails: result.nextParticipants,
+        group_admin_emails: result.nextAdmins,
+        group_posters: result.nextPosters,
+        updated_at: nowIso(),
+      };
+    }
+    return reply.send(memoryConversations[idx] || convo);
+  }
+
+  try {
+    await ensureMessagesTables();
+    const convoRes = await pool.query('SELECT * FROM conversations WHERE id = $1 LIMIT 1', [conversationId]);
+    const convo = convoRes.rows?.[0] || null;
+    if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
+    if (!(convo.participant_emails || []).map((x) => String(x).toLowerCase()).includes(myEmail)) {
+      return reply.code(403).send({ error: 'Not allowed' });
+    }
+
+    const result = await applyParticipantPatch(convo);
+    if (result?.error) return reply.code(result.code || 400).send({ error: result.error, invalid: result.invalid });
+
+    const updated = await pool.query(
+      `UPDATE conversations
+       SET participant_emails = $2,
+           group_admin_emails = $3,
+           group_posters = $4,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [conversationId, result.nextParticipants, result.nextAdmins, result.nextPosters]
+    );
+    return reply.send(updated.rows?.[0] || { ok: true });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to update group participants');
+    return reply.code(500).send({ error: 'Failed to update participants' });
   }
 });
 
@@ -5382,6 +7491,8 @@ fastify.get('/conversations/:id/messages', async (request, reply) => {
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
   if (!conversationId) return reply.code(400).send({ error: 'Conversation id is required' });
 
+  const viewerBlocks = await getUserBlockSets(myEmail);
+
   const limit = parseIntParam(request.query?.limit, 50, { min: 1, max: 200 });
   const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
   const fields = normalizeFields(request.query?.fields);
@@ -5389,8 +7500,14 @@ fastify.get('/conversations/:id/messages', async (request, reply) => {
   if (!hasDatabaseUrl) {
     const convo = getMemoryConversationById(conversationId);
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
-    const participants = Array.isArray(convo.participant_emails) ? convo.participant_emails.map((x) => String(x).toLowerCase()) : [];
+    const participants = Array.isArray(convo.participant_emails)
+      ? convo.participant_emails.map((x) => String(x).toLowerCase())
+      : [];
     if (!participants.includes(myEmail)) return reply.code(403).send({ error: 'Not allowed' });
+    const other = participants.find((email) => email && email !== myEmail);
+    if (!convo?.is_group && other && isBlockedForViewer(other, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Conversation not found' });
+    }
 
     const status = String(convo?.request_status || 'accepted');
     const blockedBy = normalizeEmail(convo?.blocked_by_email);
@@ -5404,7 +7521,11 @@ fastify.get('/conversations/:id/messages', async (request, reply) => {
       const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
       return tb - ta;
     });
-    const page = sorted.slice(offset, offset + limit).map((m) => projectRecord(m, fields));
+    const visible = sorted.filter((m) => {
+      const sender = normalizeEmail(m?.sender_email || '');
+      return !isBlockedForViewer(sender, viewerBlocks);
+    });
+    const page = visible.slice(offset, offset + limit).map((m) => projectRecord(m, fields));
     return reply.send(page);
   }
 
@@ -5415,6 +7536,13 @@ fastify.get('/conversations/:id/messages', async (request, reply) => {
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
     if (!(convo.participant_emails || []).map((x) => String(x).toLowerCase()).includes(myEmail)) {
       return reply.code(403).send({ error: 'Not allowed' });
+    }
+    const participants = Array.isArray(convo.participant_emails)
+      ? convo.participant_emails.map((x) => String(x).toLowerCase())
+      : [];
+    const other = participants.find((email) => email && email !== myEmail);
+    if (!convo?.is_group && other && isBlockedForViewer(other, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Conversation not found' });
     }
 
     const status = String(convo?.request_status || 'accepted');
@@ -5429,7 +7557,11 @@ fastify.get('/conversations/:id/messages', async (request, reply) => {
     );
 
     const rows = result.rows || [];
-    return reply.send(Array.isArray(rows) ? rows.map((m) => projectRecord(m, fields)) : []);
+    const visible = (Array.isArray(rows) ? rows : []).filter((m) => {
+      const sender = normalizeEmail(m?.sender_email || '');
+      return !isBlockedForViewer(sender, viewerBlocks);
+    });
+    return reply.send(visible.map((m) => projectRecord(m, fields)));
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load messages');
     return reply.code(500).send({ error: 'Failed to load messages' });
@@ -5440,7 +7572,7 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
-  const schema = z.object({ body: z.string().min(1).max(4000) });
+  const schema = z.object({ body: z.string().min(1).max(MAX_TEXT_LENGTHS.messageCiphertext) });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) {
     return reply.code(400).send({ error: 'Invalid payload' });
@@ -5450,12 +7582,19 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
   const conversationId = request.params?.id ? String(request.params.id) : null;
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
   if (!conversationId) return reply.code(400).send({ error: 'Conversation id is required' });
+  const viewerBlocks = await getUserBlockSets(myEmail);
 
   if (!hasDatabaseUrl) {
     const convo = getMemoryConversationById(conversationId);
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
-    const participants = Array.isArray(convo.participant_emails) ? convo.participant_emails.map((x) => String(x).toLowerCase()) : [];
+    const participants = Array.isArray(convo.participant_emails)
+      ? convo.participant_emails.map((x) => String(x).toLowerCase())
+      : [];
     if (!participants.includes(myEmail)) return reply.code(403).send({ error: 'Not allowed' });
+    const other = participants.find((email) => email && email !== myEmail);
+    if (!convo?.is_group && other && isBlockedForViewer(other, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Conversation not found' });
+    }
 
     const status = String(convo?.request_status || 'accepted');
     const requester = normalizeEmail(convo?.requester_email);
@@ -5463,8 +7602,17 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
     if (status === 'blocked' && blockedBy && blockedBy !== myEmail) {
       return reply.code(403).send({ error: 'Not allowed' });
     }
+    const hasBlocked = participants
+      .filter((e) => e && e !== myEmail)
+      .some((e) => isBlockedForViewer(e, viewerBlocks));
+    if (!convo?.is_group && hasBlocked) {
+      return reply.code(404).send({ error: 'Conversation not found' });
+    }
     if (status === 'pending' && requester && requester !== myEmail) {
       return reply.code(403).send({ error: 'Request pending. Accept to reply.' });
+    }
+    if (convo?.is_group && !canPostToGroup(convo, myEmail)) {
+      return reply.code(403).send({ error: 'Group chat is read-only for your account' });
     }
 
     const message = memoryAppendMessage(conversationId, myEmail, parsed.data.body);
@@ -5480,6 +7628,13 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
     if (!(convo.participant_emails || []).map((x) => String(x).toLowerCase()).includes(myEmail)) {
       return reply.code(403).send({ error: 'Not allowed' });
     }
+    const participants = Array.isArray(convo.participant_emails)
+      ? convo.participant_emails.map((x) => String(x).toLowerCase())
+      : [];
+    const other = participants.find((email) => email && email !== myEmail);
+    if (!convo?.is_group && other && isBlockedForViewer(other, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Conversation not found' });
+    }
 
     const status = String(convo?.request_status || 'accepted');
     const requester = normalizeEmail(convo?.requester_email);
@@ -5487,12 +7642,21 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
     if (status === 'blocked' && blockedBy && blockedBy !== myEmail) {
       return reply.code(403).send({ error: 'Not allowed' });
     }
+    const hasBlocked = participants
+      .filter((e) => e && e !== myEmail)
+      .some((e) => isBlockedForViewer(e, viewerBlocks));
+    if (!convo?.is_group && hasBlocked) {
+      return reply.code(404).send({ error: 'Conversation not found' });
+    }
     if (status === 'pending' && requester && requester !== myEmail) {
       return reply.code(403).send({ error: 'Request pending. Accept to reply.' });
     }
+    if (convo?.is_group && !canPostToGroup(convo, myEmail)) {
+      return reply.code(403).send({ error: 'Group chat is read-only for your account' });
+    }
 
     const id = randomUUID();
-    const cleanBody = cleanText(parsed.data.body);
+    const cleanBody = cleanText(parsed.data.body, MAX_TEXT_LENGTHS.messageCiphertext);
     const created = await pool.query(
       `INSERT INTO messages (id, conversation_id, sender_email, body, read_by)
        VALUES ($1, $2, $3, $4, $5)
@@ -5517,6 +7681,10 @@ fastify.get('/users/:email/follow', async (request, reply) => {
   const me = normalizeEmail(authedUser.email);
   if (!target) return reply.code(400).send({ error: 'Valid email is required' });
   if (!me) return reply.code(400).send({ error: 'User email is required' });
+  const viewerBlocks = await getUserBlockSets(me);
+  if (isBlockedForViewer(target, viewerBlocks)) {
+    return reply.code(404).send({ error: 'User not found' });
+  }
 
   const following = await doesUserFollow(me, target);
 
@@ -5561,6 +7729,10 @@ fastify.post('/users/:email/follow', async (request, reply) => {
   if (!target) return reply.code(400).send({ error: 'Valid email is required' });
   if (!me) return reply.code(400).send({ error: 'User email is required' });
   if (target === me) return reply.code(400).send({ error: 'Cannot follow yourself' });
+  const viewerBlocks = await getUserBlockSets(me);
+  if (isBlockedForViewer(target, viewerBlocks)) {
+    return reply.code(404).send({ error: 'User not found' });
+  }
 
   const schema = z.object({ following: z.boolean() });
   const parsed = schema.safeParse(request.body ?? {});
@@ -5621,13 +7793,23 @@ fastify.get('/me/following-users', async (request, reply) => {
   const myEmail = normalizeEmail(authedUser.email);
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
 
-  if (!hasDatabaseUrl) {
-    const set = memoryUserFollows.get(myEmail) || new Set();
-    const users = Array.from(set).map((email) => ({ email }));
-    return reply.send({ users });
-  }
-
   try {
+    if (!hasDatabaseUrl) {
+      const set = memoryUserFollows.get(myEmail) || new Set();
+      const emails = Array.from(set).map((e) => normalizeEmail(e)).filter(Boolean);
+      const lookup = await getPublicProfilesByEmail(emails);
+      const users = emails.map((email) => {
+        const profile = lookup.get(email) || null;
+        return {
+          email,
+          display_name: profile?.display_name ?? null,
+          username: profile?.username ?? null,
+          profile_photo_url: profile?.profile_photo_url ?? null,
+        };
+      });
+      return reply.send({ users });
+    }
+
     await ensureUserFollowsTable();
     const result = await pool.query(
       `SELECT following_email AS email
@@ -5637,7 +7819,20 @@ fastify.get('/me/following-users', async (request, reply) => {
        LIMIT 200`,
       [myEmail]
     );
-    return reply.send({ users: Array.isArray(result.rows) ? result.rows : [] });
+    const emails = Array.isArray(result.rows)
+      ? result.rows.map((r) => normalizeEmail(r?.email)).filter(Boolean)
+      : [];
+    const lookup = await getPublicProfilesByEmail(emails);
+    const users = emails.map((email) => {
+      const profile = lookup.get(email) || null;
+      return {
+        email,
+        display_name: profile?.display_name ?? null,
+        username: profile?.username ?? null,
+        profile_photo_url: profile?.profile_photo_url ?? null,
+      };
+    });
+    return reply.send({ users });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load following users');
     return reply.code(500).send({ error: 'Failed to load following users' });
@@ -5651,15 +7846,26 @@ fastify.get('/me/followers', async (request, reply) => {
   const myEmail = normalizeEmail(authedUser.email);
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
 
-  if (!hasDatabaseUrl) {
-    const followers = [];
-    for (const [follower, set] of memoryUserFollows.entries()) {
-      if (set && set.has(myEmail)) followers.push({ email: follower });
-    }
-    return reply.send({ users: followers });
-  }
-
   try {
+    if (!hasDatabaseUrl) {
+      const followers = [];
+      for (const [follower, set] of memoryUserFollows.entries()) {
+        if (set && set.has(myEmail)) followers.push(normalizeEmail(follower));
+      }
+      const emails = followers.filter(Boolean);
+      const lookup = await getPublicProfilesByEmail(emails);
+      const users = emails.map((email) => {
+        const profile = lookup.get(email) || null;
+        return {
+          email,
+          display_name: profile?.display_name ?? null,
+          username: profile?.username ?? null,
+          profile_photo_url: profile?.profile_photo_url ?? null,
+        };
+      });
+      return reply.send({ users });
+    }
+
     await ensureUserFollowsTable();
     const result = await pool.query(
       `SELECT follower_email AS email
@@ -5669,10 +7875,659 @@ fastify.get('/me/followers', async (request, reply) => {
        LIMIT 200`,
       [myEmail]
     );
-    return reply.send({ users: Array.isArray(result.rows) ? result.rows : [] });
+    const emails = Array.isArray(result.rows)
+      ? result.rows.map((r) => normalizeEmail(r?.email)).filter(Boolean)
+      : [];
+    const lookup = await getPublicProfilesByEmail(emails);
+    const users = emails.map((email) => {
+      const profile = lookup.get(email) || null;
+      return {
+        email,
+        display_name: profile?.display_name ?? null,
+        username: profile?.username ?? null,
+        profile_photo_url: profile?.profile_photo_url ?? null,
+      };
+    });
+    return reply.send({ users });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load followers');
     return reply.code(500).send({ error: 'Failed to load followers' });
+  }
+});
+
+// FIX: add authenticated user lookup/search for DM compose by display name.
+fastify.get('/users/search', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const viewerBlocks = await getUserBlockSets(authedUser.email);
+  const query = request.query?.query ? String(request.query.query).trim() : '';
+  if (!query) return reply.send({ users: [] });
+
+  const limitRaw = request.query?.limit;
+  const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.min(25, Number(limitRaw))) : 10;
+
+  if (!hasDatabaseUrl) return reply.send({ users: [] });
+
+  try {
+    await ensureUserProfilesTable();
+    const like = `%${query}%`;
+    const res = await pool.query(
+      `SELECT user_email, display_name, username, profile_photo_url, location
+       FROM user_profiles
+       WHERE display_name ILIKE $1 OR username ILIKE $1 OR user_email ILIKE $1
+       ORDER BY display_name NULLS LAST
+       LIMIT $2`,
+      [like, limit]
+    );
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const users = rows
+      .map((r) => sanitizeUserProfileRecord(r))
+      .map((r) => ({
+        email: r?.user_email ?? null,
+        display_name: r?.display_name ?? null,
+        username: r?.username ?? null,
+        profile_photo_url: r?.profile_photo_url ?? null,
+        location: r?.location ?? null,
+      }))
+      .filter((r) => r.email && !isBlockedForViewer(r.email, viewerBlocks));
+    return reply.send({ users });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to search users');
+    return reply.code(500).send({ error: 'Failed to search users' });
+  }
+});
+
+fastify.post('/users/lookup', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const viewerBlocks = await getUserBlockSets(authedUser.email);
+  const schema = z.object({ emails: z.array(z.string().email()).max(50) });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  if (!hasDatabaseUrl) return reply.send({ users: [] });
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query(
+      `SELECT user_email, display_name, username, profile_photo_url, location
+       FROM user_profiles
+       WHERE user_email = ANY($1)`,
+      [parsed.data.emails.map((e) => String(e).trim().toLowerCase())]
+    );
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const users = rows
+      .map((r) => sanitizeUserProfileRecord(r))
+      .map((r) => ({
+        email: r?.user_email ?? null,
+        display_name: r?.display_name ?? null,
+        username: r?.username ?? null,
+        profile_photo_url: r?.profile_photo_url ?? null,
+        location: r?.location ?? null,
+      }))
+      .filter((r) => r.email && !isBlockedForViewer(r.email, viewerBlocks));
+    return reply.send({ users });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to lookup users');
+    return reply.code(500).send({ error: 'Failed to lookup users' });
+  }
+});
+
+// Public movement search (safe fields only, no emails).
+fastify.get('/search/movements', { config: { rateLimit: RATE_LIMITS.search } }, async (request, reply) => {
+  try {
+    const q = cleanText(request.query?.q, 160);
+    const city = cleanText(request.query?.city, MAX_TEXT_LENGTHS.locationLabel);
+    const country = cleanText(request.query?.country, MAX_TEXT_LENGTHS.locationLabel);
+    const viewerEmail = await getOptionalAuthedEmail(request);
+    const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
+    const limitRaw = request.query?.limit;
+    const offsetRaw = request.query?.offset;
+    const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.min(50, Number(limitRaw))) : 20;
+    const offset = Number.isFinite(Number(offsetRaw)) ? Math.max(0, Number(offsetRaw)) : 0;
+
+    function stripHtml(text) {
+      return String(text || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function buildSummary(record) {
+      const existing = record?.summary != null ? String(record.summary).trim() : '';
+      if (existing) return existing;
+      const source = record?.description || record?.description_html || '';
+      const plain = stripHtml(source);
+      if (!plain) return '';
+      return plain.length > 200 ? `${plain.slice(0, 200)}…` : plain;
+    }
+
+    function safeMovement(record) {
+      const authorEmail = normalizeEmail(record?.author_email || record?.creator_email || '');
+      const creatorIsAdmin = authorEmail ? getStaffRoleForEmail(authorEmail) === 'admin' : false;
+      return {
+        id: record?.id ?? null,
+        title: record?.title ?? record?.name ?? null,
+        summary: buildSummary(record),
+        tags: normalizeTags(record?.tags ?? record?.tag_list ?? record?.categories),
+        location_city: record?.location_city ?? record?.city ?? null,
+        location_region: record?.location_region ?? record?.region ?? null,
+        location_country: record?.location_country ?? record?.country ?? null,
+        created_at: record?.created_at ?? record?.created_date ?? null,
+        momentum_score: record?.momentum_score ?? record?.score ?? null,
+        verified_participants: record?.verified_participants ?? null,
+        creator_display_name: record?.creator_display_name ?? record?.author_display_name ?? null,
+        creator_username: record?.creator_username ?? record?.author_username ?? null,
+        creator_profile_photo_url: record?.creator_profile_photo_url ?? null,
+        creator_is_admin: creatorIsAdmin,
+      };
+    }
+
+    const qLower = q.toLowerCase();
+    const cityLower = city.toLowerCase();
+    const countryLower = country.toLowerCase();
+
+    const applyFilters = (record) => {
+      if (qLower) {
+        const title = String(record?.title || record?.name || '').toLowerCase();
+        const summary = buildSummary(record).toLowerCase();
+        const desc = stripHtml(record?.description || record?.description_html || '').toLowerCase();
+        const tags = normalizeTags(record?.tags ?? record?.tag_list ?? record?.categories).join(' ').toLowerCase();
+        const hay = `${title} ${summary} ${desc} ${tags}`;
+        if (!hay.includes(qLower)) return false;
+      }
+      if (cityLower) {
+        const recordCity = String(record?.location_city || record?.city || '').toLowerCase();
+        if (!recordCity.includes(cityLower)) return false;
+      }
+      if (countryLower) {
+        const recordCountry = String(record?.location_country || record?.country || '').toLowerCase();
+        if (!recordCountry.includes(countryLower)) return false;
+      }
+      return true;
+    };
+
+    const scoreRecord = (record) => {
+      const title = String(record?.title || record?.name || '').toLowerCase();
+      const summary = buildSummary(record).toLowerCase();
+      const desc = stripHtml(record?.description || record?.description_html || '').toLowerCase();
+      const tags = normalizeTags(record?.tags ?? record?.tag_list ?? record?.categories).join(' ').toLowerCase();
+      const hay = `${title} ${summary} ${desc} ${tags}`;
+      let score = 0;
+      if (qLower) {
+        if (title.includes(qLower)) score += 3;
+        if (summary.includes(qLower)) score += 2;
+        if (desc.includes(qLower)) score += 1;
+        if (tags.includes(qLower)) score += 1;
+        const words = qLower.split(/\s+/).filter(Boolean);
+        score += words.reduce((acc, w) => acc + (hay.includes(w) ? 1 : 0), 0);
+      }
+      const momentum = Number(record?.momentum_score ?? record?.score ?? 0);
+      if (Number.isFinite(momentum)) score += momentum * 0.01;
+      return score;
+    };
+
+    const canViewMovement = (movement) => {
+      if (!viewerBlocks) return true;
+      const authorEmail = normalizeEmail(movement?.author_email || movement?.creator_email || '');
+      return !isBlockedForViewer(authorEmail, viewerBlocks);
+    };
+
+    if (!hasDatabaseUrl) {
+      const filtered = memoryMovements.filter(applyFilters).filter(canViewMovement);
+      const scored = filtered
+        .map((m) => ({ record: m, score: scoreRecord(m) }))
+        .sort((a, b) => b.score - a.score);
+      const page = scored.slice(offset, offset + limit).map((s) => s.record);
+      const enriched = await attachCreatorProfilesToMovements(page);
+      return reply.send({ ok: true, movements: enriched.map(safeMovement) });
+    }
+
+    const values = [];
+    const where = [];
+    let qParamIndex = null;
+    if (qLower) {
+      qParamIndex = values.push(`%${q}%`);
+      where.push(
+        `(m.title ILIKE $${qParamIndex} OR m.summary ILIKE $${qParamIndex} OR m.description ILIKE $${qParamIndex} OR m.tags::text ILIKE $${qParamIndex})`
+      );
+    }
+    if (cityLower) {
+      const idx = values.push(`%${city}%`);
+      where.push(`(COALESCE(m.location_city, m.city) ILIKE $${idx})`);
+    }
+    if (countryLower) {
+      const idx = values.push(`%${country}%`);
+      where.push(`(COALESCE(m.location_country, m.country) ILIKE $${idx})`);
+    }
+
+    const relevance =
+      qParamIndex != null
+        ? `(
+            (CASE WHEN m.title ILIKE $${qParamIndex} THEN 3 ELSE 0 END) +
+            (CASE WHEN m.summary ILIKE $${qParamIndex} THEN 2 ELSE 0 END) +
+            (CASE WHEN m.description ILIKE $${qParamIndex} THEN 1 ELSE 0 END) +
+            (CASE WHEN m.tags::text ILIKE $${qParamIndex} THEN 1 ELSE 0 END)
+          )`
+        : '0';
+
+    const limitIdx = values.push(limit);
+    const offsetIdx = values.push(offset);
+    const sql =
+      `SELECT m.*
+       FROM movements m` +
+      (where.length ? ` WHERE ${where.join(' AND ')}` : '') +
+      ` ORDER BY ${relevance} DESC, COALESCE(m.momentum_score, 0) DESC, m.created_at DESC
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
+
+    const res = await pool.query(sql, values);
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const enriched = await attachCreatorProfilesToMovements(rows);
+    const visible = enriched.filter(canViewMovement);
+    return reply.send({ ok: true, movements: visible.map(safeMovement) });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Movement search failed');
+    return reply.code(500).send({ ok: false, error: 'Search failed' });
+  }
+});
+
+// Authenticated user search (safe fields only, no emails).
+fastify.get('/search/users', { config: { rateLimit: RATE_LIMITS.search } }, async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  try {
+    const viewerBlocks = await getUserBlockSets(authedUser.email);
+    const q = cleanText(request.query?.q, 120);
+    const limitRaw = request.query?.limit;
+    const offsetRaw = request.query?.offset;
+    const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.min(50, Number(limitRaw))) : 20;
+    const offset = Number.isFinite(Number(offsetRaw)) ? Math.max(0, Number(offsetRaw)) : 0;
+
+    if (!q) return reply.send({ ok: true, users: [] });
+
+    const qLower = q.toLowerCase();
+
+    const toSafeProfile = (profile) => {
+      const email = normalizeEmail(profile?.user_email || profile?.email || '');
+      const isAdmin = email ? getStaffRoleForEmail(email) === 'admin' : false;
+      if (isBlockedForViewer(email, viewerBlocks)) return null;
+      return {
+        display_name: profile?.display_name ?? null,
+        username: profile?.username ?? null,
+        profile_photo_url: profile?.profile_photo_url ?? null,
+        location: profile?.location ? sanitizeProfileLocation(profile.location) : null,
+        is_admin: isAdmin,
+      };
+    };
+
+    if (!hasDatabaseUrl) {
+      const matches = [];
+      for (const profile of memoryUserProfiles.values()) {
+        const display = String(profile?.display_name || '').toLowerCase();
+        const username = String(profile?.username || '').toLowerCase();
+        if (display.includes(qLower) || username.includes(qLower)) {
+          matches.push(toSafeProfile(profile));
+        }
+      }
+      const filtered = matches.filter(Boolean);
+      return reply.send({ ok: true, users: filtered.slice(offset, offset + limit) });
+    }
+
+    await ensureUserProfilesTable();
+    const like = `%${q}%`;
+    const res = await pool.query(
+      `SELECT user_email, display_name, username, profile_photo_url, location
+       FROM user_profiles
+       WHERE display_name ILIKE $1 OR username ILIKE $1
+       ORDER BY display_name NULLS LAST
+       LIMIT $2 OFFSET $3`,
+      [like, limit, offset]
+    );
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const mapped = rows.map(toSafeProfile).filter(Boolean);
+    return reply.send({ ok: true, users: mapped });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'User search failed');
+    return reply.code(500).send({ ok: false, error: 'Search failed' });
+  }
+});
+
+// Update or create the current user's profile with username uniqueness enforced.
+async function handleGetMyProfile(request, reply) {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+  const includeMetaRaw = String(request.query?.include_meta || '').trim().toLowerCase();
+  const includeMeta = includeMetaRaw === '1' || includeMetaRaw === 'true' || includeMetaRaw === 'yes';
+  const staffRole = getStaffRoleForUser(authedUser) || 'user';
+  const meta = { staff_role: staffRole };
+
+  if (!hasDatabaseUrl) {
+    const existing = memoryUserProfiles.get(email) || null;
+    if (existing) {
+      const payload = { profile: sanitizeUserProfileRecord(existing) };
+      return reply.send(includeMeta ? { ...payload, meta } : payload);
+    }
+    const fallback = {
+      id: randomUUID(),
+      user_email: email,
+      display_name:
+        String(
+          authedUser?.user_metadata?.full_name ||
+            authedUser?.user_metadata?.name ||
+            authedUser?.user_metadata?.username ||
+            ''
+        ).trim() || null,
+      username: normalizeUsername(String(email).split('@')[0] || '') || null,
+      bio: null,
+      profile_photo_url: null,
+      banner_url: null,
+      location: null,
+      catchment_radius_km: null,
+      skills: null,
+      ai_features_enabled: false,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    memoryUserProfiles.set(email, fallback);
+    const payload = { profile: sanitizeUserProfileRecord(fallback) };
+    return reply.send(includeMeta ? { ...payload, meta } : payload);
+  }
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+    const profile = sanitizeUserProfileRecord(res.rows?.[0] || null);
+    const payload = { profile };
+    return reply.send(includeMeta ? { ...payload, meta } : payload);
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to load user profile');
+    return reply.code(500).send({ error: 'Failed to load profile' });
+  }
+}
+
+async function handlePostMyProfile(request, reply) {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const schema = z.object({
+    display_name: z.string().max(MAX_TEXT_LENGTHS.profileDisplayName).optional().nullable(),
+    username: z.string().max(MAX_TEXT_LENGTHS.profileUsername).optional().nullable(),
+    bio: z.string().max(MAX_TEXT_LENGTHS.profileBio).optional().nullable(),
+    profile_photo_url: z.string().max(MAX_TEXT_LENGTHS.profilePhotoUrl).optional().nullable(),
+    banner_url: z.string().max(MAX_TEXT_LENGTHS.profileBannerUrl).optional().nullable(),
+    location: z.record(z.any()).optional().nullable(),
+    catchment_radius_km: z.number().int().min(1).max(1000).optional().nullable(),
+    skills: z.array(z.string().max(MAX_TEXT_LENGTHS.profileSkill)).max(50).optional().nullable(),
+    ai_features_enabled: z.boolean().optional(),
+  });
+
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'Invalid profile payload' });
+  }
+
+  const normalizedUsername = normalizeUsername(parsed.data.username);
+  if (normalizedUsername && !isValidUsername(normalizedUsername)) {
+    return reply.code(400).send({ error: 'Invalid username format' });
+  }
+
+  const buildNextProfile = (existing) => ({
+    display_name: parsed.data.display_name != null ? cleanText(parsed.data.display_name, MAX_TEXT_LENGTHS.profileDisplayName) : existing?.display_name ?? null,
+    username: normalizedUsername ?? existing?.username ?? null,
+    bio: parsed.data.bio != null ? cleanText(parsed.data.bio, MAX_TEXT_LENGTHS.profileBio) : existing?.bio ?? null,
+    profile_photo_url: parsed.data.profile_photo_url != null ? String(parsed.data.profile_photo_url).trim() || null : existing?.profile_photo_url ?? null,
+    banner_url: parsed.data.banner_url != null ? String(parsed.data.banner_url).trim() || null : existing?.banner_url ?? null,
+    location: parsed.data.location != null ? sanitizeProfileLocation(parsed.data.location) : existing?.location ?? null,
+    catchment_radius_km: parsed.data.catchment_radius_km != null ? Number(parsed.data.catchment_radius_km) : existing?.catchment_radius_km ?? null,
+    skills: parsed.data.skills != null ? parsed.data.skills.map((s) => cleanText(s, MAX_TEXT_LENGTHS.profileSkill)).filter(Boolean) : existing?.skills ?? null,
+    ai_features_enabled: parsed.data.ai_features_enabled != null ? !!parsed.data.ai_features_enabled : existing?.ai_features_enabled ?? false,
+  });
+
+  if (!hasDatabaseUrl) {
+    const now = nowIso();
+    if (normalizedUsername) {
+      for (const [otherEmail, profile] of memoryUserProfiles.entries()) {
+        if (normalizeEmail(otherEmail) === email) continue;
+        const otherUsername = normalizeUsername(profile?.username);
+        if (otherUsername && otherUsername === normalizedUsername) {
+          return reply.code(409).send({ error: 'USERNAME_TAKEN', message: 'That username is already taken.' });
+        }
+      }
+    }
+    const existing = memoryUserProfiles.get(email) || {
+      id: randomUUID(),
+      user_email: email,
+      created_at: now,
+      updated_at: now,
+    };
+    const next = buildNextProfile(existing);
+    const merged = {
+      ...existing,
+      ...next,
+      updated_at: now,
+      created_at: existing.created_at || now,
+    };
+    memoryUserProfiles.set(email, merged);
+    return reply.send({ profile: sanitizeUserProfileRecord(merged) });
+  }
+
+  try {
+    await ensureUserProfilesTable();
+
+    if (normalizedUsername) {
+      const dup = await pool.query(
+        'SELECT user_email FROM user_profiles WHERE LOWER(username) = LOWER($1) AND user_email != $2 LIMIT 1',
+        [normalizedUsername, email]
+      );
+      if (dup.rows?.length) {
+        return reply.code(409).send({ error: 'USERNAME_TAKEN', message: 'That username is already taken.' });
+      }
+    }
+
+    const existingRes = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+    const existing = existingRes.rows?.[0] || null;
+
+    const next = buildNextProfile(existing);
+
+    const now = nowIso();
+    if (existing?.id) {
+      await pool.query(
+        `UPDATE user_profiles
+         SET display_name = $2,
+             username = $3,
+             bio = $4,
+             profile_photo_url = $5,
+             banner_url = $6,
+             location = $7,
+             catchment_radius_km = $8,
+             skills = $9,
+             ai_features_enabled = $10,
+             updated_at = $11
+         WHERE user_email = $1`,
+        [
+          email,
+          next.display_name,
+          next.username,
+          next.bio,
+          next.profile_photo_url,
+          next.banner_url,
+          next.location,
+          next.catchment_radius_km,
+          next.skills,
+          next.ai_features_enabled,
+          now,
+        ]
+      );
+    } else {
+      const id = randomUUID();
+      await pool.query(
+        `INSERT INTO user_profiles
+         (id, user_email, display_name, username, bio, profile_photo_url, banner_url, location, catchment_radius_km, skills, ai_features_enabled, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)`,
+        [
+          id,
+          email,
+          next.display_name,
+          next.username,
+          next.bio,
+          next.profile_photo_url,
+          next.banner_url,
+          next.location,
+          next.catchment_radius_km,
+          next.skills,
+          next.ai_features_enabled,
+          now,
+        ]
+      );
+    }
+
+    const updatedRes = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+    const updated = sanitizeUserProfileRecord(updatedRes.rows?.[0] || null);
+    return reply.send({ profile: updated });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to upsert user profile');
+    return reply.code(500).send({ error: 'Failed to update profile' });
+  }
+}
+
+fastify.get('/me/profile', handleGetMyProfile);
+fastify.get('/api/me/profile', handleGetMyProfile);
+fastify.post('/me/profile', handlePostMyProfile);
+fastify.post('/api/me/profile', handlePostMyProfile);
+
+// User block list (privacy safety)
+fastify.get('/me/blocks', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const { blocked } = await getUserBlockSets(email);
+  const blockedList = Array.from(blocked);
+  const lookup = await getPublicProfilesByEmail(blockedList);
+  const items = blockedList.map((blockedEmail) => {
+    const profile = lookup.get(blockedEmail);
+    return {
+      email: blockedEmail,
+      display_name: profile?.display_name ?? null,
+      username: profile?.username ?? null,
+      profile_photo_url: profile?.profile_photo_url ?? null,
+    };
+  });
+  return reply.send({ blocked: items });
+});
+
+fastify.post('/me/blocks', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const schema = z.object({ blocked_email: z.string().email() });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const blockerEmail = normalizeEmail(authedUser.email);
+  const blockedEmail = normalizeEmail(parsed.data.blocked_email);
+  if (!blockerEmail || !blockedEmail) return reply.code(400).send({ error: 'Invalid emails' });
+  if (blockerEmail === blockedEmail) return reply.code(400).send({ error: 'Cannot block yourself' });
+
+  if (!hasDatabaseUrl) {
+    const list = memoryUserBlocks.get(blockerEmail) || new Set();
+    list.add(blockedEmail);
+    memoryUserBlocks.set(blockerEmail, list);
+    return reply.code(201).send({ ok: true });
+  }
+
+  try {
+    await ensureUserBlocksTable();
+    await pool.query(
+      'INSERT INTO user_blocks (blocker_email, blocked_email) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [blockerEmail, blockedEmail]
+    );
+    return reply.code(201).send({ ok: true });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to create user block');
+    return reply.code(500).send({ error: 'Failed to block user' });
+  }
+});
+
+fastify.delete('/me/blocks/:email', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const blockerEmail = normalizeEmail(authedUser.email);
+  if (!blockerEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  const raw = request.params?.email ? String(request.params.email) : '';
+  const blockedEmail = normalizeEmail(raw);
+  if (!blockedEmail) return reply.code(400).send({ error: 'Valid email is required' });
+
+  if (!hasDatabaseUrl) {
+    const list = memoryUserBlocks.get(blockerEmail) || new Set();
+    list.delete(blockedEmail);
+    memoryUserBlocks.set(blockerEmail, list);
+    return reply.send({ ok: true });
+  }
+
+  try {
+    await ensureUserBlocksTable();
+    await pool.query('DELETE FROM user_blocks WHERE blocker_email = $1 AND blocked_email = $2', [
+      blockerEmail,
+      blockedEmail,
+    ]);
+    return reply.send({ ok: true });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to remove user block');
+    return reply.code(500).send({ error: 'Failed to unblock user' });
+  }
+});
+
+// Public-ish profile lookup by username (auth required).
+fastify.get('/profiles/username/:username', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const rawUsername = request.params?.username ? String(request.params.username) : '';
+  const username = normalizeUsername(rawUsername);
+  if (!username) return reply.code(400).send({ error: 'Username is required' });
+  const viewerEmail = normalizeEmail(authedUser.email);
+  const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
+
+  if (!hasDatabaseUrl) {
+    const entry = Array.from(memoryUserProfiles.values()).find(
+      (p) => normalizeUsername(p?.username) === username
+    );
+    if (!entry) return reply.code(404).send({ error: 'Profile not found' });
+    if (viewerBlocks && isBlockedForViewer(entry?.user_email, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Profile not found' });
+    }
+    return reply.send({ profile: sanitizeUserProfileRecord(entry) });
+  }
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query(
+      'SELECT * FROM user_profiles WHERE LOWER(username) = LOWER($1) LIMIT 1',
+      [username]
+    );
+    const profile = sanitizeUserProfileRecord(res.rows?.[0] || null);
+    if (!profile) return reply.code(404).send({ error: 'Profile not found' });
+    if (viewerBlocks && isBlockedForViewer(profile?.user_email, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Profile not found' });
+    }
+    return reply.send({ profile });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to load profile by username');
+    return reply.code(500).send({ error: 'Failed to load profile' });
   }
 });
 
@@ -5888,66 +8743,6 @@ fastify.patch('/collaborators/:id', async (request, reply) => {
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
   const staffRole = getStaffRoleForEmail(email);
-  // Trust check: block low-trust from promoting to admin
-  let trustScore = await getUserTrustScore(email);
-  if (parsed.data.role === 'admin' && trustScore < TRUST_SCORE_THRESHOLD && staffRole !== 'admin') {
-    await logCollaboratorAction({
-      movement_id: existing?.movement_id,
-      actor_user_id: authedUser.id,
-      action_type: 'blocked_action',
-      target_id: collabId,
-      metadata: { reason: 'low_trust_promote_to_admin', trustScore, attemptedRole: parsed.data.role }
-    });
-    return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
-  }
-  // Trust check: block low-trust from deleting movements
-  trustScore = await getUserTrustScore(email);
-  if (trustScore < TRUST_SCORE_THRESHOLD && staffRole !== 'admin' && !isOwner) {
-    await logCollaboratorAction({
-      movement_id: id,
-      actor_user_id: authedUser.id,
-      action_type: 'blocked_action',
-      target_id: id,
-      metadata: { reason: 'low_trust_delete_movement', trustScore }
-    });
-    return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
-  }
-  // Trust check: block low-trust from deleting resources (could extend to bulk deletes)
-  trustScore = await getUserTrustScore(email);
-  if (trustScore < TRUST_SCORE_THRESHOLD && staffRole !== 'admin' && !isOwner) {
-    await logCollaboratorAction({
-      movement_id: resource?.movement_id,
-      actor_user_id: authedUser.id,
-      action_type: 'blocked_action',
-      target_id: id,
-      metadata: { reason: 'low_trust_delete_resource', trustScore }
-    });
-    return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
-  }
-  // Log movement edits by collaborators
-  await logCollaboratorAction({
-    movement_id: id,
-    actor_user_id: authedUser.id,
-    action_type: 'edit_movement',
-    target_id: id,
-    metadata: { fields: Object.keys(request.body || {}) }
-  });
-  // Log role changes
-  await logCollaboratorAction({
-    movement_id: existing?.movement_id,
-    actor_user_id: authedUser.id,
-    action_type: 'change_role',
-    target_id: collabId,
-    metadata: { newRole: parsed.data.role }
-  });
-  // Log resource deletes
-  await logCollaboratorAction({
-    movement_id: resource?.movement_id,
-    actor_user_id: authedUser.id,
-    action_type: 'delete_resource',
-    target_id: id,
-    metadata: null
-  });
 
   if (!hasDatabaseUrl) {
     const existing = memoryFindCollaboratorById(collabId);
@@ -5955,8 +8750,26 @@ fastify.patch('/collaborators/:id', async (request, reply) => {
     const ownerEmail = await getMovementOwnerEmail(existing.movement_id);
     const isOwner = ownerEmail && ownerEmail === email;
     if (!isOwner && staffRole !== 'admin') return reply.code(403).send({ error: 'Not allowed' });
+    const trustScore = await getUserTrustScore(email);
+    if (parsed.data.role === 'admin' && trustScore < TRUST_SCORE_THRESHOLD && staffRole !== 'admin') {
+      await logCollaboratorAction({
+        movement_id: existing.movement_id,
+        actor_user_id: authedUser.id || authedUser.email,
+        action_type: 'blocked_action',
+        target_id: collabId,
+        metadata: { reason: 'low_trust_promote_to_admin', trustScore, attemptedRole: parsed.data.role }
+      });
+      return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
+    }
     const updated = { ...existing, role: parsed.data.role };
     memoryUpsertCollaborator(existing.movement_id, updated);
+    await logCollaboratorAction({
+      movement_id: existing.movement_id,
+      actor_user_id: authedUser.id || authedUser.email,
+      action_type: 'change_role',
+      target_id: collabId,
+      metadata: { newRole: parsed.data.role }
+    });
     return reply.send({ collaborator: updated });
   }
 
@@ -5969,6 +8782,17 @@ fastify.patch('/collaborators/:id', async (request, reply) => {
     const ownerEmail = await getMovementOwnerEmail(existing.movement_id);
     const isOwner = ownerEmail && ownerEmail === email;
     if (!isOwner && staffRole !== 'admin') return reply.code(403).send({ error: 'Not allowed' });
+    const trustScore = await getUserTrustScore(email);
+    if (parsed.data.role === 'admin' && trustScore < TRUST_SCORE_THRESHOLD && staffRole !== 'admin') {
+      await logCollaboratorAction({
+        movement_id: existing.movement_id,
+        actor_user_id: authedUser.id || authedUser.email,
+        action_type: 'blocked_action',
+        target_id: collabId,
+        metadata: { reason: 'low_trust_promote_to_admin', trustScore, attemptedRole: parsed.data.role }
+      });
+      return reply.code(403).send({ error: 'This action requires a higher trust level or owner approval.' });
+    }
 
     const res = await pool.query(
       `UPDATE collaborators
@@ -5977,6 +8801,13 @@ fastify.patch('/collaborators/:id', async (request, reply) => {
        RETURNING id, movement_id, user_email, role, status, invited_by, created_date, accepted_date`,
       [String(collabId), parsed.data.role]
     );
+    await logCollaboratorAction({
+      movement_id: existing.movement_id,
+      actor_user_id: authedUser.id || authedUser.email,
+      action_type: 'change_role',
+      target_id: collabId,
+      metadata: { newRole: parsed.data.role }
+    });
     return reply.send({ collaborator: res.rows?.[0] || null });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to update collaborator');
@@ -6344,8 +9175,14 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
 
   const emoji = String(parsed.data.emoji || '').trim();
   if (!emoji) return reply.code(400).send({ error: 'Emoji is required' });
+  const viewerBlocks = await getUserBlockSets(myEmail);
 
   if (!hasDatabaseUrl) {
+    const message = memoryFindMessageById(messageId);
+    if (!message) return reply.code(404).send({ error: 'Message not found' });
+    if (isBlockedForViewer(message?.sender_email, viewerBlocks)) {
+      return reply.code(403).send({ error: 'Not allowed' });
+    }
     const updated = memoryToggleMessageReaction(messageId, myEmail, emoji);
     if (!updated) return reply.code(404).send({ error: 'Message not found' });
     return reply.send(updated);
@@ -6374,6 +9211,9 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
     if (status === 'blocked' && blockedBy && blockedBy !== myEmail) {
       return reply.code(403).send({ error: 'Not allowed' });
     }
+    if (isBlockedForViewer(row?.sender_email, viewerBlocks)) {
+      return reply.code(403).send({ error: 'Not allowed' });
+    }
 
     const current = row.reactions && typeof row.reactions === 'object' ? row.reactions : {};
     const prev = Array.isArray(current[emoji]) ? current[emoji].map((x) => normalizeEmail(x)).filter(Boolean) : [];
@@ -6396,6 +9236,7 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
 
 const start = async () => {
   try {
+    await checkDatabaseConnection();
     if (hasDatabaseUrl) {
       try {
         await ensureVotesTable();
@@ -6413,6 +9254,12 @@ const start = async () => {
         await ensureMessagesTables();
       } catch (e) {
         fastify.log.warn({ err: e }, 'Failed to ensure messages tables at startup');
+      }
+
+      try {
+        await ensureUserBlocksTable();
+      } catch (e) {
+        fastify.log.warn({ err: e }, 'Failed to ensure user blocks table at startup');
       }
 
       try {

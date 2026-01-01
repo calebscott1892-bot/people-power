@@ -4,19 +4,23 @@ import { X, Upload, Loader2, CheckCircle } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { integrations } from "@/api/appClient";
 import { focusFirstInteractive, trapFocusKeyDown } from '@/components/utils/focusTrap';
+import { useAuth } from '@/auth/AuthProvider';
+import { uploadFile } from '@/api/uploadsClient';
+import { ALLOWED_IMAGE_WITH_GIF_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 
 export default function CompletionModal({ challenge, onClose, onComplete }) {
-  const [evidenceType, setEvidenceType] = useState('none');
+  const { session } = useAuth();
+  const accessToken = session?.access_token ? String(session.access_token) : null;
   const [evidenceText, setEvidenceText] = useState('');
   const [evidenceImage, setEvidenceImage] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const reduceMotion = useReducedMotion();
   const dialogRef = useRef(null);
-  const MAX_UPLOAD_MB = 5;
-  const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif'];
+  const hasText = evidenceText.trim().length > 0;
+  const hasImage = !!evidenceImage;
+  const canSubmit = hasText || hasImage;
 
   useEffect(() => {
     const root = dialogRef.current;
@@ -24,36 +28,58 @@ export default function CompletionModal({ challenge, onClose, onComplete }) {
     focusFirstInteractive(root);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (imagePreview) URL.revokeObjectURL(imagePreview);
+    };
+  }, [imagePreview]);
+
   const handleImageUpload = (e) => {
     const file = e.target.files[0];
     if (file) {
-      if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-        toast.error(`File too large. Max size is ${MAX_UPLOAD_MB}MB.`);
-        return;
-      }
-      if (file.type && !ALLOWED_MIME_TYPES.includes(file.type)) {
-        toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF).');
+      const validationError = validateFileUpload({
+        file,
+        maxBytes: MAX_UPLOAD_BYTES,
+        allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+      });
+      if (validationError) {
+        toast.error(validationError);
         return;
       }
       setEvidenceImage(file);
       setImagePreview(URL.createObjectURL(file));
-      setEvidenceType('image');
     }
   };
 
   const handleSubmit = async () => {
+    if (!hasText && !hasImage) {
+      toast.error('Add a description and/or a photo to complete this challenge.');
+      return;
+    }
+
     setIsSubmitting(true);
     
     try {
       let imageUrl = null;
       if (evidenceImage) {
-        const upload = await integrations.Core.UploadFile({ file: evidenceImage });
-        imageUrl = upload.file_url;
+        if (!accessToken) {
+          toast.error('Please sign in to upload evidence');
+          setIsSubmitting(false);
+          return;
+        }
+        const upload = await uploadFile(evidenceImage, {
+          accessToken,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+        });
+        imageUrl = upload?.url || null;
       }
 
+      const derivedEvidenceType = hasText && hasImage ? 'text_image' : hasText ? 'text' : 'image';
+
       await onComplete({
-        evidence_type: evidenceType,
-        evidence_text: evidenceText || null,
+        evidence_type: derivedEvidenceType,
+        evidence_text: hasText ? evidenceText.trim() : null,
         evidence_image_url: imageUrl
       });
 
@@ -116,91 +142,54 @@ export default function CompletionModal({ challenge, onClose, onComplete }) {
           <div className="space-y-6 mb-8">
             <div>
               <label className="block text-sm font-black text-slate-900 uppercase tracking-wider mb-3">
-                Add Evidence (Optional)
+                Add Evidence
               </label>
-              <div className="grid grid-cols-3 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setEvidenceType('none')}
-                  aria-pressed={evidenceType === 'none'}
-                  className={`p-4 rounded-xl border-2 font-bold text-center transition-all ${
-                    evidenceType === 'none'
-                      ? 'border-[#3A3DFF] bg-indigo-50 text-[#3A3DFF]'
-                      : 'border-slate-300 text-slate-600 hover:border-slate-400'
-                  }`}
-                >
-                  None
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEvidenceType('text')}
-                  aria-pressed={evidenceType === 'text'}
-                  className={`p-4 rounded-xl border-2 font-bold text-center transition-all ${
-                    evidenceType === 'text'
-                      ? 'border-[#3A3DFF] bg-indigo-50 text-[#3A3DFF]'
-                      : 'border-slate-300 text-slate-600 hover:border-slate-400'
-                  }`}
-                >
-                  Description
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEvidenceType('image')}
-                  aria-pressed={evidenceType === 'image'}
-                  className={`p-4 rounded-xl border-2 font-bold text-center transition-all ${
-                    evidenceType === 'image'
-                      ? 'border-[#3A3DFF] bg-indigo-50 text-[#3A3DFF]'
-                      : 'border-slate-300 text-slate-600 hover:border-slate-400'
-                  }`}
-                >
-                  Photo
-                </button>
-              </div>
+              <p className="text-sm font-semibold text-slate-600">
+                You can add a description, a photo, or both (at least one required).
+              </p>
             </div>
 
             {/* Text Evidence */}
-            {evidenceType === 'text' && (
-              <motion.div
-                initial={reduceMotion ? { opacity: 1, height: 'auto' } : { opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                transition={{ duration: reduceMotion ? 0 : undefined }}
-              >
-                <Textarea
-                  value={evidenceText}
-                  onChange={(e) => setEvidenceText(e.target.value)}
-                  placeholder="Describe what you did..."
-                  className="min-h-[120px] rounded-2xl border-3 border-slate-300 focus:border-[#3A3DFF]"
-                />
-              </motion.div>
-            )}
+            <motion.div
+              initial={reduceMotion ? { opacity: 1, height: 'auto' } : { opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              transition={{ duration: reduceMotion ? 0 : undefined }}
+            >
+              <Textarea
+                value={evidenceText}
+                onChange={(e) => setEvidenceText(e.target.value)}
+                placeholder="Describe what you did..."
+                className="min-h-[120px] rounded-2xl border-3 border-slate-300 focus:border-[#3A3DFF]"
+              />
+            </motion.div>
 
             {/* Image Evidence */}
-            {evidenceType === 'image' && (
-              <motion.div
-                initial={reduceMotion ? { opacity: 1, height: 'auto' } : { opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                transition={{ duration: reduceMotion ? 0 : undefined }}
-                className="space-y-4"
-              >
-                <div className="border-3 border-dashed border-slate-300 rounded-2xl p-8 text-center hover:border-[#3A3DFF] transition-colors">
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handleImageUpload}
-                    className="hidden"
-                    id="image-upload"
-                  />
-                  <label
-                    htmlFor="image-upload"
-                    className="cursor-pointer flex flex-col items-center gap-3"
-                  >
-                    <Upload className="w-12 h-12 text-slate-400" />
-                    <span className="font-bold text-slate-700">
-                      Click to upload photo
-                    </span>
-                  </label>
-                </div>
-                {imagePreview && (
+            <motion.div
+              initial={reduceMotion ? { opacity: 1, height: 'auto' } : { opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              transition={{ duration: reduceMotion ? 0 : undefined }}
+              className="space-y-4"
+            >
+              <div className="border-3 border-dashed border-slate-300 rounded-2xl p-8 text-center hover:border-[#3A3DFF] transition-colors">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  className="hidden"
+                  id="image-upload"
+                />
+                <label
+                  htmlFor="image-upload"
+                  className="cursor-pointer flex flex-col items-center gap-3"
+                >
+                  <Upload className="w-12 h-12 text-slate-400" />
+                  <span className="font-bold text-slate-700">
+                    Click to upload photo
+                  </span>
+                </label>
+              </div>
+              {imagePreview && (
+                <div className="space-y-2">
                   <div className="relative rounded-2xl overflow-hidden border-3 border-slate-200">
                     <img
                       src={imagePreview}
@@ -208,9 +197,19 @@ export default function CompletionModal({ challenge, onClose, onComplete }) {
                       className="w-full h-64 object-cover"
                     />
                   </div>
-                )}
-              </motion.div>
-            )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEvidenceImage(null);
+                      setImagePreview(null);
+                    }}
+                    className="text-xs font-bold text-slate-600 hover:text-slate-900 underline"
+                  >
+                    Remove photo
+                  </button>
+                </div>
+              )}
+            </motion.div>
           </div>
 
           {/* Info Box */}
@@ -232,7 +231,7 @@ export default function CompletionModal({ challenge, onClose, onComplete }) {
             </Button>
             <Button
               onClick={handleSubmit}
-              disabled={isSubmitting || (evidenceType === 'text' && !evidenceText.trim()) || (evidenceType === 'image' && !evidenceImage)}
+              disabled={isSubmitting || !canSubmit}
               className="flex-1 h-14 bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-xl font-black shadow-xl uppercase tracking-wide"
             >
               {isSubmitting ? (

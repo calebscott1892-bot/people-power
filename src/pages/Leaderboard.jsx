@@ -2,6 +2,8 @@ import React, { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Trophy, Loader2 } from 'lucide-react';
 import { fetchMovementsPage } from '@/api/movementsClient';
+import { isAdmin as isAdminEmail } from '@/utils/staff';
+import { useAuth } from '@/auth/AuthProvider';
 
 function normalizeEmail(value) {
   const s = String(value ?? '').trim().toLowerCase();
@@ -9,13 +11,26 @@ function normalizeEmail(value) {
 }
 
 export default function Leaderboard() {
+  const { session } = useAuth();
+  const accessToken = session?.access_token ? String(session.access_token) : null;
   const { data: movements = [], isLoading } = useQuery({
     queryKey: ['movements'],
     queryFn: () =>
       fetchMovementsPage({
         limit: 500,
         offset: 0,
-        fields: ['id', 'author_email', 'momentum_score', 'created_at', 'created_date'].join(','),
+        fields: [
+          'id',
+          'author_email',
+          'creator_display_name',
+          'creator_username',
+          'author_display_name',
+          'author_username',
+          'momentum_score',
+          'created_at',
+          'created_date',
+        ].join(','),
+        accessToken,
       }),
   });
 
@@ -23,8 +38,14 @@ export default function Leaderboard() {
     const byAuthor = new Map();
     for (const m of movements) {
       const author = normalizeEmail(m?.author_email) || 'unknown';
+      const displayName = String(m?.creator_display_name || m?.author_display_name || '').trim();
+      const username = String(m?.creator_username || m?.author_username || '').trim();
+      const label = displayName || (username ? `@${username}` : 'Member');
       const prev = byAuthor.get(author) || {
         author_email: author,
+        display_name: displayName || null,
+        username: username || null,
+        label,
         created_count: 0,
         total_momentum: 0,
         last_created_at: null,
@@ -46,7 +67,7 @@ export default function Leaderboard() {
       .sort((a, b) => {
         if (b.total_momentum !== a.total_momentum) return b.total_momentum - a.total_momentum;
         if (b.created_count !== a.created_count) return b.created_count - a.created_count;
-        return String(a.author_email).localeCompare(String(b.author_email));
+        return String(a.label || '').localeCompare(String(b.label || ''));
       })
       .slice(0, 50);
   }, [movements]);
@@ -82,7 +103,14 @@ export default function Leaderboard() {
                     {idx + 1}
                   </div>
                   <div className="min-w-0">
-                    <div className="font-black text-slate-900 truncate">{r.author_email}</div>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="font-black text-slate-900 truncate">{r.label || 'Member'}</div>
+                      {isAdminEmail(r.author_email) ? (
+                        <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                          Admin
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="text-sm text-slate-500 font-semibold">
                       {r.created_count} created
                     </div>

@@ -16,11 +16,11 @@ async function safeReadJson(res) {
   }
 }
 
-export async function fetchMovementComments(movementId) {
-  return fetchMovementCommentsPage(movementId, { limit: 50, offset: 0 });
+export async function fetchMovementComments(movementId, options) {
+  return fetchMovementCommentsPage(movementId, { limit: 50, offset: 0, accessToken: options?.accessToken });
 }
 
-export async function fetchMovementCommentsPage(movementId, { limit = 20, offset = 0, fields } = {}) {
+export async function fetchMovementCommentsPage(movementId, { limit = 20, offset = 0, fields, accessToken } = {}) {
   const id = normalizeId(movementId);
   if (!id) throw new Error('Movement ID is required');
 
@@ -30,7 +30,12 @@ export async function fetchMovementCommentsPage(movementId, { limit = 20, offset
   if (Array.isArray(fields) && fields.length) params.set('fields', fields.join(','));
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments${params.toString() ? `?${params.toString()}` : ''}`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${String(accessToken)}` } : {}),
+    },
+  });
   const body = await safeReadJson(res);
 
   if (!res.ok) {

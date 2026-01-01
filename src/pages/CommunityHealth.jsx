@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from '@/auth/AuthProvider';
 import { useNavigate } from 'react-router-dom';
 import BarChart from '@/components/ui/BarChart';
+import { getServerBaseUrl } from '@/api/serverBase';
+import { logError } from '@/utils/logError';
+import AdminBackButton from '@/components/admin/AdminBackButton';
 
 function formatNumber(n) {
   if (n == null) return '—';
@@ -29,7 +32,8 @@ function TrendArrow({ value, prev }) {
 }
 
 export default function CommunityHealth() {
-  const { user, isAdmin } = useAuth();
+  const { user, session, isAdmin } = useAuth();
+  const accessToken = session?.access_token || null;
   const navigate = useNavigate();
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -40,13 +44,24 @@ export default function CommunityHealth() {
       navigate('/');
       return;
     }
+    if (!accessToken) {
+      setError(new Error('Missing access token'));
+      setLoading(false);
+      return;
+    }
     setLoading(true);
-    fetch('/admin/community-health', { headers: { Authorization: `Bearer ${user?.accessToken || ''}` } })
+    const baseUrl = getServerBaseUrl();
+    fetch(`${baseUrl}/admin/community-health`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    })
       .then((r) => r.ok ? r.json() : Promise.reject(r))
       .then(setStats)
-      .catch(setError)
+      .catch((err) => {
+        setError(err);
+        logError(err, 'CommunityHealth load failed');
+      })
       .finally(() => setLoading(false));
-  }, [user, isAdmin, navigate]);
+  }, [user, isAdmin, accessToken, navigate]);
 
   if (!user || !isAdmin) return null;
 
@@ -73,7 +88,11 @@ export default function CommunityHealth() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-10 space-y-8">
+      <AdminBackButton />
       <h1 className="text-3xl font-black text-slate-900 mb-2">Community Health</h1>
+      <div className="inline-flex items-center px-3 py-1 rounded-full bg-slate-900 text-white text-xs font-black uppercase">
+        Admin mode – changes here affect the whole platform
+      </div>
       <div className="mb-4 p-3 rounded-xl border border-yellow-200 bg-yellow-50 text-slate-800 text-sm font-semibold">
         This view shows platform-level signals only. No individual content is exposed.
       </div>

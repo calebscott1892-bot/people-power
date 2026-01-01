@@ -1,10 +1,10 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from "@/components/ui/button";
 import { 
-  User, Mail, Calendar, Zap, LogOut, 
+  User, Calendar, Zap, LogOut, 
   Plus, ChevronRight, Loader2, TrendingUp, Trophy, Flame, Shield
 } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -18,27 +18,40 @@ import { fetchMyFollowers, fetchMyFollowingUsers } from '@/api/userFollowsClient
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
 import { sanitizePublicLocation } from '@/utils/locationPrivacy';
 import { logError } from '@/utils/logError';
+import { fetchMyProfile } from '@/api/userProfileClient';
+import { fetchMyBlocks, unblockUser } from '@/api/blocksClient';
+import { toast } from 'sonner';
 
-function parseAdminEmails(raw) {
-  return String(raw || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+function getMovementAuthorLabel(movement) {
+  const displayName = String(
+    movement?.creator_display_name ||
+    movement?.author_display_name ||
+    ''
+  ).trim();
+  const usernameRaw = String(
+    movement?.creator_username ||
+    movement?.author_username ||
+    ''
+  ).trim();
+  const username = usernameRaw ? usernameRaw.replace(/^@/, '') : '';
+  const fallback = String(movement?.author_name || movement?.creator_name || '').trim();
+  const safeFallback = fallback && !fallback.includes('@') ? fallback : '';
+  return displayName || (username ? `@${username}` : (safeFallback || 'Member'));
+}
+
+function getPublicProfilePath(user) {
+  const raw = String(user?.username || '').trim().replace(/^@/, '');
+  return raw ? `/u/${encodeURIComponent(raw)}` : null;
 }
 
 export default function Profile() {
-  const { user: authUser, session, loading: authLoading, signOut } = useAuth();
+  const { user: authUser, session, loading: authLoading, logout, isAdmin } = useAuth();
   const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showEditModal, setShowEditModal] = useState(false);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const accessToken = session?.access_token || null;
-
-  const adminEmails = useMemo(() => parseAdminEmails(import.meta?.env?.VITE_ADMIN_EMAILS), []);
-  const isAdmin = useMemo(() => {
-    const email = String(user?.email || '').trim().toLowerCase();
-    return !!(email && adminEmails.includes(email));
-  }, [user?.email, adminEmails]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -56,11 +69,16 @@ export default function Profile() {
           'id',
           'title',
           'author_email',
+          'creator_display_name',
+          'creator_username',
+          'author_display_name',
+          'author_username',
           'created_at',
           'created_date',
           'momentum_score',
           'tags',
         ].join(','),
+        accessToken,
       });
       return all.filter((m) => String(m?.author_email || '') === String(user.email || ''));
     },
@@ -71,6 +89,15 @@ export default function Profile() {
     queryKey: ['userProfile', user?.email],
     queryFn: async () => {
       if (!user?.email) return null;
+      const token = accessToken ? String(accessToken) : null;
+      try {
+        if (token) {
+          const profile = await fetchMyProfile({ accessToken: token });
+          if (profile) return { ...profile, location: sanitizePublicLocation(profile?.location) };
+        }
+      } catch {
+        // fall back to migration-mode cache
+      }
       try {
         const profiles = await entities.UserProfile.filter({ user_email: user.email });
         if (profiles.length > 0) {
@@ -91,6 +118,41 @@ export default function Profile() {
     },
     enabled: !!user?.email
   });
+
+  const safeHandle = useMemo(() => {
+    const emailLocal = String(user?.email || '').split('@')[0]?.toLowerCase() || '';
+    const rawUsername = userProfile?.username ? String(userProfile.username) : '';
+    const rawDisplay = userProfile?.display_name || user?.full_name || '';
+    const candidate =
+      (rawUsername && rawUsername.toLowerCase() !== emailLocal) ? rawUsername : rawDisplay;
+    const trimmed = String(candidate || '').trim();
+    if (trimmed) return trimmed.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (emailLocal) return `member-${emailLocal.slice(0, 3)}${emailLocal.length}`;
+    return 'member';
+  }, [userProfile, user]);
+
+  const profilePhotoUrl = useMemo(() => {
+    const raw =
+      userProfile?.profile_photo_url ||
+      userProfile?.avatar_url ||
+      user?.user_metadata?.profile_photo_url ||
+      user?.user_metadata?.avatar_url ||
+      '';
+    const trimmed = String(raw || '').trim();
+    return trimmed || '';
+  }, [userProfile, user]);
+
+  const formatPublicUserLabel = (u) => {
+    const display = u?.display_name || u?.username || u?.name;
+    if (display) return String(display);
+    const email = String(u?.email || '').trim();
+    if (!email) return 'Member';
+    let hash = 0;
+    for (let i = 0; i < email.length; i += 1) {
+      hash = (hash * 31 + email.charCodeAt(i)) % 10000;
+    }
+    return `Member #${String(hash).padStart(4, '0')}`;
+  };
 
   const { data: followedMovements = [] } = useQuery({
     queryKey: ['followedMovements', user?.email],
@@ -119,9 +181,27 @@ export default function Profile() {
     enabled: !!user?.email && !!accessToken,
   });
 
+  const { data: myBlocks } = useQuery({
+    queryKey: ['myBlocks', user?.email],
+    queryFn: async () => fetchMyBlocks({ accessToken }),
+    enabled: !!user?.email && !!accessToken,
+  });
+
+  const unblockMutation = useMutation({
+    mutationFn: async (email) => {
+      if (!email) throw new Error('Missing user');
+      return unblockUser(email, { accessToken });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['myBlocks', user?.email] });
+      toast.success('User unblocked');
+    },
+    onError: (e) => toast.error(e?.message || 'Failed to unblock user'),
+  });
+
   const handleLogout = async () => {
     try {
-      await signOut();
+      await logout();
       navigate('/');
     } catch (e) {
       logError(e, 'Sign out failed');
@@ -173,37 +253,47 @@ export default function Profile() {
       >
         {/* Header Banner */}
         {userProfile?.banner_url ? (
-          <div className="h-32 bg-cover bg-center" style={{ backgroundImage: `url(${userProfile.banner_url})` }} />
+          <div className="h-24 sm:h-32 bg-cover bg-center" style={{ backgroundImage: `url(${userProfile.banner_url})` }} />
         ) : (
-          <div className="h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
+          <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
         
         {/* Profile Info */}
-        <div className="px-8 pb-8">
-          <div className="flex items-start justify-between gap-6 mb-8">
-            <div className="flex items-start gap-6">
-              <div className="w-32 h-32 -mt-16 bg-white rounded-3xl shadow-2xl flex items-center justify-center border-4 border-white">
-                {userProfile?.profile_photo_url ? (
-                  <img src={userProfile.profile_photo_url} alt="" className="w-full h-full rounded-2xl object-cover" />
+        <div className="px-4 sm:px-8 pb-6 sm:pb-8">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6 mb-6 sm:mb-8">
+            <div className="flex items-start gap-4 sm:gap-6">
+              <div className="w-24 h-24 sm:w-32 sm:h-32 -mt-12 sm:-mt-16 bg-white rounded-full shadow-2xl flex items-center justify-center border-4 border-white overflow-hidden">
+                {profilePhotoUrl ? (
+                  <img src={profilePhotoUrl} alt="" className="w-full h-full rounded-full object-cover" />
                 ) : (
-                  <div className="w-28 h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-2xl flex items-center justify-center">
-                    <span className="text-5xl font-black text-slate-900">
-                      {(userProfile?.display_name?.[0] || user?.full_name?.[0] || user?.email?.[0] || '?').toUpperCase()}
+                  <div className="w-20 h-20 sm:w-28 sm:h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
+                    <span className="text-3xl sm:text-5xl font-black text-slate-900">
+                      {(userProfile?.display_name?.[0] || user?.full_name?.[0] || userProfile?.username?.[0] || safeHandle?.[0] || '?').toUpperCase()}
                     </span>
                   </div>
                 )}
               </div>
-              <div className="pt-4 flex-1">
-                <h1 className="text-3xl font-black text-slate-900 mb-1">
+              <div className="pt-2 sm:pt-4 flex-1">
+                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 mb-1">
                   {userProfile?.display_name || user?.full_name || 'Anonymous User'}
                 </h1>
                 <p className="text-sm text-slate-500 font-semibold">
-                  @{userProfile?.username || String(user?.email || '').split('@')[0] || 'user'}
+                  @{safeHandle || 'member'}
                 </p>
+                {isAdmin ? (
+                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                    Admin
+                  </span>
+                ) : null}
+                {userProfile?.bio ? (
+                  <p className="mt-2 text-sm sm:text-base text-slate-700 whitespace-pre-line">
+                    {userProfile.bio}
+                  </p>
+                ) : null}
               </div>
             </div>
 
-            <div className="pt-4">
+            <div className="sm:pt-4">
               <Button
                 onClick={() => setShowEditModal(true)}
                 variant="outline"
@@ -275,14 +365,18 @@ export default function Profile() {
                 <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider">
                   Challenge Stats
                 </h3>
-                <Link to={createPageUrl('DailyChallenges')}>
-                  <Button 
-                    size="sm" 
-                    className="bg-[#3A3DFF] hover:bg-[#2A2DDD] rounded-lg font-bold text-xs"
+                <Button
+                  asChild
+                  size="sm"
+                  className="bg-[#3A3DFF] hover:bg-[#2A2DDD] rounded-lg font-bold text-xs"
+                >
+                  <Link
+                    to={createPageUrl('DailyChallenges')}
+                    state={{ fromLabel: 'Profile', fromPath: createPageUrl('Profile') }}
                   >
                     View Challenges
-                  </Button>
-                </Link>
+                  </Link>
+                </Button>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex items-center gap-3">
@@ -320,31 +414,77 @@ export default function Profile() {
           )}
 
           {/* User Details */}
-          <div className="space-y-3 mb-6 p-4 bg-slate-50 rounded-2xl border-2 border-slate-200">
-            <div className="flex items-center gap-3 text-slate-600">
-              <Mail className="w-5 h-5 text-slate-400" />
-              <span className="font-bold">{user?.email}</span>
-            </div>
-            {user?.created_date && (
+          {user?.created_date ? (
+            <div className="space-y-3 mb-6 p-4 bg-slate-50 rounded-2xl border-2 border-slate-200">
+              {/* Email intentionally hidden for privacy. */}
               <div className="flex items-center gap-3 text-slate-600">
                 <Calendar className="w-5 h-5 text-slate-400" />
                 <span className="font-bold">Joined {format(new Date(user.created_date), 'MMMM yyyy')}</span>
               </div>
-            )}
-          </div>
+            </div>
+          ) : null}
 
           {/* Admin Dashboard Link */}
           {isAdmin && (
-            <Link to={createPageUrl('AdminReports')}>
+            <Link
+              to={createPageUrl('AdminDashboard')}
+              state={{ fromLabel: 'Profile', fromPath: createPageUrl('Profile') }}
+            >
               <Button
                 variant="outline"
                 className="w-full h-12 font-bold rounded-xl border-2 border-red-300 text-red-700 hover:bg-red-50 uppercase tracking-wide mb-3"
               >
                 <Shield className="w-4 h-4 mr-2" />
-                Admin Reports
+                Admin Panel
               </Button>
             </Link>
           )}
+
+          {/* Blocked users */}
+          <div className="mb-6 rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-black text-slate-900 uppercase tracking-wider">
+                Blocked users
+              </div>
+            </div>
+            <p className="text-xs text-slate-600 font-semibold mb-3">
+              Blocking hides your profile, movements, and messages from each other. They won’t be notified.
+            </p>
+            {Array.isArray(myBlocks?.blocked) && myBlocks.blocked.length > 0 ? (
+              <div className="space-y-2">
+                {myBlocks.blocked.map((entry) => {
+                  const label =
+                    entry?.display_name ||
+                    (entry?.username ? `@${entry.username}` : 'Blocked user');
+                  return (
+                    <div
+                      key={String(entry?.email || entry?.username || label)}
+                      className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-slate-800 truncate">
+                          {label}
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-9 rounded-lg border-slate-200 text-xs font-bold"
+                        disabled={unblockMutation.isPending}
+                        onClick={() => unblockMutation.mutate(String(entry?.email || '').trim())}
+                      >
+                        Unblock
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-xs text-slate-500 font-semibold">
+                You haven’t blocked anyone yet.
+              </div>
+            )}
+          </div>
 
           {/* Logout Button */}
           <Button
@@ -457,9 +597,9 @@ export default function Profile() {
                     <h3 className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
                       {movement.title}
                     </h3>
-                    <div className="text-sm text-slate-500 font-bold">
-                      by {movement.author_name || 'Anonymous'}
-                    </div>
+              <div className="text-sm text-slate-500 font-bold">
+                by {getMovementAuthorLabel(movement)}
+              </div>
                   </div>
                   <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
                 </div>
@@ -484,21 +624,30 @@ export default function Profile() {
             {myFollowingUsers.map((u) => {
               const email = String(u?.email || '').trim();
               if (!email) return null;
-              return (
+              const label = formatPublicUserLabel(u);
+              const profilePath = getPublicProfilePath(u);
+              const content = (
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors truncate">
+                      {label}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
+                </div>
+              );
+              return profilePath ? (
                 <Link
                   key={email}
-                  to={createPageUrl(`UserProfile?email=${encodeURIComponent(email)}`)}
+                  to={profilePath}
                   className="block p-6 hover:bg-slate-50 transition-colors group"
                 >
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors truncate">
-                        {email}
-                      </div>
-                    </div>
-                    <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
-                  </div>
+                  {content}
                 </Link>
+              ) : (
+                <div key={email} className="block p-6 bg-white">
+                  {content}
+                </div>
               );
             })}
           </div>
@@ -520,21 +669,30 @@ export default function Profile() {
             {myFollowers.map((u) => {
               const email = String(u?.email || '').trim();
               if (!email) return null;
-              return (
+              const label = formatPublicUserLabel(u);
+              const profilePath = getPublicProfilePath(u);
+              const content = (
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors truncate">
+                      {label}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
+                </div>
+              );
+              return profilePath ? (
                 <Link
                   key={email}
-                  to={createPageUrl(`UserProfile?email=${encodeURIComponent(email)}`)}
+                  to={profilePath}
                   className="block p-6 hover:bg-slate-50 transition-colors group"
                 >
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors truncate">
-                        {email}
-                      </div>
-                    </div>
-                    <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
-                  </div>
+                  {content}
                 </Link>
+              ) : (
+                <div key={email} className="block p-6 bg-white">
+                  {content}
+                </div>
               );
             })}
           </div>

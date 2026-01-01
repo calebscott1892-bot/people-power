@@ -14,7 +14,7 @@ export default function ImpactTracker({ movement }) {
 
   const calculateMetrics = useCallback(() => {
     const totalEngagement = (movement.boosts || 0) + (movement.supporters || 0);
-    const totalParticipants = (movement.verified_participants || 0) + (movement.unverified_participants || 0);
+    const totalParticipants = movement.verified_participants || 0;
     const reach = movement.actual_reach || Math.max(totalEngagement * 10, 100);
 
     const engagementRate = reach > 0 ? (totalEngagement / reach) * 100 : 0;

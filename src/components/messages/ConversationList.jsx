@@ -5,6 +5,7 @@ import { motion } from 'framer-motion';
 import { format } from 'date-fns';
 import { cn } from "@/lib/utils";
 import { auth, entities } from "@/api/appClient";
+import { isAdmin as isAdminEmail } from '@/utils/staff';
 
 export default function ConversationList({
   currentUserEmail,
@@ -130,6 +131,7 @@ function ConversationItem({ conversation, currentUserEmail, isSelected, onSelect
   });
 
   const displayName = otherProfile?.display_name || 'User';
+  const isAdminOther = otherUserEmail ? isAdminEmail(otherUserEmail) : false;
   const hasUnread = unreadCount > 0;
 
   return (
@@ -160,12 +162,19 @@ function ConversationItem({ conversation, currentUserEmail, isSelected, onSelect
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between mb-1">
-            <h3 className={cn(
-              "font-bold text-slate-900 truncate",
-              hasUnread && "font-black"
-            )}>
-              {displayName}
-            </h3>
+            <div className="flex items-center gap-2 min-w-0">
+              <h3 className={cn(
+                "font-bold text-slate-900 truncate",
+                hasUnread && "font-black"
+              )}>
+                {displayName}
+              </h3>
+              {isAdminOther ? (
+                <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                  Admin
+                </span>
+              ) : null}
+            </div>
             {conversation.last_message_time && (
               <span className="text-xs text-slate-400 flex-shrink-0 ml-2">
                 {format(new Date(conversation.last_message_time), 'MMM d')}

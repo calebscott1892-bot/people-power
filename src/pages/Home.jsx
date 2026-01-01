@@ -73,7 +73,8 @@ export default function Home() {
     return () => unsub();
   }, []);
   const { t } = useLanguage();
-  const { user: authUser, authLoading } = useAuth();
+  const { user: authUser, authLoading, session } = useAuth();
+  const accessToken = session?.access_token ? String(session.access_token) : null;
   const reduceMotion = useReducedMotion();
   const [user, setUser] = useState(null);
   const [activeFilter, setActiveFilter] = useState('momentum');
@@ -270,6 +271,10 @@ export default function Home() {
     'tags',
     'author_email',
     'creator_email',
+    'creator_display_name',
+    'creator_username',
+    'author_display_name',
+    'author_username',
     'city',
     'region',
     'country',
@@ -305,6 +310,7 @@ export default function Home() {
         limit: MOVEMENTS_PAGE_SIZE,
         offset: pageParam,
         fields: MOVEMENT_FEED_FIELDS,
+        accessToken,
       }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
@@ -320,9 +326,49 @@ export default function Home() {
     const all = pages.flatMap((p) => (Array.isArray(p) ? p : []));
     if (all.length > 0 && backendStatus === 'healthy') {
       try {
-        const compact = all.map(({ id, title, summary, tags, author_email, city, country, momentum_score, upvotes, downvotes, score, created_at, updated_at }) => ({ id, title, summary, tags, author_email, city, country, momentum_score, upvotes, downvotes, score, created_at, updated_at }));
+        const compact = all.map(
+          ({
+            id,
+            title,
+            summary,
+            tags,
+            author_email,
+            creator_display_name,
+            creator_username,
+            author_display_name,
+            author_username,
+            city,
+            country,
+            momentum_score,
+            upvotes,
+            downvotes,
+            score,
+            created_at,
+            updated_at
+          }) => ({
+            id,
+            title,
+            summary,
+            tags,
+            author_email,
+            creator_display_name,
+            creator_username,
+            author_display_name,
+            author_username,
+            city,
+            country,
+            momentum_score,
+            upvotes,
+            downvotes,
+            score,
+            created_at,
+            updated_at
+          })
+        );
         localStorage.setItem('peoplepower_movements_cache', JSON.stringify({ ts: Date.now(), data: compact.slice(0, 50) }));
-      } catch {}
+      } catch {
+        // Ignore cache write failures (storage disabled or full).
+      }
     }
   }, [movementsPages, backendStatus]);
 
@@ -338,7 +384,9 @@ export default function Home() {
             setShowOfflineLabel(true);
           }
         }
-      } catch {}
+      } catch {
+        // Ignore cache read failures; fall back to live data.
+      }
     } else {
       setOfflineMovements(null);
       setShowOfflineLabel(false);
@@ -541,6 +589,21 @@ export default function Home() {
           {t('homeTagline')}
         </p>
       </motion.div>
+
+      {!user ? (
+        <div className="max-w-2xl mx-auto p-4 rounded-2xl border border-slate-200 bg-white shadow-sm text-center space-y-2">
+          <div className="text-sm font-black text-slate-900">Sign in to participate</div>
+          <div className="text-xs sm:text-sm text-slate-600 font-semibold">
+            Creating movements, messaging, reporting, and verified activity require an account.
+          </div>
+          <Link
+            to="/login"
+            className="inline-flex items-center justify-center px-5 py-2 rounded-xl bg-[#3A3DFF] text-white text-xs sm:text-sm font-black hover:opacity-90"
+          >
+            Sign in / Create account
+          </Link>
+        </div>
+      ) : null}
 
       {/* Next Best Action */}
       <NextBestActionPanel

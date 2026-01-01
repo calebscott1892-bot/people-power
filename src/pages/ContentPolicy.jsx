@@ -1,7 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Shield, Ban, ArrowLeft } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Shield, Ban } from 'lucide-react';
+import BackButton from '@/components/shared/BackButton';
 
 export default function ContentPolicy() {
   const prohibited = [
@@ -85,13 +85,10 @@ export default function ContentPolicy() {
                 <p className="text-sm sm:text-base font-semibold mt-1">Keeping People Power Safe &amp; Respectful</p>
               </div>
             </div>
-            <Link
-              to="/legal-hub"
+            <BackButton
               className="inline-flex items-center gap-2 text-sm font-semibold text-white border border-white/70 px-3 py-2 rounded-full hover:bg-white/10"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back
-            </Link>
+              iconClassName="w-4 h-4"
+            />
           </div>
         </div>
 

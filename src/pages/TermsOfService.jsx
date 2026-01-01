@@ -1,7 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { ShieldCheck, CheckCircle2, ArrowLeft } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { ShieldCheck, CheckCircle2 } from 'lucide-react';
+import BackButton from '@/components/shared/BackButton';
 
 export default function TermsOfService() {
   const checklist = [
@@ -141,13 +141,10 @@ export default function TermsOfService() {
                 <p className="text-sm sm:text-base font-semibold mt-1">Last Updated: December 2024</p>
               </div>
             </div>
-            <Link
-              to="/legal-hub"
+            <BackButton
               className="inline-flex items-center gap-2 text-sm font-semibold text-white border border-white/70 px-3 py-2 rounded-full hover:bg-white/10"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back
-            </Link>
+              iconClassName="w-4 h-4"
+            />
           </div>
           <div className="mt-6 grid gap-2 text-sm sm:text-base">
             {checklist.map((item) => (

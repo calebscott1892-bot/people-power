@@ -16,19 +16,31 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
 
-import { fetchMovementById, deleteMovement } from '@/api/movementsClient';
+import { fetchMovementById, deleteMovement, updateMovement } from '@/api/movementsClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { fetchMyMovementFollow, setMyMovementFollow } from '@/api/movementFollowsClient';
 import { listMovementCollaborators } from '@/api/collaboratorsClient';
+import { lookupUsersByEmail } from '@/api/usersClient';
+import { createMovementGroupConversation } from '@/api/messagesClient';
 
 import CommentSection from '@/components/details/CommentSection';
 import BoostButtons from '@/components/shared/BoostButtons';
 import ShareButton from '@/components/shared/ShareButton';
 import ReportButton from '@/components/safety/ReportButton';
 import ErrorBoundary from '@/components/shared/ErrorBoundary';
+import BackButton from '@/components/shared/BackButton';
 const PublicImpactReport = React.lazy(() => import('@/components/impact/PublicImpactReport'));
 const CreatorDashboard = React.lazy(() => import('@/components/analytics/CreatorDashboard'));
 import CollaboratorsList from '@/components/collaboration/CollaboratorsList';
@@ -62,22 +74,40 @@ import { fetchEventRsvpSummary, setMyEventAttendance, setMyEventRsvp } from '@/a
 import { entities } from '@/api/appClient';
 import { fetchPetitionSignatureSummary, signPetition, withdrawPetitionSignature } from '@/api/petitionSignaturesClient';
 import { uploadFile } from '@/api/uploadsClient';
+import { getServerBaseUrl } from '@/api/serverBase';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
+import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { toast } from 'sonner';
+import { useFeatureFlag } from '@/utils/featureFlags';
+import {
+  ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+  ALLOWED_UPLOAD_MIME_TYPES,
+  MAX_UPLOAD_BYTES,
+  validateFileUpload,
+} from '@/utils/uploadLimits';
 
 function absolutizeMaybe(url) {
   const s = url ? String(url).trim() : '';
   if (!s) return null;
   if (/^https?:\/\//i.test(s)) return s;
   if (s.startsWith('/')) {
-    const base =
-      (import.meta?.env?.VITE_SERVER_URL && String(import.meta.env.VITE_SERVER_URL)) ||
-      (import.meta?.env?.VITE_API_BASE_URL && String(import.meta.env.VITE_API_BASE_URL)) ||
-      'http://localhost:3001';
-    return `${String(base).replace(/\/$/, '')}${s}`;
+    const base = getServerBaseUrl();
+    return `${base}${s}`;
   }
   return s;
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function maskEmail(email) {
+  const raw = String(email || '').trim();
+  if (!raw.includes('@')) return raw;
+  const [name, domain] = raw.split('@');
+  const prefix = name ? `${name.slice(0, 2)}***` : '***';
+  return domain ? `${prefix}@${domain}` : prefix;
 }
 
 function guessPreviewType(resource) {
@@ -100,14 +130,15 @@ function isPastIso(iso) {
   }
 }
 
-function parseAdminEmails(raw) {
-  return String(raw || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+function SignInCallout({ action }) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600">
+      Please sign in to {action}.
+    </div>
+  );
 }
 
-function EventRsvpControls({ event, movementId, accessToken, myEmail }) {
+function EventRsvpControls({ event, movementId, accessToken, myEmail, backendStatus = 'healthy' }) {
   const queryClient = useQueryClient();
 
   const { data } = useQuery({
@@ -120,7 +151,6 @@ function EventRsvpControls({ event, movementId, accessToken, myEmail }) {
   const summary = data?.summary || { going_count: 0, interested_count: 0, attended_count: 0 };
   const myRsvp = data?.my_rsvp || null;
 
-  const { backendStatus = 'healthy' } = window || {};
   const rsvpMutation = useMutation({
     mutationFn: async (status) => {
       if (!accessToken) throw new Error('Please log in to RSVP');
@@ -470,7 +500,7 @@ function sanitizeRichText(html) {
 }
 
 export default function MovementDetails() {
-  const { user, session } = useAuth();
+  const { user, session, isAdmin } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -492,12 +522,26 @@ export default function MovementDetails() {
   const [deleteMovementOpen, setDeleteMovementOpen] = useState(false);
   const [deletingMovement, setDeletingMovement] = useState(false);
   const [resourceToDelete, setResourceToDelete] = useState(null);
+  const [editMovementOpen, setEditMovementOpen] = useState(false);
+  const [editMovementSaving, setEditMovementSaving] = useState(false);
+  const [editForm, setEditForm] = useState({
+    title: '',
+    summary: '',
+    description: '',
+    tags: '',
+    location_city: '',
+    location_country: '',
+    media_urls: '',
+  });
 
-  const adminEmails = useMemo(() => parseAdminEmails(import.meta?.env?.VITE_ADMIN_EMAILS), []);
   const myEmail = String(user?.email || '').trim().toLowerCase();
+  const userId = user?.id || user?.email || null;
+  const { enabled: petitionsEnabled } = useFeatureFlag('petitions', userId);
+  const { enabled: donationsEnabled } = useFeatureFlag('donations', userId);
+  const { enabled: creatorAnalyticsEnabled } = useFeatureFlag('creator_analytics_dashboard', userId);
 
   const {
-    data: movement,
+    data: movementData,
     isLoading: isMovementLoading,
     isError: isMovementError,
     error: movementError,
@@ -508,13 +552,32 @@ export default function MovementDetails() {
     retry: 1,
     queryFn: async () => {
       if (!movementId) return null;
-      const m = await fetchMovementById(movementId);
+      const m = await fetchMovementById(movementId, { accessToken });
       // Cache compact movement details on success
       if (m && backendStatus === 'healthy') {
         try {
-          const compact = { id: m.id, title: m.title, summary: m.summary, description: m.description, tags: m.tags, author_email: m.author_email, city: m.city, country: m.country, momentum_score: m.momentum_score, upvotes: m.upvotes, downvotes: m.downvotes, score: m.score, created_at: m.created_at, updated_at: m.updated_at };
+          const compact = {
+            id: m.id,
+            title: m.title,
+            summary: m.summary,
+            description: m.description,
+            tags: m.tags,
+            author_email: m.author_email,
+            creator_display_name: m.creator_display_name,
+            creator_username: m.creator_username,
+            city: m.city,
+            country: m.country,
+            momentum_score: m.momentum_score,
+            upvotes: m.upvotes,
+            downvotes: m.downvotes,
+            score: m.score,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+          };
           localStorage.setItem(`peoplepower_movement_${m.id}_cache`, JSON.stringify({ ts: Date.now(), data: compact }));
-        } catch {}
+        } catch {
+          // Ignore cache write failures (storage disabled or full).
+        }
       }
       return m;
     },
@@ -532,17 +595,38 @@ export default function MovementDetails() {
             setShowOfflineLabel(true);
           }
         }
-      } catch {}
+      } catch {
+        // Ignore cache read failures; fall back to live data.
+      }
     } else {
       setOfflineMovement(null);
       setShowOfflineLabel(false);
     }
   }, [backendStatus, isMovementError, movementId]);
 
+  // Prefer last-known-good data when offline.
+  const movement = offlineMovement || movementData;
+
+  useEffect(() => {
+    if (!movement) return;
+    const tagsArray = Array.isArray(movement?.tags) ? movement.tags : [];
+    const tagsText = tagsArray.map((t) => String(t).trim()).filter(Boolean).join(', ');
+    const mediaUrls = Array.isArray(movement?.media_urls) ? movement.media_urls : [];
+    setEditForm({
+      title: String(movement?.title || movement?.name || ''),
+      summary: String(movement?.summary || ''),
+      description: String(movement?.description || ''),
+      tags: tagsText,
+      location_city: String(movement?.location_city || movement?.city || ''),
+      location_country: String(movement?.location_country || movement?.country || ''),
+      media_urls: mediaUrls.map((u) => String(u)).filter(Boolean).join('\n'),
+    });
+  }, [movement?.id, movement?.title, movement?.summary, movement?.description, movement?.location_city, movement?.location_country]);
+
   // Note: avoid early returns before hooks; render an early view at the end instead.
   const earlyView = !movementId ? (
-    <div className="max-w-4xl mx-auto px-4 py-12 space-y-6">
-      <Link to="/" className="text-[#3A3DFF] font-bold">&larr; Back to home</Link>
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-10 sm:py-12 space-y-6">
+      <BackButton />
       <div className="p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-2">
         <h1 className="text-2xl font-black text-slate-900">Movement not found</h1>
         <p className="text-slate-600 font-semibold">
@@ -550,17 +634,17 @@ export default function MovementDetails() {
         </p>
       </div>
     </div>
-  ) : isMovementLoading ? (
-    <div className="max-w-4xl mx-auto px-4 py-12 space-y-6">
-      <Link to="/" className="text-[#3A3DFF] font-bold">&larr; Back to home</Link>
+  ) : isMovementLoading && !movement ? (
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-10 sm:py-12 space-y-6">
+      <BackButton />
       <div className="p-6 rounded-2xl border border-slate-200 bg-slate-50 text-slate-700">
         <div className="font-black text-slate-900">Loading movement…</div>
         <div className="text-sm text-slate-600 font-semibold mt-1">Please wait.</div>
       </div>
     </div>
-  ) : isMovementError ? (
-    <div className="max-w-4xl mx-auto px-4 py-12 space-y-6">
-      <Link to="/" className="text-[#3A3DFF] font-bold">&larr; Back to home</Link>
+  ) : isMovementError && !movement ? (
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-10 sm:py-12 space-y-6">
+      <BackButton />
       <div className="p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-3">
         <h1 className="text-2xl font-black text-slate-900">Couldn’t load movement</h1>
         <p className="text-slate-600 font-semibold">We couldn’t load this movement. Please try again.</p>
@@ -573,8 +657,8 @@ export default function MovementDetails() {
       </div>
     </div>
   ) : !movement ? (
-    <div className="max-w-4xl mx-auto px-4 py-12 space-y-6">
-      <Link to="/" className="text-[#3A3DFF] font-bold">&larr; Back to home</Link>
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-10 sm:py-12 space-y-6">
+      <BackButton />
       <div className="p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-2">
         <h1 className="text-2xl font-black text-slate-900">Movement not found</h1>
         <p className="text-slate-600 font-semibold">
@@ -588,8 +672,23 @@ export default function MovementDetails() {
   const description = String(movement?.description_html || movement?.description || movement?.summary || '');
   const tags = Array.isArray(movement?.tags) ? movement.tags : [];
   const ownerEmail = movement?.author_email ? String(movement.author_email) : '';
+  const ownerDisplayName = String(
+    movement?.creator_display_name ||
+    movement?.author_display_name ||
+    movement?.author_name ||
+    ''
+  ).trim();
+  const safeOwnerDisplayName = ownerDisplayName && !ownerDisplayName.includes('@') ? ownerDisplayName : '';
+  const ownerUsername = String(
+    movement?.creator_username ||
+    movement?.author_username ||
+    ''
+  ).trim();
+  const safeOwnerUsername = ownerUsername && !ownerUsername.includes('@') ? ownerUsername : '';
+  const ownerLabel = safeOwnerDisplayName || (safeOwnerUsername ? `@${safeOwnerUsername}` : 'Unknown author');
+  const ownerProfilePath = safeOwnerUsername ? `/u/${encodeURIComponent(safeOwnerUsername)}` : null;
+  const ownerIsAdmin = ownerEmail ? isAdminEmail(ownerEmail) : false;
   const canDelete = !!(user?.email && ownerEmail && String(user.email) === ownerEmail);
-  const isAdmin = !!(myEmail && adminEmails.includes(myEmail));
   const canModerate = !!((myEmail && ownerEmail && myEmail === String(ownerEmail).toLowerCase()) || isAdmin);
   const isOwner = !!(myEmail && ownerEmail && myEmail === String(ownerEmail).toLowerCase());
 
@@ -615,6 +714,51 @@ export default function MovementDetails() {
       setLocksError(e);
     } finally {
       setLocksLoading(false);
+    }
+  };
+
+  const handleMovementUpdate = async () => {
+    if (!movementId) return;
+    if (!accessToken) {
+      toast.error('Please sign in to edit this movement.');
+      return;
+    }
+    const title = String(editForm.title || '').trim();
+    if (!title) {
+      toast.error('Title is required.');
+      return;
+    }
+    const tags = String(editForm.tags || '')
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const mediaUrls = String(editForm.media_urls || '')
+      .split('\n')
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    const payload = {
+      title,
+      summary: editForm.summary ? String(editForm.summary) : null,
+      description: editForm.description ? String(editForm.description) : null,
+      tags,
+      location_city: editForm.location_city ? String(editForm.location_city) : null,
+      location_country: editForm.location_country ? String(editForm.location_country) : null,
+      media_urls: mediaUrls.length ? mediaUrls : null,
+    };
+
+    try {
+      setEditMovementSaving(true);
+      const updated = await updateMovement(movementId, payload, { accessToken });
+      queryClient.setQueryData(['movement', movementId], updated);
+      queryClient.invalidateQueries({ queryKey: ['movements'] });
+      setEditMovementOpen(false);
+      toast.success('Movement updated.');
+    } catch (err) {
+      logError(err, 'Failed to update movement');
+      toast.error(err?.message ? String(err.message) : 'Failed to update movement');
+    } finally {
+      setEditMovementSaving(false);
     }
   };
 
@@ -835,6 +979,49 @@ export default function MovementDetails() {
   });
 
   const {
+    data: approvedEvidenceForGroup = [],
+    isLoading: groupEvidenceLoading,
+  } = useQuery({
+    queryKey: ['movementEvidenceApprovedForGroup', movementId],
+    enabled: !!movementId && !!accessToken && isOwner,
+    queryFn: async () =>
+      fetchMovementEvidencePage(movementId, {
+        limit: 200,
+        offset: 0,
+        status: 'approved',
+        accessToken,
+        fields: ['id', 'submitter_email'],
+      }),
+    retry: 1,
+  });
+
+  const verifiedParticipantEmails = useMemo(() => {
+    const emails = Array.isArray(approvedEvidenceForGroup)
+      ? approvedEvidenceForGroup.map((ev) => normalizeEmail(ev?.submitter_email))
+      : [];
+    const unique = Array.from(new Set(emails.filter(Boolean)));
+    return ownerEmail ? unique.filter((e) => e !== normalizeEmail(ownerEmail)) : unique;
+  }, [approvedEvidenceForGroup, ownerEmail]);
+
+  const { data: verifiedParticipantProfiles = [] } = useQuery({
+    queryKey: ['movementVerifiedParticipantProfiles', verifiedParticipantEmails.join('|')],
+    enabled: verifiedParticipantEmails.length > 0 && !!accessToken && isOwner,
+    queryFn: async () => lookupUsersByEmail(verifiedParticipantEmails, { accessToken }),
+    retry: 1,
+  });
+
+  const verifiedProfileMap = useMemo(() => {
+    const map = new Map();
+    const list = Array.isArray(verifiedParticipantProfiles) ? verifiedParticipantProfiles : [];
+    for (const profile of list) {
+      const email = normalizeEmail(profile?.email || profile?.user_email);
+      if (!email) continue;
+      map.set(email, profile);
+    }
+    return map;
+  }, [verifiedParticipantProfiles]);
+
+  const {
     data: eventsPages,
     isLoading: eventsLoading,
     isError: eventsError,
@@ -887,7 +1074,7 @@ export default function MovementDetails() {
     isFetchingNextPage: isFetchingNextPetitionsPage,
   } = useInfiniteQuery({
     queryKey: ['petitions', movementId],
-    enabled: !!movementId,
+    enabled: !!movementId && petitionsEnabled,
     initialPageParam: 0,
     queryFn: ({ pageParam = 0 }) =>
       listMovementPetitionsPage(movementId, {
@@ -947,7 +1134,7 @@ export default function MovementDetails() {
 
   useEffect(() => {
     if (resourcesError && resourcesErrorObj) logError(resourcesErrorObj, 'Movement resources load failed', { movementId });
-  }, [resourcesError, resourcesErrorObj]);
+  }, [resourcesError, resourcesErrorObj, movementId]);
 
   useEffect(() => {
     if (evidenceError && evidenceErrorObj) logError(evidenceErrorObj, 'Movement evidence load failed', { movementId });
@@ -961,15 +1148,15 @@ export default function MovementDetails() {
 
   useEffect(() => {
     if (eventsError && eventsErrorObj) logError(eventsErrorObj, 'Movement events load failed', { movementId });
-  }, [eventsError, eventsErrorObj]);
+  }, [eventsError, eventsErrorObj, movementId]);
 
   useEffect(() => {
     if (petitionsError && petitionsErrorObj) logError(petitionsErrorObj, 'Movement petitions load failed', { movementId });
-  }, [petitionsError, petitionsErrorObj]);
+  }, [petitionsError, petitionsErrorObj, movementId]);
 
   useEffect(() => {
     if (impactError && impactErrorObj) logError(impactErrorObj, 'Movement impact updates load failed', { movementId });
-  }, [impactError, impactErrorObj]);
+  }, [impactError, impactErrorObj, movementId]);
   const {
     data: tasksPages,
     isLoading: tasksLoading,
@@ -1038,6 +1225,43 @@ export default function MovementDetails() {
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
   }, [discussionsPages]);
 
+  const [discussionAuthors, setDiscussionAuthors] = useState({});
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAuthorProfiles() {
+      if (!accessToken) return;
+      const emails = Array.from(
+        new Set(
+          discussions
+            .map((m) => String(m?.author_email || '').trim().toLowerCase())
+            .filter(Boolean)
+        )
+      );
+      if (!emails.length) return;
+      try {
+        const users = await lookupUsersByEmail(emails, { accessToken });
+        if (cancelled) return;
+        const next = {};
+        for (const u of Array.isArray(users) ? users : []) {
+          const email = String(u?.email || '').trim().toLowerCase();
+          if (!email) continue;
+          next[email] = {
+            display_name: u?.display_name ?? null,
+            username: u?.username ?? null,
+          };
+        }
+        setDiscussionAuthors(next);
+      } catch {
+        if (!cancelled) setDiscussionAuthors({});
+      }
+    }
+    loadAuthorProfiles();
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, discussions]);
+
   const { data: collaborators = [] } = useQuery({
     queryKey: ['collaborators', movementId],
     enabled: !!movementId,
@@ -1097,8 +1321,7 @@ export default function MovementDetails() {
 
   const impactSummary = useMemo(() => {
     const totalParticipants =
-      (typeof movement?.verified_participants === 'number' ? movement.verified_participants : 0) +
-      (typeof movement?.unverified_participants === 'number' ? movement.unverified_participants : 0);
+      typeof movement?.verified_participants === 'number' ? movement.verified_participants : 0;
     const totalResourceDownloads = Array.isArray(resources)
       ? resources.reduce((sum, r) => sum + (typeof r?.download_count === 'number' ? r.download_count : 0), 0)
       : 0;
@@ -1120,8 +1343,6 @@ export default function MovementDetails() {
   const [resourceDesc, setResourceDesc] = useState('');
   const [resourceCategory, setResourceCategory] = useState('');
   const [resourceFile, setResourceFile] = useState(null);
-  const RESOURCE_MAX_MB = 5;
-  const RESOURCE_ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'];
   const addResourceMutation = useMutation({
     mutationFn: async () => {
       if (!accessToken) throw new Error('Please log in to add resources');
@@ -1133,13 +1354,17 @@ export default function MovementDetails() {
       let uploadedSize = null;
 
       if (file) {
-        if (file.size > RESOURCE_MAX_MB * 1024 * 1024) {
-          throw new Error(`File too large. Max size is ${RESOURCE_MAX_MB}MB.`);
-        }
-        if (file.type && !RESOURCE_ALLOWED_TYPES.includes(file.type)) {
-          throw new Error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF) or PDF.');
-        }
-        const uploaded = await uploadFile(file, { accessToken });
+        const validationError = validateFileUpload({
+          file,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+        });
+        if (validationError) throw new Error(validationError);
+        const uploaded = await uploadFile(file, {
+          accessToken,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+        });
         uploadedUrl = uploaded?.url ? String(uploaded.url) : null;
         uploadedName = uploaded?.filename ? String(uploaded.filename) : (file?.name ? String(file.name) : null);
         uploadedMime = uploaded?.mime ? String(uploaded.mime) : (file?.type ? String(file.type) : null);
@@ -1191,13 +1416,36 @@ export default function MovementDetails() {
     },
   });
 
-  const MAX_EVIDENCE_MB = 5;
-  const ALLOWED_EVIDENCE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif'];
   const [evidenceType, setEvidenceType] = useState('image');
   const [evidenceUrlInput, setEvidenceUrlInput] = useState('');
   const [evidenceCaption, setEvidenceCaption] = useState('');
   const [evidenceFile, setEvidenceFile] = useState(null);
   const [evidenceText, setEvidenceText] = useState('');
+  const [groupChatOpen, setGroupChatOpen] = useState(false);
+  const [groupSelectedEmails, setGroupSelectedEmails] = useState([]);
+
+  const maxGroupParticipants = 10;
+  const maxSelectableParticipants = Math.max(0, maxGroupParticipants - 1);
+
+  useEffect(() => {
+    if (!groupChatOpen) return;
+    if (groupSelectedEmails.length) return;
+    if (!verifiedParticipantEmails.length) return;
+    setGroupSelectedEmails(verifiedParticipantEmails.slice(0, maxSelectableParticipants));
+  }, [groupChatOpen, verifiedParticipantEmails, groupSelectedEmails.length, maxSelectableParticipants]);
+
+  const toggleGroupEmail = (email) => {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return;
+    setGroupSelectedEmails((prev) => {
+      const list = Array.isArray(prev) ? prev : [];
+      if (list.includes(normalized)) {
+        return list.filter((e) => e !== normalized);
+      }
+      if (list.length >= maxSelectableParticipants) return list;
+      return [...list, normalized];
+    });
+  };
 
   const submitEvidenceMutation = useMutation({
     mutationFn: async () => {
@@ -1221,14 +1469,18 @@ export default function MovementDetails() {
       if (mediaType === 'image') {
         const file = evidenceFile;
         if (!file) throw new Error('Please select an image');
-        if (file.size > MAX_EVIDENCE_MB * 1024 * 1024) {
-          throw new Error(`File too large. Max size is ${MAX_EVIDENCE_MB}MB.`);
-        }
-        if (!ALLOWED_EVIDENCE_MIME_TYPES.includes(file.type)) {
-          throw new Error('That file type isn’t supported. Please upload a JPG, PNG, or GIF.');
-        }
+        const validationError = validateFileUpload({
+          file,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+        });
+        if (validationError) throw new Error(validationError);
 
-        const uploaded = await uploadFile(file, { accessToken });
+        const uploaded = await uploadFile(file, {
+          accessToken,
+          maxBytes: MAX_UPLOAD_BYTES,
+          allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+        });
         const url = uploaded?.url ? String(uploaded.url) : '';
         if (!url) throw new Error('Upload succeeded but no URL returned');
 
@@ -1282,6 +1534,7 @@ export default function MovementDetails() {
       setEvidenceText('');
       await queryClient.invalidateQueries({ queryKey: ['movementEvidence', movementId] });
       await queryClient.invalidateQueries({ queryKey: ['movementEvidencePending', movementId] });
+      await queryClient.invalidateQueries({ queryKey: ['movement', movementId] });
     },
     onError: (e) => {
       toast.error(String(e?.message || 'Failed to submit evidence'));
@@ -1296,9 +1549,48 @@ export default function MovementDetails() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['movementEvidence', movementId] });
       await queryClient.invalidateQueries({ queryKey: ['movementEvidencePending', movementId] });
+      await queryClient.invalidateQueries({ queryKey: ['movement', movementId] });
     },
     onError: (e) => {
       toast.error(String(e?.message || 'Failed to verify evidence'));
+    },
+  });
+
+  const createGroupChatMutation = useMutation({
+    mutationFn: async () => {
+      if (!accessToken) throw new Error('Please log in to start a group chat');
+      if (!movementId) throw new Error('Movement is required');
+      if (!isOwner) throw new Error('Only the movement owner can start this chat');
+
+      const rateCheck = await checkActionAllowed({
+        email: myEmail ?? null,
+        action: 'conversation_create',
+        contextId: movementId,
+        accessToken,
+      });
+      if (!rateCheck?.ok) {
+        const wait = rateCheck?.retryAfterMs ? ` Try again in ${formatWaitMs(rateCheck.retryAfterMs)}.` : '';
+        throw new Error(String(rateCheck?.reason || 'Please slow down.') + wait);
+      }
+
+      const selected = groupSelectedEmails.slice(0, maxSelectableParticipants);
+      if (!selected.length) {
+        throw new Error('Select at least one verified participant');
+      }
+
+      return createMovementGroupConversation(movementId, selected, { accessToken });
+    },
+    onSuccess: (conversation) => {
+      setGroupChatOpen(false);
+      setGroupSelectedEmails([]);
+      toast.success('Verified group chat ready');
+      const id = conversation?.id ? String(conversation.id) : '';
+      if (id) {
+        navigate(`/messages?conversationId=${encodeURIComponent(id)}`);
+      }
+    },
+    onError: (e) => {
+      toast.error(String(e?.message || 'Failed to create group chat'));
     },
   });
 
@@ -1361,6 +1653,7 @@ export default function MovementDetails() {
   const addPetitionMutation = useMutation({
     mutationFn: async () => {
       if (!accessToken) throw new Error('Please log in to add petitions');
+      if (!petitionsEnabled) throw new Error('Petitions are currently disabled');
 
       const rateCheck = await checkActionAllowed({
         email: myEmail ?? null,
@@ -1486,7 +1779,12 @@ export default function MovementDetails() {
 
   return (
     <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 sm:py-10 space-y-6 sm:space-y-8">
-      <Link to="/" className="text-[#3A3DFF] font-bold">&larr; Back to home</Link>
+      <BackButton />
+      {showOfflineLabel && offlineMovement ? (
+        <div className="p-3 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-sm font-bold">
+          Showing last saved version (offline). Data may be outdated.
+        </div>
+      ) : null}
 
       <div className="p-4 sm:p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-3">
         <div className="space-y-2">
@@ -1499,17 +1797,18 @@ export default function MovementDetails() {
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-slate-200 bg-slate-50 font-bold text-slate-700">
               <UserIcon className="w-4 h-4" />
-              {ownerEmail ? (
-                <Link
-                  to={`/user/${encodeURIComponent(ownerEmail)}?email=${encodeURIComponent(ownerEmail)}`}
-                  className="hover:text-[#3A3DFF]"
-                  title={ownerEmail}
-                >
-                  {ownerEmail}
+              {ownerProfilePath ? (
+                <Link to={ownerProfilePath} className="hover:text-[#3A3DFF]" title={ownerLabel}>
+                  {ownerLabel}
                 </Link>
               ) : (
-                <span>Unknown author</span>
+                <span>{ownerLabel}</span>
               )}
+              {ownerIsAdmin ? (
+                <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                  Admin
+                </span>
+              ) : null}
             </div>
 
             {createdAt ? (
@@ -1537,19 +1836,18 @@ export default function MovementDetails() {
           <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50">
             <div className="text-xs font-black text-slate-600">Participants</div>
             <div className="mt-1 text-sm font-black text-slate-900 flex flex-wrap items-center gap-2">
-              {verifiedParticipants != null ? (
-                <span className="inline-flex items-center gap-1">
-                  <BadgeCheck className="w-4 h-4 text-[#3A3DFF]" /> {verifiedParticipants} verified
+              <span className="inline-flex items-center gap-1">
+                <BadgeCheck className="w-4 h-4 text-[#3A3DFF]" />
+                {verifiedParticipants != null ? verifiedParticipants : 0} verified
+              </span>
+              {typeof unverifiedParticipants === 'number' && unverifiedParticipants > 0 ? (
+                <span className="text-xs text-slate-600 font-semibold">
+                  Unverified interest: {unverifiedParticipants}
                 </span>
-              ) : (
-                <span className="text-slate-500">—</span>
-              )}
-              <span className="text-slate-300">•</span>
-              {unverifiedParticipants != null ? (
-                <span>{unverifiedParticipants} unverified</span>
-              ) : (
-                <span className="text-slate-500">—</span>
-              )}
+              ) : null}
+            </div>
+            <div className="mt-1 text-xs text-slate-500 font-semibold">
+              Participants are counted from author-approved evidence only.
             </div>
           </div>
 
@@ -1625,12 +1923,14 @@ export default function MovementDetails() {
               >
                 Events
               </a>
-              <a
-                href="#petitions"
-                className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-              >
-                Petitions
-              </a>
+              {petitionsEnabled ? (
+                <a
+                  href="#petitions"
+                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
+                >
+                  Petitions
+                </a>
+              ) : null}
               <button
                 type="button"
                 onClick={() => setInviteOpen(true)}
@@ -1644,6 +1944,15 @@ export default function MovementDetails() {
               >
                 Invite collaborators
               </button>
+              {(isOwner || isAdmin) ? (
+                <button
+                  type="button"
+                  onClick={() => setEditMovementOpen(true)}
+                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
+                >
+                  Edit details
+                </button>
+              ) : null}
             </>
           ) : (
             <>
@@ -1654,12 +1963,14 @@ export default function MovementDetails() {
               >
                 Events
               </a>
-              <a
-                href="#petitions"
-                className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-              >
-                Petition
-              </a>
+              {petitionsEnabled ? (
+                <a
+                  href="#petitions"
+                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
+                >
+                  Petition
+                </a>
+              ) : null}
               <a
                 href="#verified-activity"
                 className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
@@ -1749,7 +2060,13 @@ export default function MovementDetails() {
                       <div className="mt-2 text-sm text-slate-700 font-semibold whitespace-pre-wrap">{String(ev.description)}</div>
                     ) : null}
 
-                    <EventRsvpControls event={ev} movementId={movementId} accessToken={accessToken} myEmail={myEmail} />
+                    <EventRsvpControls
+                      event={ev}
+                      movementId={movementId}
+                      accessToken={accessToken}
+                      myEmail={myEmail}
+                      backendStatus={backendStatus}
+                    />
                   </div>
                 ))}
 
@@ -1771,71 +2088,73 @@ export default function MovementDetails() {
         </SectionCard>
         </div>
 
-        <div id="petitions">
-        <SectionCard title="Petitions">
-          <div className="space-y-3">
-            {petitionsLoading ? (
-              <EmptyState>Loading petitions…</EmptyState>
-            ) : petitionsError ? (
-              <EmptyState>
-                <div className="space-y-3">
-                  <div>We couldn’t load petitions. Please try again.</div>
-                  <button
-                    type="button"
-                    onClick={() => refetchPetitions()}
-                    className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-[#3A3DFF] text-white font-black hover:opacity-90"
-                  >
-                    Retry
-                  </button>
-                </div>
-              </EmptyState>
-            ) : petitions.length === 0 ? (
-              <EmptyState>No petitions yet.</EmptyState>
-            ) : (
-              <div className="space-y-2">
-                {petitions.map((p) => (
-                  <div key={String(p?.id)} className="p-4 rounded-xl border border-slate-200 bg-slate-50">
-                    <div className="font-black text-slate-900">{String(p?.title || '')}</div>
-                    <div className="mt-1 text-xs text-slate-600 font-bold">
-                      {p?.goal_signatures ? `Goal: ${String(p.goal_signatures)} signatures` : 'No goal set'}
-                    </div>
-                    {p?.url ? (
-                      <a
-                        className="mt-2 block text-sm font-bold text-[#3A3DFF] break-all"
-                        href={String(p.url)}
-                        target="_blank"
-                        rel="noreferrer"
+        {petitionsEnabled ? (
+          <div id="petitions">
+            <SectionCard title="Petitions">
+              <div className="space-y-3">
+                {petitionsLoading ? (
+                  <EmptyState>Loading petitions…</EmptyState>
+                ) : petitionsError ? (
+                  <EmptyState>
+                    <div className="space-y-3">
+                      <div>We couldn’t load petitions. Please try again.</div>
+                      <button
+                        type="button"
+                        onClick={() => refetchPetitions()}
+                        className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-[#3A3DFF] text-white font-black hover:opacity-90"
                       >
-                        {String(p.url)}
-                      </a>
+                        Retry
+                      </button>
+                    </div>
+                  </EmptyState>
+                ) : petitions.length === 0 ? (
+                  <EmptyState>No petitions yet.</EmptyState>
+                ) : (
+                  <div className="space-y-2">
+                    {petitions.map((p) => (
+                      <div key={String(p?.id)} className="p-4 rounded-xl border border-slate-200 bg-slate-50">
+                        <div className="font-black text-slate-900">{String(p?.title || '')}</div>
+                        <div className="mt-1 text-xs text-slate-600 font-bold">
+                          {p?.goal_signatures ? `Goal: ${String(p.goal_signatures)} signatures` : 'No goal set'}
+                        </div>
+                        {p?.url ? (
+                          <a
+                            className="mt-2 block text-sm font-bold text-[#3A3DFF] break-all"
+                            href={String(p.url)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {String(p.url)}
+                          </a>
+                        ) : null}
+
+                        <PetitionSignControls
+                          petition={p}
+                          accessToken={accessToken}
+                          myEmail={myEmail}
+                          backendStatus={backendStatus}
+                        />
+                      </div>
+                    ))}
+
+                    {hasNextPetitionsPage ? (
+                      <div className="pt-2 flex justify-center">
+                        <button
+                          type="button"
+                          onClick={() => fetchNextPetitionsPage()}
+                          disabled={isFetchingNextPetitionsPage}
+                          className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-white border-2 border-slate-200 text-slate-900 font-black hover:bg-slate-50"
+                        >
+                          {isFetchingNextPetitionsPage ? 'Loading…' : 'Load more'}
+                        </button>
+                      </div>
                     ) : null}
-
-                    <PetitionSignControls
-                      petition={p}
-                      accessToken={accessToken}
-                      myEmail={myEmail}
-                      backendStatus={backendStatus}
-                    />
                   </div>
-                ))}
-
-                {hasNextPetitionsPage ? (
-                  <div className="pt-2 flex justify-center">
-                    <button
-                      type="button"
-                      onClick={() => fetchNextPetitionsPage()}
-                      disabled={isFetchingNextPetitionsPage}
-                      className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-white border-2 border-slate-200 text-slate-900 font-black hover:bg-slate-50"
-                    >
-                      {isFetchingNextPetitionsPage ? 'Loading…' : 'Load more'}
-                    </button>
-                  </div>
-                ) : null}
+                )}
               </div>
-            )}
+            </SectionCard>
           </div>
-        </SectionCard>
-        </div>
+        ) : null}
 
         <SectionCard title="Resources">
           <div className="space-y-3">
@@ -1867,7 +2186,7 @@ export default function MovementDetails() {
                           isTeamMember &&
                           !!accessToken &&
                           !!myEmail &&
-                          (adminEmails.includes(String(myEmail).toLowerCase()) ||
+                          (isAdmin ||
                             String(r?.created_by_email || '').trim().toLowerCase() === String(myEmail).toLowerCase());
                         return canDeleteResource ? (
                           <button
@@ -1984,6 +2303,27 @@ export default function MovementDetails() {
             <div className="text-xs text-slate-600 font-semibold">
               Evidence is user-submitted and only appears after the movement organizer verifies it. People Power does not verify authenticity.
             </div>
+            {isOwner ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="text-sm font-black text-slate-900">Verified participants group chat</div>
+                  <div className="text-xs text-slate-600 font-semibold">
+                    Create an end-to-end encrypted group chat with verified participants (up to 10 people total).
+                  </div>
+                  <div className="text-[11px] text-slate-500 font-semibold">
+                    Participants are added by the movement author only. The chat appears under Messages → Groups.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGroupChatOpen(true)}
+                  disabled={groupEvidenceLoading || verifiedParticipantEmails.length === 0}
+                  className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black hover:opacity-90 disabled:opacity-60"
+                >
+                  {groupEvidenceLoading ? 'Loading…' : (verifiedParticipantEmails.length ? 'Start group chat' : 'No verified participants')}
+                </button>
+              </div>
+            ) : null}
 
             {evidenceLoading ? (
               <EmptyState>Loading verified evidence…</EmptyState>
@@ -2095,17 +2435,18 @@ export default function MovementDetails() {
                       <div className="space-y-2">
                         <input
                           type="file"
-                          accept="image/png,image/jpeg,image/jpg,image/gif"
+                          accept="image/png,image/jpeg,image/jpg,image/webp,image/gif"
                           onChange={(e) => {
                             const file = e.target.files?.[0] ?? null;
                             e.target.value = '';
                             if (!file) return;
-                            if (file.size > MAX_EVIDENCE_MB * 1024 * 1024) {
-                              toast.error(`File too large. Max size is ${MAX_EVIDENCE_MB}MB.`);
-                              return;
-                            }
-                            if (!ALLOWED_EVIDENCE_MIME_TYPES.includes(file.type)) {
-                              toast.error('That file type isn’t supported. Please upload a JPG, PNG, or GIF.');
+                            const validationError = validateFileUpload({
+                              file,
+                              maxBytes: MAX_UPLOAD_BYTES,
+                              allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
+                            });
+                            if (validationError) {
+                              toast.error(validationError);
                               return;
                             }
                             setEvidenceFile(file);
@@ -2186,13 +2527,20 @@ export default function MovementDetails() {
                       const caption = ev?.caption ? String(ev.caption) : '';
                       const text = ev?.text ? String(ev.text) : '';
                       const created = ev?.created_at ? formatDate(ev.created_at) : null;
-                      const submitter = ev?.submitter_email ? String(ev.submitter_email) : 'Unknown';
+                      const submitterEmail = ev?.submitter_email ? String(ev.submitter_email) : '';
+                      const submitter = submitterEmail || 'Unknown';
+                      const submitterIsAdmin = submitterEmail ? isAdminEmail(submitterEmail) : false;
                       const isImage = isEvidenceImage(ev);
                       const mediaType = String(ev?.media_type || '').toLowerCase();
                       return (
                         <div key={String(ev?.id || url)} className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
-                          <div className="text-xs font-black text-slate-600">
-                            Submitted by {submitter}
+                          <div className="flex items-center gap-2 text-xs font-black text-slate-600">
+                            <span>Submitted by {submitter}</span>
+                            {submitterIsAdmin ? (
+                              <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                                Admin
+                              </span>
+                            ) : null}
                             {created ? <span className="text-slate-400"> • {created}</span> : null}
                           </div>
                           {mediaType === 'text' ? (
@@ -2295,82 +2643,84 @@ export default function MovementDetails() {
           </div>
         </SectionCard>
 
-        <SectionCard title="Donations">
-          <div className="space-y-3">
-            <div className="text-sm text-slate-700 font-semibold">
-              Donations (if any) happen on external platforms. People Power does not process payments, hold funds, or guarantee campaigns.
-            </div>
-
-            {donationStoredLink ? (
-              <div className="flex flex-wrap items-center gap-3">
-                <a
-                  href={String(donationStoredLink)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90"
-                >
-                  Donate on external site
-                </a>
-                <a
-                  href={String(donationStoredLink)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-sm font-bold text-[#3A3DFF] break-all"
-                >
-                  {String(donationStoredLink)}
-                </a>
+        {donationsEnabled ? (
+          <SectionCard title="Donations">
+            <div className="space-y-3">
+              <div className="text-sm text-slate-700 font-semibold">
+                Donations (if any) happen on external platforms. People Power does not process payments, hold funds, or guarantee campaigns.
               </div>
-            ) : (
-              <EmptyState>No donation link has been added.</EmptyState>
-            )}
 
-            {isTeamMember ? (
-              <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs font-black text-slate-600">Organizer controls</div>
-                  <button
-                    type="button"
-                    onClick={() => setShowDonationEdit((v) => !v)}
-                    className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
+              {donationStoredLink ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <a
+                    href={String(donationStoredLink)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90"
                   >
-                    {showDonationEdit ? 'Close' : donationStoredLink ? 'Update link' : 'Add link'}
-                  </button>
+                    Donate on external site
+                  </a>
+                  <a
+                    href={String(donationStoredLink)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sm font-bold text-[#3A3DFF] break-all"
+                  >
+                    {String(donationStoredLink)}
+                  </a>
                 </div>
+              ) : (
+                <EmptyState>No donation link has been added.</EmptyState>
+              )}
 
-                {showDonationEdit ? (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div className="md:col-span-2">
-                      <Label>Donation URL</Label>
-                      <TextInput value={donationLinkDraft} onChange={setDonationLinkDraft} placeholder="https://…" />
-                    </div>
-                    <div className="flex items-end">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const next = String(donationLinkDraft || '').trim();
-                          if (!next) {
-                            alert('Please enter a donation URL');
-                            return;
-                          }
-                          try {
-                            localStorage.setItem(donationStorageKey, next);
-                          } catch {
-                            // ignore
-                          }
-                          setDonationStoredLink(next);
-                          setShowDonationEdit(false);
-                        }}
-                        className="w-full px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90"
-                      >
-                        Save
-                      </button>
-                    </div>
+              {isTeamMember ? (
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs font-black text-slate-600">Organizer controls</div>
+                    <button
+                      type="button"
+                      onClick={() => setShowDonationEdit((v) => !v)}
+                      className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
+                    >
+                      {showDonationEdit ? 'Close' : donationStoredLink ? 'Update link' : 'Add link'}
+                    </button>
                   </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-        </SectionCard>
+
+                  {showDonationEdit ? (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div className="md:col-span-2">
+                        <Label>Donation URL</Label>
+                        <TextInput value={donationLinkDraft} onChange={setDonationLinkDraft} placeholder="https://…" />
+                      </div>
+                      <div className="flex items-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = String(donationLinkDraft || '').trim();
+                            if (!next) {
+                              alert('Please enter a donation URL');
+                              return;
+                            }
+                            try {
+                              localStorage.setItem(donationStorageKey, next);
+                            } catch {
+                              // ignore
+                            }
+                            setDonationStoredLink(next);
+                            setShowDonationEdit(false);
+                          }}
+                          className="w-full px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </SectionCard>
+        ) : null}
 
         {(isOwner || isAdmin) && (
           <SectionCard title="Recent collaborator activity">
@@ -2506,6 +2856,20 @@ export default function MovementDetails() {
                   </div>
                 </SectionCard>
               )}
+              {(isOwner || isAdmin) && (
+                <SectionCard title="Edit movement details">
+                  <div className="text-sm text-slate-600 font-semibold">
+                    Keep details accurate and up to date. Edits are visible immediately.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditMovementOpen(true)}
+                    className="mt-3 inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90"
+                  >
+                    Edit movement
+                  </button>
+                </SectionCard>
+              )}
               <SectionCard title="Create event">
                 <div className="space-y-3">
                   {accessToken ? (
@@ -2559,38 +2923,40 @@ export default function MovementDetails() {
                 </div>
               </SectionCard>
 
-              <SectionCard title="Manage petitions">
-                <div className="space-y-3">
-                  {accessToken ? (
-                    <>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div className="md:col-span-2">
-                          <Label>Title</Label>
-                          <TextInput value={petitionTitle} onChange={setPetitionTitle} placeholder="e.g. Sign the pledge" />
+              {petitionsEnabled ? (
+                <SectionCard title="Manage petitions">
+                  <div className="space-y-3">
+                    {accessToken ? (
+                      <>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="md:col-span-2">
+                            <Label>Title</Label>
+                            <TextInput value={petitionTitle} onChange={setPetitionTitle} placeholder="e.g. Sign the pledge" />
+                          </div>
+                          <div>
+                            <Label>Goal signatures (optional)</Label>
+                            <TextInput value={petitionGoal} onChange={setPetitionGoal} placeholder="1000" type="number" />
+                          </div>
                         </div>
                         <div>
-                          <Label>Goal signatures (optional)</Label>
-                          <TextInput value={petitionGoal} onChange={setPetitionGoal} placeholder="1000" type="number" />
+                          <Label>URL</Label>
+                          <TextInput value={petitionUrl} onChange={setPetitionUrl} placeholder="https://…" />
                         </div>
-                      </div>
-                      <div>
-                        <Label>URL</Label>
-                        <TextInput value={petitionUrl} onChange={setPetitionUrl} placeholder="https://…" />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => addPetitionMutation.mutate()}
-                        disabled={addPetitionMutation.isPending}
-                        className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
-                      >
-                        {addPetitionMutation.isPending ? 'Adding…' : 'Add petition'}
-                      </button>
-                    </>
-                  ) : (
-                    <SignInCallout action="add petitions" />
-                  )}
-                </div>
-              </SectionCard>
+                        <button
+                          type="button"
+                          onClick={() => addPetitionMutation.mutate()}
+                          disabled={addPetitionMutation.isPending}
+                          className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
+                        >
+                          {addPetitionMutation.isPending ? 'Adding…' : 'Add petition'}
+                        </button>
+                      </>
+                    ) : (
+                      <SignInCallout action="add petitions" />
+                    )}
+                  </div>
+                </SectionCard>
+              ) : null}
 
               <SectionCard title="Add resource">
                 <div className="space-y-3">
@@ -2622,20 +2988,20 @@ export default function MovementDetails() {
                                 setResourceFile(null);
                                 return;
                               }
-                              if (file.size > RESOURCE_MAX_MB * 1024 * 1024) {
-                                toast.error(`File too large. Max size is ${RESOURCE_MAX_MB}MB.`);
-                                setResourceFile(null);
-                                return;
-                              }
-                              if (file.type && !RESOURCE_ALLOWED_TYPES.includes(file.type)) {
-                                toast.error('That file type isn’t supported. Please upload an image (JPG/PNG/GIF) or PDF.');
+                              const validationError = validateFileUpload({
+                                file,
+                                maxBytes: MAX_UPLOAD_BYTES,
+                                allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
+                              });
+                              if (validationError) {
+                                toast.error(validationError);
                                 setResourceFile(null);
                                 return;
                               }
                               setResourceFile(file);
                             }}
                             className="w-full h-11 px-3 rounded-xl border-2 border-slate-200 bg-white text-slate-900 font-semibold outline-none"
-                            accept="image/png,image/jpeg,image/jpg,image/gif,application/pdf"
+                            accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,application/pdf"
                           />
                         </div>
                       </div>
@@ -2850,13 +3216,29 @@ export default function MovementDetails() {
                     <EmptyState>No discussion yet.</EmptyState>
                   ) : (
                     <div className="space-y-2">
-                      {discussions.map((m) => (
-                        <div key={String(m?.id)} className="p-4 rounded-xl border border-slate-200 bg-slate-50">
-                          <div className="text-xs text-slate-600 font-bold">{String(m?.author_email || '')}</div>
-                          <div className="mt-1 text-sm text-slate-800 font-semibold whitespace-pre-wrap">{String(m?.message || '')}</div>
-                          <div className="mt-2 text-xs text-slate-500 font-bold">{m?.created_at ? String(m.created_at) : ''}</div>
-                        </div>
-                      ))}
+                      {discussions.map((m) => {
+                        const emailKey = String(m?.author_email || '').trim().toLowerCase();
+                        const authorProfile = emailKey ? discussionAuthors[emailKey] : null;
+                        const authorLabel =
+                          authorProfile?.display_name ||
+                          (authorProfile?.username ? `@${authorProfile.username}` : 'Member');
+                        const isAdminAuthor = emailKey ? isAdminEmail(emailKey) : false;
+
+                        return (
+                          <div key={String(m?.id)} className="p-4 rounded-xl border border-slate-200 bg-slate-50">
+                            <div className="flex items-center gap-2 text-xs text-slate-600 font-bold">
+                              <span>{authorLabel}</span>
+                              {isAdminAuthor ? (
+                                <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                                  Admin
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 text-sm text-slate-800 font-semibold whitespace-pre-wrap">{String(m?.message || '')}</div>
+                            <div className="mt-2 text-xs text-slate-500 font-bold">{m?.created_at ? String(m.created_at) : ''}</div>
+                          </div>
+                        );
+                      })}
 
                       {hasNextDiscussionsPage ? (
                         <div className="pt-2 flex justify-center">
@@ -2887,7 +3269,7 @@ export default function MovementDetails() {
                 )}
               </SectionCard>
 
-              {aiOptIn ? (
+              {aiOptIn && creatorAnalyticsEnabled ? (
                 <SectionCard title="Creator Dashboard (AI analytics — advanced)">
                   <div className="text-xs text-slate-600 font-bold">
                     AI-generated insights — experimental, may be inaccurate.
@@ -2904,6 +3286,9 @@ export default function MovementDetails() {
 
               {canDelete ? (
                 <SectionCard title="Danger zone">
+                  <p className="text-sm text-slate-600 font-semibold">
+                    Deleting a movement is permanent and should be a last resort.
+                  </p>
                   <button
                     type="button"
                     onClick={() => setDeleteMovementOpen(true)}
@@ -2950,13 +3335,105 @@ export default function MovementDetails() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Edit movement details */}
+      <Dialog open={editMovementOpen} onOpenChange={setEditMovementOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit movement</DialogTitle>
+            <DialogDescription>
+              Update your movement details. Changes are immediate and visible to participants.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div>
+              <Label>Title</Label>
+              <TextInput
+                value={editForm.title}
+                onChange={(value) => setEditForm((prev) => ({ ...prev, title: value }))}
+                placeholder="Movement title"
+              />
+            </div>
+            <div>
+              <Label>Summary (optional)</Label>
+              <TextArea
+                value={editForm.summary}
+                onChange={(value) => setEditForm((prev) => ({ ...prev, summary: value }))}
+                placeholder="Short summary for quick previews"
+              />
+            </div>
+            <div>
+              <Label>Description</Label>
+              <TextArea
+                value={editForm.description}
+                onChange={(value) => setEditForm((prev) => ({ ...prev, description: value }))}
+                placeholder="Describe the movement and what participants should do"
+              />
+            </div>
+            <div>
+              <Label>Tags (comma separated)</Label>
+              <TextInput
+                value={editForm.tags}
+                onChange={(value) => setEditForm((prev) => ({ ...prev, tags: value }))}
+                placeholder="e.g. community, environment, advocacy"
+              />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <Label>City / region</Label>
+                <TextInput
+                  value={editForm.location_city}
+                  onChange={(value) => setEditForm((prev) => ({ ...prev, location_city: value }))}
+                  placeholder="City or region"
+                />
+              </div>
+              <div>
+                <Label>Country</Label>
+                <TextInput
+                  value={editForm.location_country}
+                  onChange={(value) => setEditForm((prev) => ({ ...prev, location_country: value }))}
+                  placeholder="Country"
+                />
+              </div>
+            </div>
+            <div>
+              <Label>Media links (one per line)</Label>
+              <TextArea
+                value={editForm.media_urls}
+                onChange={(value) => setEditForm((prev) => ({ ...prev, media_urls: value }))}
+                placeholder="https://..."
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <button
+              type="button"
+              className="inline-flex items-center justify-center px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-900 font-black"
+              onClick={() => setEditMovementOpen(false)}
+              disabled={editMovementSaving}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90"
+              onClick={handleMovementUpdate}
+              disabled={editMovementSaving}
+            >
+              {editMovementSaving ? 'Saving…' : 'Save changes'}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Confirm: delete movement */}
       <AlertDialog open={deleteMovementOpen} onOpenChange={setDeleteMovementOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete movement?</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently removes it from the platform and cannot be undone.
+              This permanently removes it from the platform and cannot be undone. Verified participants will be notified.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -2987,6 +3464,89 @@ export default function MovementDetails() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog
+        open={groupChatOpen}
+        onOpenChange={(open) => {
+          setGroupChatOpen(open);
+          if (!open) setGroupSelectedEmails([]);
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Verified participants group chat</DialogTitle>
+            <DialogDescription>
+              Select up to {maxSelectableParticipants} verified participants. You’ll be included automatically.
+              Everyone must have opened Messages at least once to publish an encryption key.
+            </DialogDescription>
+          </DialogHeader>
+
+          {groupEvidenceLoading ? (
+            <div className="text-sm text-slate-600 font-semibold">Loading verified participants…</div>
+          ) : verifiedParticipantEmails.length === 0 ? (
+            <div className="text-sm text-slate-600 font-semibold">
+              No verified participants yet. Approve evidence first to unlock the group chat.
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+              {verifiedParticipantEmails.map((email) => {
+                const profile = verifiedProfileMap.get(email);
+                const displayName =
+                  String(profile?.display_name || '').trim() ||
+                  (profile?.username ? `@${profile.username}` : maskEmail(email));
+                const secondary = profile?.username ? `@${profile.username}` : maskEmail(email);
+                const selected = groupSelectedEmails.includes(email);
+                const atLimit = !selected && groupSelectedEmails.length >= maxSelectableParticipants;
+                return (
+                  <label
+                    key={email}
+                    className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2"
+                  >
+                    <Checkbox
+                      checked={selected}
+                      onCheckedChange={() => toggleGroupEmail(email)}
+                      disabled={atLimit}
+                    />
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-slate-900 truncate">{displayName}</div>
+                      <div className="text-xs text-slate-500 font-semibold truncate">{secondary}</div>
+                    </div>
+                    {atLimit ? (
+                      <span className="ml-auto text-[10px] font-black text-slate-400">Limit reached</span>
+                    ) : null}
+                  </label>
+                );
+              })}
+            </div>
+          )}
+
+          <DialogFooter className="mt-2">
+            <button
+              type="button"
+              className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 font-black hover:bg-slate-50"
+              onClick={() => setGroupChatOpen(false)}
+              disabled={createGroupChatMutation.isPending}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
+              onClick={() => createGroupChatMutation.mutate()}
+              disabled={
+                createGroupChatMutation.isPending ||
+                groupEvidenceLoading ||
+                verifiedParticipantEmails.length === 0 ||
+                groupSelectedEmails.length === 0
+              }
+            >
+              {createGroupChatMutation.isPending
+                ? 'Creating…'
+                : `Create chat (${groupSelectedEmails.length + 1}/${maxGroupParticipants})`}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div id="comments">
         <CommentSection movementId={movementId} movement={movement} canModerate={canModerate} />

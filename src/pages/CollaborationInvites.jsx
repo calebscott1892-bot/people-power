@@ -6,6 +6,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchMovementById } from '@/api/movementsClient';
 import { acceptCollaborationInvite, listMyCollaborationInvites, removeCollaborator } from '@/api/collaboratorsClient';
+import BackButton from '@/components/shared/BackButton';
 
 export default function CollaborationInvites() {
   const { user, session } = useAuth();
@@ -23,7 +24,7 @@ export default function CollaborationInvites() {
       const titles = await Promise.all(
         pending.map(async (c) => {
           try {
-            const mv = await fetchMovementById(String(c?.movement_id || ''));
+            const mv = await fetchMovementById(String(c?.movement_id || ''), { accessToken });
             return String(mv?.title || mv?.name || c?.movement_id || '');
           } catch {
             return String(c?.movement_id || '');
@@ -55,9 +56,7 @@ export default function CollaborationInvites() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-12 space-y-6">
-      <Link to="/" className="text-[#3A3DFF] font-bold">
-        &larr; Back to home
-      </Link>
+      <BackButton />
 
       <div className="p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-4">
         <div>

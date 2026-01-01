@@ -1,5 +1,6 @@
 import CommunityHealth from "./CommunityHealth";
-    CommunityHealth: CommunityHealth,
+import ResearchConfig from "./ResearchConfig";
+import FeatureFlags from "./FeatureFlags";
 import Layout from "./Layout.jsx";
 
 import Home from "./Home";
@@ -22,6 +23,8 @@ import LegalHub from "./LegalHub";
 
 import SafetyFAQ from "./SafetyFAQ";
 
+import PrivacyPolicy from "./PrivacyPolicy";
+
 import AdminReports from "./AdminReports";
 
 import UserProfile from "./UserProfile";
@@ -35,6 +38,7 @@ import CollaborationInvites from "./CollaborationInvites";
 import Leaderboard from "./Leaderboard";
 
 import AdminDashboard from "./AdminDashboard";
+import AdminChallenges from "./AdminChallenges";
 
 import AdminIncidentLog from "./AdminIncidentLog";
 
@@ -65,6 +69,8 @@ const PAGES = {
     LegalHub: LegalHub,
 
     SafetyFAQ: SafetyFAQ,
+
+    PrivacyPolicy: PrivacyPolicy,
     
     AdminReports: AdminReports,
     
@@ -79,6 +85,8 @@ const PAGES = {
     Leaderboard: Leaderboard,
     
     AdminDashboard: AdminDashboard,
+
+    AdminChallenges: AdminChallenges,
 
     AdminIncidentLog: AdminIncidentLog,
     
@@ -129,12 +137,15 @@ function PagesContent() {
 
                 <Route path="/SafetyFAQ" element={<SafetyFAQ />} />
 
+                <Route path="/PrivacyPolicy" element={<PrivacyPolicy />} />
+
                 {/* Route aliases for the LegalHub links */}
                 <Route path="/legal-hub" element={<LegalHub />} />
                 <Route path="/terms-of-service" element={<TermsOfService />} />
                 <Route path="/content-policy" element={<ContentPolicy />} />
                 <Route path="/community-guidelines" element={<CommunityGuidelines />} />
                 <Route path="/safety-faq" element={<SafetyFAQ />} />
+                <Route path="/privacy-policy" element={<PrivacyPolicy />} />
                 
                 <Route
                     path="/CommunityHealth"
@@ -144,6 +155,23 @@ function PagesContent() {
                         </RequireAdmin>
                     }
                 />
+                <Route
+                    path="/ResearchConfig"
+                    element={
+                        <RequireAdmin>
+                            <ResearchConfig />
+                        </RequireAdmin>
+                    }
+                />
+                <Route
+                    path="/FeatureFlags"
+                    element={
+                        <RequireAdmin>
+                            <FeatureFlags />
+                        </RequireAdmin>
+                    }
+                />
+                <Route
                     path="/AdminReports"
                     element={
                         <RequireStaff>
@@ -168,6 +196,15 @@ function PagesContent() {
                     element={
                         <RequireAdmin>
                             <AdminDashboard />
+                        </RequireAdmin>
+                    }
+                />
+
+                <Route
+                    path="/AdminChallenges"
+                    element={
+                        <RequireAdmin>
+                            <AdminChallenges />
                         </RequireAdmin>
                     }
                 />

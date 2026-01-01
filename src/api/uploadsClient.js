@@ -1,9 +1,11 @@
 import { getServerBaseUrl } from './serverBase';
+import {
+  MAX_UPLOAD_BYTES,
+  ALLOWED_UPLOAD_MIME_TYPES,
+  validateFileUpload,
+} from '@/utils/uploadLimits';
 
 const BASE_URL = getServerBaseUrl();
-
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB
-const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'application/pdf'];
 
 async function safeReadJson(res) {
   try {
@@ -26,15 +28,25 @@ export async function uploadFile(file, options) {
   if (!accessToken) throw new Error('Authentication required');
   if (!file) throw new Error('File is required');
 
-  if (typeof file.size === 'number' && file.size > MAX_UPLOAD_BYTES) {
-    throw new Error(`File too large. Max size is ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))}MB.`);
-  }
-  if (file.type && !ALLOWED_MIME_TYPES.includes(file.type)) {
-    throw new Error('That file type is not supported. Please upload an image (JPG/PNG/GIF) or PDF.');
-  }
+  const maxBytes = Number.isFinite(options?.maxBytes) ? Number(options.maxBytes) : MAX_UPLOAD_BYTES;
+  const allowedTypes =
+    Array.isArray(options?.allowedMimeTypes) && options.allowedMimeTypes.length
+      ? options.allowedMimeTypes
+      : ALLOWED_UPLOAD_MIME_TYPES;
+
+  const validationError = validateFileUpload({
+    file,
+    maxBytes,
+    allowedMimeTypes: allowedTypes,
+  });
+  if (validationError) throw new Error(validationError);
 
   const url = `${BASE_URL.replace(/\/$/, '')}/uploads`;
   const form = new FormData();
+  if (options?.kind) {
+    // NOTE: Append kind before file so multipart parsers capture it reliably.
+    form.append('kind', String(options.kind));
+  }
   form.append('file', file);
 
   const res = await fetch(url, {

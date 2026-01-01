@@ -11,6 +11,7 @@ import { entities } from "@/api/appClient";
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { useAuth } from '@/auth/AuthProvider';
 import { inviteCollaborator } from '@/api/collaboratorsClient';
+import { isAdmin as isAdminEmail } from '@/utils/staff';
 
 export default function InviteCollaboratorModal({ open, onClose, movementId, currentUser, movement }) {
   const [email, setEmail] = useState('');
@@ -132,7 +133,14 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
                     onClick={() => setEmail(profile.user_email)}
                     className="w-full p-3 bg-white rounded-lg border-2 border-slate-200 hover:border-purple-400 transition-colors text-left"
                   >
-                    <div className="font-bold text-slate-900 mb-1">{profile.display_name}</div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="font-bold text-slate-900">{profile.display_name}</div>
+                      {profile.user_email && isAdminEmail(profile.user_email) ? (
+                        <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                          Admin
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="text-xs text-slate-500 mb-2">@{profile.username}</div>
                     <div className="flex flex-wrap gap-1">
                       {profile.skills?.slice(0, 3).map((skill, i) => (
