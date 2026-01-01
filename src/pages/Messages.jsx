@@ -25,6 +25,7 @@ import {
   updateGroupParticipants,
   updateGroupSettings,
 } from '@/api/messagesClient';
+import { lookupUsersByEmail } from '@/api/usersClient';
 import { fetchMyBlocks } from '@/api/blocksClient';
 import { fetchPublicKey, upsertMyPublicKey } from '@/api/keysClient';
 import {
@@ -164,11 +165,18 @@ function getOtherParticipant(participants, myEmail) {
   return list.find((e) => normalizeEmail(e) !== me) || list[0] || '';
 }
 
-function getConversationLabel(conversation, myEmail) {
+function getConversationLabel(conversation, myEmail, profileLookup) {
   if (conversation?.is_group) {
     return String(conversation?.group_name || 'Verified participants group');
   }
-  return getOtherParticipant(conversation?.participant_emails, myEmail) || 'Conversation';
+  const other = getOtherParticipant(conversation?.participant_emails, myEmail);
+  const normalized = normalizeEmail(other);
+  const profile = normalized ? profileLookup?.get(normalized) : null;
+  const display = String(profile?.display_name || '').trim();
+  if (display) return display;
+  const username = String(profile?.username || '').trim();
+  if (username) return `@${username}`;
+  return other ? 'Member' : 'Conversation';
 }
 
 function getGroupAdmins(conversation) {
@@ -431,6 +439,7 @@ export default function Messages() {
       if (lastPage.length < CONVERSATIONS_PAGE_SIZE) return undefined;
       return allPages.length * CONVERSATIONS_PAGE_SIZE;
     },
+    refetchInterval: 10000,
   });
 
   const conversations = useMemo(() => {
@@ -438,6 +447,55 @@ export default function Messages() {
     if (!Array.isArray(pages)) return [];
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
   }, [conversationsData]);
+
+  const participantEmails = useMemo(() => {
+    const emails = new Set();
+    const list = Array.isArray(conversations) ? conversations : [];
+    for (const convo of list) {
+      const participants = Array.isArray(convo?.participant_emails) ? convo.participant_emails : [];
+      for (const email of participants) {
+        const normalized = normalizeEmail(email);
+        if (normalized) emails.add(normalized);
+      }
+    }
+    if (myEmailNormalized) emails.add(myEmailNormalized);
+    return Array.from(emails);
+  }, [conversations, myEmailNormalized]);
+
+  const { data: participantProfiles = [] } = useQuery({
+    queryKey: ['messageParticipants', participantEmails.join('|')],
+    queryFn: () => lookupUsersByEmail(participantEmails, { accessToken }),
+    enabled: !!accessToken && participantEmails.length > 0,
+    staleTime: 1000 * 60 * 5,
+  });
+
+  const profileLookup = useMemo(() => {
+    const lookup = new Map();
+    for (const profile of Array.isArray(participantProfiles) ? participantProfiles : []) {
+      const email = normalizeEmail(profile?.email || profile?.user_email);
+      if (!email) continue;
+      lookup.set(email, {
+        display_name: profile?.display_name ?? null,
+        username: profile?.username ?? null,
+        profile_photo_url: profile?.profile_photo_url ?? null,
+      });
+    }
+    return lookup;
+  }, [participantProfiles]);
+
+  const signedInLabel = useMemo(() => {
+    const profile = myEmailNormalized ? profileLookup.get(myEmailNormalized) : null;
+    const display = String(profile?.display_name || '').trim();
+    if (display) return display;
+    const username = String(profile?.username || '').trim();
+    if (username) return `@${username}`;
+    const meta =
+      user?.user_metadata?.full_name ||
+      user?.user_metadata?.name ||
+      user?.user_metadata?.username ||
+      '';
+    return String(meta || '').trim() || 'Account';
+  }, [profileLookup, myEmailNormalized, user]);
 
   useEffect(() => {
     const idFromUrl = searchParams.get('conversationId');
@@ -525,8 +583,8 @@ export default function Messages() {
   const hasBlockedParticipant = blockedParticipants.length > 0;
 
   const selectedTitle = useMemo(
-    () => (selectedConversation ? getConversationLabel(selectedConversation, myEmail) : ''),
-    [selectedConversation, myEmail]
+    () => (selectedConversation ? getConversationLabel(selectedConversation, myEmail, profileLookup) : ''),
+    [selectedConversation, myEmail, profileLookup]
   );
 
   useEffect(() => {
@@ -568,7 +626,7 @@ export default function Messages() {
         .filter((c) => !c?.is_group)
         .filter((c) => {
           if (!q) return true;
-          const label = String(getConversationLabel(c, myEmail) || '').toLowerCase();
+          const label = String(getConversationLabel(c, myEmail, profileLookup) || '').toLowerCase();
           const last = String(c?.last_message_body || '').toLowerCase();
           return label.includes(q) || last.includes(q);
         });
@@ -578,7 +636,7 @@ export default function Messages() {
         .filter((c) => !!c?.is_group)
         .filter((c) => {
           if (!q) return true;
-          const label = String(getConversationLabel(c, myEmail) || '').toLowerCase();
+          const label = String(getConversationLabel(c, myEmail, profileLookup) || '').toLowerCase();
           const last = String(c?.last_message_body || '').toLowerCase();
           return label.includes(q) || last.includes(q);
         });
@@ -590,11 +648,11 @@ export default function Messages() {
       })
       .filter((c) => {
         if (!q) return true;
-        const label = String(getConversationLabel(c, myEmail) || '').toLowerCase();
+        const label = String(getConversationLabel(c, myEmail, profileLookup) || '').toLowerCase();
         const last = String(c?.last_message_body || '').toLowerCase();
         return label.includes(q) || last.includes(q);
       });
-  }, [conversations, box, search, myEmail]);
+  }, [conversations, box, search, myEmail, profileLookup]);
 
   const otherEmail = useMemo(() => {
     if (!selectedConversation || isGroupConversation) return '';
@@ -602,6 +660,12 @@ export default function Messages() {
   }, [selectedConversation, myEmail, isGroupConversation]);
 
   const otherEmailNormalized = useMemo(() => normalizeEmail(otherEmail), [otherEmail]);
+
+  const selectedOtherProfile = useMemo(() => {
+    if (!selectedConversation || isGroupConversation) return null;
+    const normalized = normalizeEmail(otherEmail);
+    return normalized ? profileLookup.get(normalized) : null;
+  }, [selectedConversation, isGroupConversation, otherEmail, profileLookup]);
 
   const {
     data: otherPublicKey,
@@ -679,6 +743,7 @@ export default function Messages() {
       if (lastPage.length < MESSAGES_PAGE_SIZE) return undefined;
       return allPages.length * MESSAGES_PAGE_SIZE;
     },
+    refetchInterval: selectedId ? 5000 : false,
   });
 
   const messages = useMemo(() => {
@@ -693,6 +758,13 @@ export default function Messages() {
     if (!blockedEmails.size) return list;
     return list.filter((m) => !blockedEmails.has(normalizeEmail(m?.sender_email)));
   }, [messagesData, blockedEmails]);
+
+  useEffect(() => {
+    if (!selectedConversation?.id || !myEmailNormalized) return;
+    if (Number(selectedConversation?.unread_count || 0) > 0) {
+      markReadMutation.mutate(String(selectedConversation.id));
+    }
+  }, [selectedConversation?.id, selectedConversation?.unread_count, myEmailNormalized, markReadMutation]);
 
   useEffect(() => {
     if (messagesError && messagesErrorObj) {
@@ -1057,7 +1129,7 @@ export default function Messages() {
             </div>
 
             <div className="px-4 pb-4">
-              <div className="text-xs font-bold text-slate-500">Signed in as {myEmail}</div>
+              <div className="text-xs font-bold text-slate-500">Signed in as {signedInLabel}</div>
             </div>
 
             <div className="px-4 pb-4">
@@ -1132,7 +1204,10 @@ export default function Messages() {
                   {filteredConversations.map((c) => {
                     const id = String(c?.id || '');
                     const isGroup = !!c?.is_group;
-                    const other = getConversationLabel(c, myEmail);
+                    const other = getConversationLabel(c, myEmail, profileLookup);
+                    const otherEmail = isGroup ? null : getOtherParticipant(c?.participant_emails, myEmail);
+                    const otherNormalized = normalizeEmail(otherEmail);
+                    const otherProfile = otherNormalized ? profileLookup.get(otherNormalized) : null;
                     const unread = Number(c?.unread_count || 0);
                     const isSelected = id && selectedId && id === String(selectedId);
                     const status = String(c?.request_status || 'accepted').toLowerCase();
@@ -1160,14 +1235,15 @@ export default function Messages() {
                       >
                         <div className="flex items-center justify-between gap-3">
                           <div className="flex items-center gap-3 min-w-0">
-                            {isGroup ? (
-                              <Avatar className="h-10 w-10">
-                                <AvatarImage src={c?.group_avatar_url || undefined} alt={other || 'Group'} />
-                                <AvatarFallback className="bg-slate-200 text-slate-700 font-black">
-                                  {(other || 'G')[0]?.toUpperCase()}
-                                </AvatarFallback>
-                              </Avatar>
-                            ) : null}
+                            <Avatar className="h-10 w-10">
+                              <AvatarImage
+                                src={isGroup ? c?.group_avatar_url || undefined : otherProfile?.profile_photo_url || undefined}
+                                alt={other || 'Conversation'}
+                              />
+                              <AvatarFallback className="bg-slate-200 text-slate-700 font-black">
+                                {(other || 'C')[0]?.toUpperCase()}
+                              </AvatarFallback>
+                            </Avatar>
                             <div className="min-w-0">
                               <div className="font-black text-slate-900 truncate">{other || 'Conversation'}</div>
                               <div className="text-sm text-slate-600 truncate">
@@ -1233,15 +1309,20 @@ export default function Messages() {
               <>
                 <div className="p-4 border-b border-slate-200">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-start gap-3">
-                      {isGroupConversation ? (
-                        <Avatar className="h-10 w-10">
-                          <AvatarImage src={selectedConversation?.group_avatar_url || undefined} alt={selectedTitle || 'Group'} />
-                          <AvatarFallback className="bg-slate-200 text-slate-700 font-black">
-                            {(selectedTitle || 'G')[0]?.toUpperCase()}
-                          </AvatarFallback>
-                        </Avatar>
-                      ) : null}
+                  <div className="flex items-start gap-3">
+                      <Avatar className="h-10 w-10">
+                        <AvatarImage
+                          src={
+                            isGroupConversation
+                              ? selectedConversation?.group_avatar_url || undefined
+                              : selectedOtherProfile?.profile_photo_url || undefined
+                          }
+                          alt={selectedTitle || 'Conversation'}
+                        />
+                        <AvatarFallback className="bg-slate-200 text-slate-700 font-black">
+                          {(selectedTitle || 'C')[0]?.toUpperCase()}
+                        </AvatarFallback>
+                      </Avatar>
                       <div>
                         <div className="font-black text-slate-900">{selectedTitle || 'Conversation'}</div>
                         <div className="text-xs text-slate-500 font-bold mt-1">
@@ -1372,11 +1453,24 @@ export default function Messages() {
                         let displayBody = String(m?.body || '');
                         const encryptedPayload = unpackEncryptedPayload(displayBody);
                         const readBy = Array.isArray(m?.read_by) ? m.read_by.map((x) => String(x).toLowerCase()) : [];
-                        const otherHasRead = !!(mine && otherEmailNormalized && readBy.includes(otherEmailNormalized));
+                        const readByOthers = mine ? readBy.filter((e) => e && e !== myEmailNormalized) : [];
+                        const otherHasRead = mine
+                          ? (isGroupConversation ? readByOthers.length > 0 : (otherEmailNormalized && readBy.includes(otherEmailNormalized)))
+                          : false;
                         const senderEmail = normalizeEmail(m?.sender_email);
                         const senderPublicKey = isGroupConversation
                           ? (senderEmail ? groupPublicKeys[senderEmail] : null)
                           : otherPublicKey;
+                        const senderProfile = senderEmail ? profileLookup.get(senderEmail) : null;
+                        const senderDisplay =
+                          String(senderProfile?.display_name || '').trim() ||
+                          (senderProfile?.username ? `@${String(senderProfile.username).trim()}` : '') ||
+                          (mine ? 'You' : 'Member');
+                        const statusLabel = mine
+                          ? (otherHasRead
+                              ? (isGroupConversation ? `Read by ${readByOthers.length}` : 'Read')
+                              : 'Delivered')
+                          : null;
                         return (
                           <div key={String(m?.id)} className={cn('flex', mine ? 'justify-end' : 'justify-start')}>
                             <div
@@ -1387,6 +1481,9 @@ export default function Messages() {
                                   : 'bg-white text-slate-900 border-slate-200'
                               )}
                             >
+                              {isGroupConversation && !mine ? (
+                                <div className="text-xs font-black text-slate-500 mb-1">{senderDisplay}</div>
+                              ) : null}
                               <div className="text-sm font-semibold whitespace-pre-wrap">
                                 {encryptedPayload ? (
                                   senderPublicKey ? (
@@ -1446,6 +1543,7 @@ export default function Messages() {
                                 <div className={cn('text-[11px] font-bold inline-flex items-center gap-1', mine ? 'text-white/80' : 'text-slate-400')}>
                                   {formatTime(m?.created_at)}
                                   {mine ? (otherHasRead ? <CheckCheck className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5" />) : null}
+                                  {statusLabel ? <span className="ml-1">{statusLabel}</span> : null}
                                 </div>
                               </div>
 
