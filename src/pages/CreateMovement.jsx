@@ -513,7 +513,7 @@ export default function CreateMovement() {
             </p>
           </div>
 
-          <form onSubmit={handleSubmit} className="p-4 sm:p-8 space-y-6 bg-white">
+          <form onSubmit={handleSubmit} className="p-4 sm:p-8 pb-24 sm:pb-8 space-y-6 bg-white">
             {/* AI assistant (opt-in only) */}
             {aiOptIn ? (
               <AIMovementAssistant

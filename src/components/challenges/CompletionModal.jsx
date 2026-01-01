@@ -94,7 +94,7 @@ export default function CompletionModal({ challenge, onClose, onComplete }) {
   return (
     <AnimatePresence>
       <div
-        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+        className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
         role="presentation"
         onKeyDown={(e) => {
           trapFocusKeyDown(e, dialogRef.current);
@@ -115,7 +115,7 @@ export default function CompletionModal({ challenge, onClose, onComplete }) {
           animate={{ opacity: 1, scale: 1 }}
           exit={reduceMotion ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.9 }}
           transition={{ duration: reduceMotion ? 0 : undefined }}
-          className="bg-white rounded-3xl max-w-2xl w-full p-8 shadow-2xl border-3 border-slate-200 max-h-[90vh] overflow-y-auto"
+          className="bg-white rounded-3xl max-w-2xl w-full p-8 pb-24 sm:pb-8 shadow-2xl border-3 border-slate-200 max-h-[90vh] overflow-y-auto"
         >
           {/* Header */}
           <div className="flex items-start justify-between mb-6">

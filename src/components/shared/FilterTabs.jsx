@@ -12,7 +12,7 @@ const filters = [
 
 export default function FilterTabs({ activeFilter, onFilterChange }) {
   return (
-    <div className="flex items-center gap-2 p-1.5 bg-slate-200 rounded-2xl border-2 border-slate-300">
+    <div className="flex items-center gap-1 sm:gap-2 p-1.5 bg-slate-200 rounded-2xl border-2 border-slate-300 overflow-x-auto sm:overflow-visible">
       {filters.map((filter) => {
         const Icon = filter.icon;
         const isActive = activeFilter === filter.id;
@@ -22,7 +22,7 @@ export default function FilterTabs({ activeFilter, onFilterChange }) {
             key={filter.id}
             onClick={() => onFilterChange(filter.id)}
             className={cn(
-              "relative flex items-center gap-2 px-5 py-3 rounded-xl font-extrabold text-sm transition-all",
+              "relative flex items-center gap-2 px-3 sm:px-5 py-2 sm:py-3 rounded-xl font-extrabold text-xs sm:text-sm transition-all shrink-0 whitespace-nowrap",
               isActive ? "text-white" : "text-slate-600 hover:text-slate-900"
             )}
           >

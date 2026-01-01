@@ -159,9 +159,12 @@ function LayoutContent({ children }) {
     }
   };
 
+  const searchLabel = t('search') || 'Search';
+  const searchName = searchLabel ? `${searchLabel.charAt(0).toUpperCase()}${searchLabel.slice(1)}` : 'Search';
+
   const navItems = [
     { name: t('home'), page: 'Home', icon: Home },
-    { name: t('search') || 'Search', page: 'Search', icon: Search },
+    { name: searchName, page: 'Search', icon: Search },
     { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
     { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
@@ -330,6 +333,7 @@ function LayoutContent({ children }) {
                   <Link
                     key={item.page}
                     to={createPageUrl(item.page)}
+                    aria-label={item.name}
                     className={cn(
                       "flex flex-col items-center gap-1 px-3 py-2 rounded-xl transition-all min-w-[54px] sm:min-w-[60px]",
                       isCreate && "-mt-5 sm:-mt-6 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 shadow-lg shadow-yellow-400/40",
@@ -343,7 +347,14 @@ function LayoutContent({ children }) {
                       )}
                       strokeWidth={active && !isCreate ? 2.5 : 2}
                     />
-                    <span className={cn("text-[10px] sm:text-xs font-bold", isCreate && "uppercase tracking-wide")}>{item.name}</span>
+                    <span
+                      className={cn(
+                        "hidden sm:inline text-xs font-bold",
+                        isCreate && "uppercase tracking-wide"
+                      )}
+                    >
+                      {item.name}
+                    </span>
                   </Link>
                 );
               })}
