@@ -390,7 +390,7 @@ export default function Messages() {
     []
   );
 
-  const MESSAGES_PAGE_SIZE = 20;
+  const MESSAGES_PAGE_SIZE = 50;
   const MESSAGE_LIST_FIELDS = useMemo(
     () => ['sender_email', 'body', 'created_at', 'read_by', 'delivered_to', 'reactions'].join(','),
     []
@@ -415,66 +415,72 @@ export default function Messages() {
     });
   }
 
-  function bumpConversationInCache(conversationId, patch) {
-    const cid = conversationId ? String(conversationId) : '';
-    if (!cid) return;
-    const conversationsKey = ['conversations', myEmailNormalized];
-    queryClient.setQueryData(conversationsKey, (old) => {
-      if (!old || typeof old !== 'object') return old;
-      const pages = Array.isArray(old.pages) ? old.pages : null;
-      const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
-      if (!pages || !pageParams) return old;
+  const bumpConversationInCache = useCallback(
+    (conversationId, patch) => {
+      const cid = conversationId ? String(conversationId) : '';
+      if (!cid) return;
+      const conversationsKey = ['conversations', myEmailNormalized];
+      queryClient.setQueryData(conversationsKey, (old) => {
+        if (!old || typeof old !== 'object') return old;
+        const pages = Array.isArray(old.pages) ? old.pages : null;
+        const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
+        if (!pages || !pageParams) return old;
 
-      const flattened = pages.flatMap((p) => (Array.isArray(p) ? p : []));
-      const hit = flattened.find((c) => String(c?.id || '') === cid) || null;
-      if (!hit) return old;
+        const flattened = pages.flatMap((p) => (Array.isArray(p) ? p : []));
+        const hit = flattened.find((c) => String(c?.id || '') === cid) || null;
+        if (!hit) return old;
 
-      const computedPatch = typeof patch === 'function' ? patch(hit) : patch;
-      const updated = { ...hit, ...(computedPatch && typeof computedPatch === 'object' ? computedPatch : {}) };
-      const nextFlat = [updated, ...flattened.filter((c) => String(c?.id || '') !== cid)];
+        const computedPatch = typeof patch === 'function' ? patch(hit) : patch;
+        const updated = { ...hit, ...(computedPatch && typeof computedPatch === 'object' ? computedPatch : {}) };
+        const nextFlat = [updated, ...flattened.filter((c) => String(c?.id || '') !== cid)];
 
-      const nextPages = [];
-      let cursor = 0;
-      for (let i = 0; i < pages.length; i += 1) {
-        const size = Array.isArray(pages[i]) ? pages[i].length : 0;
-        nextPages.push(nextFlat.slice(cursor, cursor + size));
-        cursor += size;
-      }
+        const nextPages = [];
+        let cursor = 0;
+        for (let i = 0; i < pages.length; i += 1) {
+          const size = Array.isArray(pages[i]) ? pages[i].length : 0;
+          nextPages.push(nextFlat.slice(cursor, cursor + size));
+          cursor += size;
+        }
 
-      // If we haven't filled all pages (e.g., first page was empty), just keep a single page.
-      const any = nextPages.some((p) => Array.isArray(p) && p.length);
-      return any ? { ...old, pages: nextPages } : { ...old, pages: [nextFlat] };
-    });
-  }
+        // If we haven't filled all pages (e.g., first page was empty), just keep a single page.
+        const any = nextPages.some((p) => Array.isArray(p) && p.length);
+        return any ? { ...old, pages: nextPages } : { ...old, pages: [nextFlat] };
+      });
+    },
+    [queryClient, myEmailNormalized]
+  );
 
-  function upsertConversationIntoCache(conversation, patch) {
-    const cid = String(conversation?.id || '');
-    if (!cid) return;
-    const conversationsKey = ['conversations', myEmailNormalized];
-    queryClient.setQueryData(conversationsKey, (old) => {
-      if (!old || typeof old !== 'object') return old;
-      const pages = Array.isArray(old.pages) ? old.pages : null;
-      const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
-      if (!pages || !pageParams) return old;
+  const upsertConversationIntoCache = useCallback(
+    (conversation, patch) => {
+      const cid = String(conversation?.id || '');
+      if (!cid) return;
+      const conversationsKey = ['conversations', myEmailNormalized];
+      queryClient.setQueryData(conversationsKey, (old) => {
+        if (!old || typeof old !== 'object') return old;
+        const pages = Array.isArray(old.pages) ? old.pages : null;
+        const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
+        if (!pages || !pageParams) return old;
 
-      const flattened = pages.flatMap((p) => (Array.isArray(p) ? p : []));
-      const hit = flattened.find((c) => String(c?.id || '') === cid) || null;
-      const computedPatch = typeof patch === 'function' ? patch(hit || conversation) : patch;
-      const base = hit ? { ...hit, ...conversation } : { ...conversation };
-      const updated = { ...base, ...(computedPatch && typeof computedPatch === 'object' ? computedPatch : {}) };
-      const nextFlat = [updated, ...flattened.filter((c) => String(c?.id || '') !== cid)];
+        const flattened = pages.flatMap((p) => (Array.isArray(p) ? p : []));
+        const hit = flattened.find((c) => String(c?.id || '') === cid) || null;
+        const computedPatch = typeof patch === 'function' ? patch(hit || conversation) : patch;
+        const base = hit ? { ...hit, ...conversation } : { ...conversation };
+        const updated = { ...base, ...(computedPatch && typeof computedPatch === 'object' ? computedPatch : {}) };
+        const nextFlat = [updated, ...flattened.filter((c) => String(c?.id || '') !== cid)];
 
-      const nextPages = [];
-      let cursor = 0;
-      for (let i = 0; i < pages.length; i += 1) {
-        const size = Array.isArray(pages[i]) ? pages[i].length : 0;
-        nextPages.push(nextFlat.slice(cursor, cursor + size));
-        cursor += size;
-      }
-      const any = nextPages.some((p) => Array.isArray(p) && p.length);
-      return any ? { ...old, pages: nextPages } : { ...old, pages: [nextFlat] };
-    });
-  }
+        const nextPages = [];
+        let cursor = 0;
+        for (let i = 0; i < pages.length; i += 1) {
+          const size = Array.isArray(pages[i]) ? pages[i].length : 0;
+          nextPages.push(nextFlat.slice(cursor, cursor + size));
+          cursor += size;
+        }
+        const any = nextPages.some((p) => Array.isArray(p) && p.length);
+        return any ? { ...old, pages: nextPages } : { ...old, pages: [nextFlat] };
+      });
+    },
+    [queryClient, myEmailNormalized]
+  );
 
   useEffect(() => {
     if (!accessToken || !myEmailNormalized) return;
@@ -612,7 +618,7 @@ export default function Messages() {
       realtimeRef.current = null;
       setRealtimeStatus('disconnected');
     };
-  }, [accessToken, myEmailNormalized, queryClient]);
+  }, [accessToken, myEmailNormalized, queryClient, bumpConversationInCache, upsertConversationIntoCache, upsertMessageIntoCache]);
 
   // Ensure an identity keypair exists locally and publish the public key to the server.
   useEffect(() => {
@@ -1106,6 +1112,10 @@ export default function Messages() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
     },
+    onError: (e, conversationId) => {
+      logError(e, 'Messages mark read failed', { conversationId: String(conversationId || '') });
+    },
+    retry: false,
   });
 
   useEffect(() => {
@@ -1342,7 +1352,6 @@ export default function Messages() {
       await queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
       if (updated?.id) {
         setSelectedId(String(updated.id));
-        markReadMutation.mutate(String(updated.id));
       }
     },
     onError: (e) => {
@@ -1493,7 +1502,6 @@ export default function Messages() {
       next.set('conversationId', String(convo.id));
       return next;
     });
-    markReadMutation.mutate(String(convo.id));
   };
 
   if (loading) {
@@ -1698,7 +1706,6 @@ export default function Messages() {
                             next.set('conversationId', id);
                             return next;
                           });
-                          markReadMutation.mutate(id);
                         }}
                         className={cn(
                           'w-full text-left px-4 py-4 hover:bg-slate-50 transition',

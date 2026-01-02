@@ -141,7 +141,7 @@ ${JSON.stringify(candidates)}
             return (
               <a
                 key={String(id)}
-                href={`/movements/${encodeURIComponent(String(id))}`}
+                href={`/movement/${encodeURIComponent(String(id))}`}
                 className="block p-4 rounded-2xl border-2 border-slate-200 bg-slate-50 hover:bg-white transition-colors"
               >
                 <div className="font-black text-slate-900 line-clamp-1">{title}</div>

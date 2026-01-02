@@ -152,7 +152,7 @@ Return the 3 movement IDs that are genuinely trending right now.`;
         {trending.map((movement, idx) => (
           <Link
             key={movement.id}
-            to={`/movements/${encodeURIComponent(String(movement.id))}`}
+            to={`/movement/${encodeURIComponent(String(movement.id))}`}
             className="block relative overflow-hidden"
           >
             <motion.div

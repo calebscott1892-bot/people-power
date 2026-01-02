@@ -392,7 +392,7 @@ export default function CreateMovement() {
 
       const createdId = created?.id ?? created?._id;
       if (createdId) {
-        navigate(`/movements/${encodeURIComponent(String(createdId))}`);
+        navigate(`/movement/${encodeURIComponent(String(createdId))}`);
       } else {
         navigate('/');
       }
@@ -426,7 +426,7 @@ export default function CreateMovement() {
 
   if (createdMovement) {
     const newId = createdMovement?.id ?? createdMovement?._id;
-    const viewUrl = newId ? `/movements/${encodeURIComponent(String(newId))}` : null;
+    const viewUrl = newId ? `/movement/${encodeURIComponent(String(newId))}` : null;
 
     return (
       <div className="max-w-2xl mx-auto px-3 sm:px-4 py-8 sm:py-12">

@@ -585,7 +585,7 @@ export default function UserProfile() {
                   {userMovements.map((movement) => (
                     <Link
                       key={movement.id}
-                      to={createPageUrl(`MovementDetails?id=${movement.id}`)}
+                      to={`/movement/${encodeURIComponent(String(movement.id))}`}
                       className="block p-4 hover:bg-slate-50 transition-colors group rounded-xl border-2 border-slate-200"
                     >
                       <div className="flex items-center justify-between gap-4">
@@ -623,7 +623,7 @@ export default function UserProfile() {
                   {participatedMovements.map((movement) => (
                     <Link
                       key={movement.id}
-                      to={createPageUrl(`MovementDetails?id=${movement.id}`)}
+                      to={`/movement/${encodeURIComponent(String(movement.id))}`}
                       className="block p-4 hover:bg-slate-50 transition-colors group rounded-xl border-2 border-slate-200"
                     >
                       <div className="flex items-center justify-between gap-4">

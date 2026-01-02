@@ -16,6 +16,44 @@ const fastify = require('fastify')({
 });
 const { v4: uuidv4 } = require('uuid');
 
+// ✅ CORS: explicitly allow the SPA origins (prod + dev).
+// Registered BEFORE any routes so headers apply to 4xx/5xx as well.
+const explicitCorsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+
+fastify.register(require('@fastify/cors'), {
+  origin: (origin, cb) => {
+    // allow curl / server-to-server (no origin)
+    if (!origin) return cb(null, true);
+    try {
+      const url = new URL(origin);
+      const host = url.hostname;
+      const isLocalhost = host === 'localhost' || host === '127.0.0.1';
+      const isAllowedHost =
+        isLocalhost ||
+        host === 'peoplepower.app' ||
+        host === 'www.peoplepower.app' ||
+        host.endsWith('.pages.dev') ||
+        explicitCorsOrigins.includes(origin) ||
+        explicitCorsOrigins.includes(host);
+      if (isAllowedHost) return cb(null, true);
+    } catch {
+      // ignore
+    }
+    return cb(null, false);
+  },
+  // We use Authorization headers (Bearer tokens) and fetch() from the SPA.
+  credentials: true,
+  // Ensure CORS headers are added early and still present on 4xx/5xx.
+  hook: 'onRequest',
+  // Keep header names lowercase; preflight request headers are often lowercase.
+  allowedHeaders: ['content-type', 'authorization', 'accept', 'x-requested-with', 'x-client-info'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  maxAge: 86400,
+});
+
 // Healthcheck (keep simple and always registered)
 fastify.get('/health', async (_request, _reply) => {
   return {
@@ -114,7 +152,11 @@ async function getAuthedEmailFromAccessToken(token) {
   if (!clean) return null;
   try {
     if (!supabase?.auth?.getUser) return null;
-    const { data, error } = await supabase.auth.getUser(clean);
+    const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
+    const { data, error } = await Promise.race([
+      supabase.auth.getUser(clean),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
+    ]);
     if (error || !data?.user) return null;
     return normalizeEmail(data.user.email);
   } catch {
@@ -3369,7 +3411,21 @@ async function requireVerifiedUser(request, reply) {
     return null;
   }
 
-  const { data, error } = await supabase.auth.getUser(token);
+  let data;
+  let error;
+  try {
+    // Avoid hanging requests (which can surface as upstream 503s without CORS).
+    const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
+    ({ data, error } = await Promise.race([
+      supabase.auth.getUser(token),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
+    ]));
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Supabase auth lookup failed');
+    reply.code(500).send({ error: 'Authentication service unavailable' });
+    return null;
+  }
+
   if (error || !data?.user) {
     reply.code(401).send({ error: 'Invalid session' });
     return null;
@@ -3385,12 +3441,33 @@ async function requireVerifiedUser(request, reply) {
   return user;
 }
 
+function withTimeout(promise, ms, label) {
+  const timeoutMs = Number(ms);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => {
+        const err = new Error(`${label || 'operation'} timeout`);
+        err.code = 'PP_TIMEOUT';
+        err.timeoutMs = timeoutMs;
+        err.label = label || 'operation';
+        reject(err);
+      }, timeoutMs)
+    ),
+  ]);
+}
+
 async function getOptionalAuthedEmail(request) {
   const authHeader = request.headers?.authorization ? String(request.headers.authorization) : '';
   const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : null;
   if (!token) return null;
   try {
-    const { data, error } = await supabase.auth.getUser(token);
+    const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
+    const { data, error } = await Promise.race([
+      supabase.auth.getUser(token),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
+    ]);
     if (error || !data?.user?.email) return null;
     return normalizeEmail(data.user.email);
   } catch {
@@ -3531,37 +3608,6 @@ function buildInsertForMovements(columns, payload) {
     values: insertVals,
   };
 }
-
-// ✅ CORS: explicitly allow your frontend origin
-const explicitCorsOrigins = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((value) => value.trim())
-  .filter(Boolean);
-
-fastify.register(require('@fastify/cors'), {
-  origin: (origin, cb) => {
-    // allow curl / server-to-server (no origin)
-    if (!origin) return cb(null, true);
-    try {
-      const url = new URL(origin);
-      const host = url.hostname;
-      const isLocalhost = host === 'localhost' || host === '127.0.0.1';
-      const isAllowedHost =
-        isLocalhost ||
-        host === 'peoplepower.app' ||
-        host === 'www.peoplepower.app' ||
-        host.endsWith('.pages.dev') ||
-        explicitCorsOrigins.includes(origin) ||
-        explicitCorsOrigins.includes(host);
-      if (isAllowedHost) return cb(null, true);
-    } catch {
-      // ignore
-    }
-    return cb(null, false);
-  },
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-});
 
 // File uploads for movement evidence/media.
 // - Stored on disk in Server/uploads
@@ -4396,7 +4442,7 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
     return out;
   }
 
-  const limit = parseIntParam(request.query?.limit, 50, { min: 1, max: 200 });
+  const limit = parseIntParam(request.query?.limit, 100, { min: 1, max: 200 });
   const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
   const fields = normalizeFields(request.query?.fields);
 
@@ -7259,14 +7305,19 @@ fastify.get('/admin/incidents', { config: { rateLimit: RATE_LIMITS.admin } }, as
 
 // Messages (conversations + messages)
 fastify.get('/conversations', async (request, reply) => {
-  const authedUser = await requireVerifiedUser(request, reply);
-  if (!authedUser) return;
+  const reqId = request.id;
+  try {
+    const authedUser = await requireVerifiedUser(request, reply);
+    if (!authedUser) return;
 
-  const myEmail = normalizeEmail(authedUser.email);
-  if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
+    const myEmail = normalizeEmail(authedUser.email);
+    if (!myEmail) {
+      fastify.log.warn({ reqId }, 'GET /conversations: missing user email');
+      return reply.code(400).send({ error: 'User email is required' });
+    }
 
-  const type = request.query?.type ? String(request.query.type) : null;
-  const viewerBlocks = await getUserBlockSets(myEmail);
+    const type = request.query?.type ? String(request.query.type) : null;
+    const viewerBlocks = await withTimeout(getUserBlockSets(myEmail), 4000, 'getUserBlockSets');
 
   function parseIntParam(value, fallback, { min = 0, max = 500 } = {}) {
     const n = Number.parseInt(String(value ?? ''), 10);
@@ -7332,8 +7383,8 @@ fastify.get('/conversations', async (request, reply) => {
     return patch;
   }
 
-  if (!hasDatabaseUrl) {
-    const list = memoryListConversationsForUser(myEmail).filter((c) => {
+    if (!hasDatabaseUrl) {
+      const list = memoryListConversationsForUser(myEmail).filter((c) => {
       const status = String(c?.request_status || 'accepted');
       const blockedBy = normalizeEmail(c?.blocked_by_email);
       if (status !== 'blocked') return true;
@@ -7346,12 +7397,11 @@ fastify.get('/conversations', async (request, reply) => {
           ? list.filter((c) => c?.request_status !== 'pending' && c?.request_status !== 'declined')
           : list;
 
-    const page = filtered.slice(offset, offset + limit).map((c) => projectRecord(c, fields));
-    return reply.send(page);
-  }
+      const page = filtered.slice(offset, offset + limit).map((c) => projectRecord(c, fields));
+      return reply.send(page);
+    }
 
-  try {
-    await ensureMessagesTables();
+    await withTimeout(ensureMessagesTables(), 4000, 'ensureMessagesTables');
 
     const whereExtra =
       type === 'requests'
@@ -7360,7 +7410,7 @@ fastify.get('/conversations', async (request, reply) => {
           ? " AND c.request_status <> 'pending' AND c.request_status <> 'declined'"
           : '';
 
-    const result = await pool.query(
+    const result = await withTimeout(pool.query(
       `SELECT
          c.*, 
          lm.body AS last_message_body,
@@ -7386,14 +7436,25 @@ fastify.get('/conversations', async (request, reply) => {
        ORDER BY COALESCE(lm.created_at, c.updated_at) DESC
        LIMIT $2 OFFSET $3`,
       [myEmail, limit, offset]
-    );
+    ), 5000, 'conversations query');
 
     const rows = result.rows || [];
     const filtered = Array.isArray(rows) ? rows.filter((c) => !shouldHideDirectConversation(c)) : [];
     const annotated = filtered.map(annotateConversation);
     return reply.send(annotated.map((c) => projectRecord(c, fields)));
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to load conversations');
+    const isTimeout = e && (e.code === 'PP_TIMEOUT' || e.name === 'TimeoutError');
+    fastify.log.error(
+      {
+        reqId,
+        isTimeout,
+        timeoutLabel: e && e.label,
+        timeoutMs: e && e.timeoutMs,
+        err: e,
+      },
+      'GET /conversations failed'
+    );
+    // Prefer deterministic 500 over hanging (which can surface as upstream 503 without CORS).
     return reply.code(500).send({ error: 'Failed to load conversations' });
   }
 });
@@ -9669,39 +9730,46 @@ fastify.get('/user/export', async (request, reply) => {
 });
 
 fastify.post('/conversations/:id/read', async (request, reply) => {
-  const authedUser = await requireVerifiedUser(request, reply);
-  if (!authedUser) return;
-
-  const myEmail = normalizeEmail(authedUser.email);
-  const conversationId = request.params?.id ? String(request.params.id) : null;
-  if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
-  if (!conversationId) return reply.code(400).send({ error: 'Conversation id is required' });
-
-  if (!hasDatabaseUrl) {
-    const convo = getMemoryConversationById(conversationId);
-    if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
-    const participants = Array.isArray(convo.participant_emails) ? convo.participant_emails.map((x) => String(x).toLowerCase()) : [];
-    if (!participants.includes(myEmail)) return reply.code(403).send({ error: 'Not allowed' });
-    const updated = memoryMarkConversationRead(conversationId, myEmail);
-    wsBroadcastToEmails(convo?.participant_emails, {
-      type: 'conversation:read',
-      conversationId: String(conversationId),
-      by: myEmail,
-      ts: Date.now(),
-    });
-    return reply.send({ ok: true, updated });
-  }
-
+  const reqId = request.id;
   try {
-    await ensureMessagesTables();
-    const convoRes = await pool.query('SELECT * FROM conversations WHERE id = $1 LIMIT 1', [conversationId]);
+    const authedUser = await requireVerifiedUser(request, reply);
+    if (!authedUser) return;
+
+    const myEmail = normalizeEmail(authedUser.email);
+    const conversationId = request.params?.id ? String(request.params.id) : null;
+    if (!myEmail) {
+      fastify.log.warn({ reqId }, 'POST /conversations/:id/read: missing user email');
+      return reply.code(400).send({ error: 'User email is required' });
+    }
+    if (!conversationId) {
+      fastify.log.warn({ reqId }, 'POST /conversations/:id/read: missing conversation id');
+      return reply.code(400).send({ error: 'Conversation id is required' });
+    }
+
+    if (!hasDatabaseUrl) {
+      const convo = getMemoryConversationById(conversationId);
+      if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
+      const participants = Array.isArray(convo.participant_emails) ? convo.participant_emails.map((x) => String(x).toLowerCase()) : [];
+      if (!participants.includes(myEmail)) return reply.code(403).send({ error: 'Not allowed' });
+      const updated = memoryMarkConversationRead(conversationId, myEmail);
+      wsBroadcastToEmails(convo?.participant_emails, {
+        type: 'conversation:read',
+        conversationId: String(conversationId),
+        by: myEmail,
+        ts: Date.now(),
+      });
+      return reply.send({ ok: true, updated });
+    }
+
+    await withTimeout(ensureMessagesTables(), 4000, 'ensureMessagesTables');
+    const convoRes = await withTimeout(pool.query('SELECT * FROM conversations WHERE id = $1 LIMIT 1', [conversationId]), 4000, 'load conversation');
     const convo = convoRes.rows?.[0] || null;
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
     if (!(convo.participant_emails || []).map((x) => String(x).toLowerCase()).includes(myEmail)) {
       return reply.code(403).send({ error: 'Not allowed' });
     }
 
-    const result = await pool.query(
+    const result = await withTimeout(pool.query(
       `UPDATE messages
        SET read_by = CASE
          WHEN read_by @> ARRAY[$2] THEN read_by
@@ -9710,7 +9778,7 @@ fastify.post('/conversations/:id/read', async (request, reply) => {
        WHERE conversation_id = $1
          AND sender_email <> $2`,
       [conversationId, myEmail]
-    );
+    ), 5000, 'mark read');
 
     wsBroadcastToEmails(convo?.participant_emails, {
       type: 'conversation:read',
@@ -9721,7 +9789,18 @@ fastify.post('/conversations/:id/read', async (request, reply) => {
 
     return reply.send({ ok: true, updated: result.rowCount ?? 0 });
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to mark conversation read');
+    const isTimeout = e && (e.code === 'PP_TIMEOUT' || e.name === 'TimeoutError');
+    fastify.log.error(
+      {
+        reqId,
+        conversationId: request.params?.id ? String(request.params.id) : null,
+        isTimeout,
+        timeoutLabel: e && e.label,
+        timeoutMs: e && e.timeoutMs,
+        err: e,
+      },
+      'POST /conversations/:id/read failed'
+    );
     return reply.code(500).send({ error: 'Failed to mark conversation read' });
   }
 });

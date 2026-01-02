@@ -137,7 +137,7 @@ export default function CollaborationInvites() {
 
                 <div className="mt-3">
                   <Link
-                    to={`/movements/${encodeURIComponent(String(inv?.movement_id || ''))}`}
+                    to={`/movement/${encodeURIComponent(String(inv?.movement_id || ''))}`}
                     className="text-sm font-bold text-[#3A3DFF]"
                   >
                     View movement

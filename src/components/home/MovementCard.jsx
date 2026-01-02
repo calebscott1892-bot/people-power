@@ -198,7 +198,7 @@ export default function MovementCard({ movement }) {
   );
   const supporters = toNumber(movement?.supporters ?? movement?.supporters_count ?? movement?.supporter_count);
 
-  const to = id ? `/movements/${encodeURIComponent(String(id))}` : '/';
+  const to = id ? `/movement/${encodeURIComponent(String(id))}` : '/';
 
   if (!movement) return null;
 

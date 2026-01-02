@@ -21,7 +21,6 @@ function devLogOnce(kind, message) {
     if (wsLoggedFallback) return;
     wsLoggedFallback = true;
   }
-  // eslint-disable-next-line no-console
   console.info(message);
 }
 
@@ -92,7 +91,6 @@ export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
 
     if (!wsLoggedStartup) {
       wsLoggedStartup = true;
-      // eslint-disable-next-line no-console
       console.log(`[PeoplePower] Realtime: wsEnabled = true, url = ${urlString.split('?')[0]}`);
     }
 

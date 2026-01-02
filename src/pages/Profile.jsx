@@ -563,7 +563,7 @@ export default function Profile() {
             {myMovements.map((movement) => (
               <Link
                 key={movement.id}
-                to={createPageUrl(`MovementDetails?id=${movement.id}`)}
+                to={`/movement/${encodeURIComponent(String(movement.id))}`}
                 className="block p-6 hover:bg-slate-50 transition-colors group"
               >
                 <div className="flex items-center justify-between gap-4">
@@ -611,7 +611,7 @@ export default function Profile() {
             {followedMovements.map((movement) => (
               <Link
                 key={movement.id}
-                to={createPageUrl(`MovementDetails?id=${movement.id}`)}
+                to={`/movement/${encodeURIComponent(String(movement.id))}`}
                 className="block p-6 hover:bg-slate-50 transition-colors group"
               >
                 <div className="flex items-center justify-between gap-4">

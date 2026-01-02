@@ -55,7 +55,7 @@ export default function NextBestActionPanel({
     return {
       title: 'Invite collaborators',
       description: 'Bring in trusted helpers to run events, tasks, and outreach.',
-      to: id ? `/movements/${encodeURIComponent(id)}#collaborators` : '/profile',
+      to: id ? `/movement/${encodeURIComponent(id)}#collaborators` : '/profile',
       icon: UserPlus,
     };
   }, [email, createdMovements, mostRecentCreated, gateReady]);
@@ -76,7 +76,7 @@ export default function NextBestActionPanel({
       return {
         title: 'Share your most recent movement',
         description: 'Invite people in and grow momentum with one link.',
-        to: id ? `/movements/${encodeURIComponent(id)}#share` : '/profile',
+        to: id ? `/movement/${encodeURIComponent(id)}#share` : '/profile',
         icon: Share2,
       };
     }

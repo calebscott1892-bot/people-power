@@ -24,7 +24,7 @@ function MovementResult({ movement }) {
   const authorLabel = displayName || (username ? `@${username}` : 'Member');
   const authorPath = username ? `/u/${encodeURIComponent(username)}` : null;
   const isAdminAuthor = !!(movement?.creator_is_admin || movement?.author_is_admin);
-  const to = id ? `/movements/${encodeURIComponent(String(id))}` : '/';
+  const to = id ? `/movement/${encodeURIComponent(String(id))}` : '/';
 
   return (
     <div className="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm">

@@ -47,27 +47,46 @@ export async function lookupUsersByEmail(emails, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   if (!accessToken) throw new Error('Authentication required');
 
-  const list = Array.isArray(emails)
-    ? emails.map((e) => String(e || '').trim()).filter(Boolean)
-    : [];
+  const list = Array.isArray(emails) ? emails.map((e) => String(e || '').trim()).filter(Boolean) : [];
   if (!list.length) return [];
 
-  const url = `${BASE_URL.replace(/\/$/, '')}/users/lookup`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...authHeaders(accessToken),
-    },
-    body: JSON.stringify({ emails: list.slice(0, 50) }),
-  });
+  const deduped = Array.from(new Set(list.map((e) => e.toLowerCase())));
 
-  const body = await safeReadJson(res);
-  if (!res.ok) {
-    const msg = body?.error || body?.message || `Failed to lookup users: ${res.status}`;
-    throw new Error(String(msg));
+  const url = `${BASE_URL.replace(/\/$/, '')}/users/lookup`;
+  const chunkSize = 50;
+  const chunks = [];
+  for (let i = 0; i < deduped.length; i += chunkSize) {
+    chunks.push(deduped.slice(i, i + chunkSize));
   }
 
-  return Array.isArray(body?.users) ? body.users : [];
+  const users = [];
+  for (const chunk of chunks) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...authHeaders(accessToken),
+      },
+      body: JSON.stringify({ emails: chunk }),
+    });
+
+    const body = await safeReadJson(res);
+    if (!res.ok) {
+      const msg = body?.error || body?.message || `Failed to lookup users: ${res.status}`;
+      throw new Error(String(msg));
+    }
+
+    if (Array.isArray(body?.users)) users.push(...body.users);
+  }
+
+  const out = [];
+  const seen = new Set();
+  for (const u of users) {
+    const email = String(u?.email || u?.user_email || '').trim().toLowerCase();
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    out.push(u);
+  }
+  return out;
 }

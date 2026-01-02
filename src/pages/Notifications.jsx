@@ -416,9 +416,9 @@ function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
         return createPageUrl('Messages');
       case 'movement_boost':
       case 'comment':
-        return notification.content_id ? createPageUrl(`MovementDetails?id=${notification.content_id}`) : null;
+        return notification.content_id ? `/movement/${encodeURIComponent(String(notification.content_id))}` : null;
       case 'event_reminder':
-        return notification.content_id ? createPageUrl(`MovementDetails?id=${notification.content_id}`) : null;
+        return notification.content_id ? `/movement/${encodeURIComponent(String(notification.content_id))}` : null;
       case 'moderation_request_more_info':
         return null;
       default:

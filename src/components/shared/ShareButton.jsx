@@ -61,7 +61,7 @@ export default function ShareButton({ movement, profile, variant = "default", la
     try {
       if (targetType === 'movement') {
         if (!safeMovementId) return window.location.href;
-        return `${window.location.origin}/movements/${encodeURIComponent(String(safeMovementId))}`;
+        return `${window.location.origin}/movement/${encodeURIComponent(String(safeMovementId))}`;
       }
       if (targetType === 'profile' && profileUsername) {
         return `${window.location.origin}/u/${encodeURIComponent(profileUsername)}`;

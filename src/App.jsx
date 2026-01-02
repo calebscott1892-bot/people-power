@@ -122,6 +122,7 @@ export default function App() {
               {/* Public home */}
               <Route path="/" element={<Home />} />
               <Route path="/movements/:id" element={<MovementDetails />} />
+              <Route path="/movement/:id" element={<MovementDetails />} />
 
               {/* Protected app routes */}
               <Route element={<RequireAuth />}>
