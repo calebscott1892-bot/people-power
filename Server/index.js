@@ -7200,7 +7200,7 @@ fastify.post('/incidents', async (request, reply) => {
     related_entity_id: z.string().max(120).optional().nullable(),
     target_user_ids: z.array(z.string().min(1).max(80)).max(25).optional().nullable(),
     target_emails: z.array(z.string().min(1).max(200)).max(25).optional().nullable(),
-    context: z.record(z.any()).optional().nullable(),
+    context: z.record(z.string(), z.any()).optional().nullable(),
   });
 
   const parsed = schema.safeParse(request.body ?? {});
@@ -8818,7 +8818,7 @@ async function handlePostMyProfile(request, reply) {
     bio: z.string().max(MAX_TEXT_LENGTHS.profileBio).optional().nullable(),
     profile_photo_url: z.string().max(MAX_TEXT_LENGTHS.profilePhotoUrl).optional().nullable(),
     banner_url: z.string().max(MAX_TEXT_LENGTHS.profileBannerUrl).optional().nullable(),
-    location: z.record(z.any()).optional().nullable(),
+    location: z.record(z.string(), z.any()).optional().nullable(),
     catchment_radius_km: z.number().int().min(1).max(1000).optional().nullable(),
     skills: z.array(z.string().max(MAX_TEXT_LENGTHS.profileSkill)).max(50).optional().nullable(),
     ai_features_enabled: z.boolean().optional(),

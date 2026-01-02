@@ -1,6 +1,9 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
+import { upsertMyPublicKey } from '@/api/keysClient';
+import { getOrCreateIdentityKeypair } from '@/lib/e2eeCrypto';
+import { logError } from '@/utils/logError';
 import { getStaffRole } from '@/utils/staff';
 
 const AuthContext = createContext(null);
@@ -10,6 +13,7 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [serverStaffRole, setServerStaffRole] = useState(null);
+  const lastKeyPublishRef = useRef({ accessToken: null, email: null });
   const authDisabledMessage = 'Sign-in is temporarily unavailable; configuration error. Please contact support.';
   const staffRole = useMemo(() => {
     const serverRole = String(serverStaffRole || '').trim().toLowerCase();
@@ -83,6 +87,36 @@ export function AuthProvider({ children }) {
       active = false;
     };
   }, [session?.access_token]);
+
+  // Publish the user's identity public key shortly after sign-in.
+  // This lets other users message a newly created account without requiring
+  // them to first open the Messages page.
+  useEffect(() => {
+    const accessToken = session?.access_token ? String(session.access_token) : null;
+    const email = user?.email ? String(user.email).trim().toLowerCase() : null;
+    if (!accessToken || !email) return;
+
+    const prev = lastKeyPublishRef.current;
+    if (prev.accessToken === accessToken && prev.email === email) return;
+    lastKeyPublishRef.current = { accessToken, email };
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const kp = await getOrCreateIdentityKeypair(email);
+        if (cancelled) return;
+        await upsertMyPublicKey(kp.publicKey, { accessToken });
+      } catch (e) {
+        if (!cancelled) {
+          logError(e, 'AuthProvider: failed to publish messaging public key', { email });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.access_token, user?.email]);
 
   const signIn = async (email, password) => {
     const supabase = getSupabaseClient();
