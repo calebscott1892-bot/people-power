@@ -44,6 +44,7 @@ import { uploadFile } from '@/api/uploadsClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
 import { fetchMovementEvidencePage } from '@/api/movementExtrasClient';
+import { connectMessagesRealtime } from '@/utils/messagesRealtime';
 import {
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
@@ -260,12 +261,28 @@ export default function Messages() {
   const accessToken = session?.access_token || null;
   const [searchParams, setSearchParams] = useSearchParams();
 
+  const myEmail = user?.email || '';
+  const myEmailNormalized = useMemo(() => normalizeEmail(myEmail), [myEmail]);
+
   const [selectedId, setSelectedId] = useState(null);
   const [draft, setDraft] = useState('');
   const [composeOpen, setComposeOpen] = useState(false);
   const [box, setBox] = useState('messages');
   const [search, setSearch] = useState('');
   const [pendingMessages, setPendingMessages] = useState([]);
+
+  const realtimeRef = useRef(null);
+  const [realtimeStatus, setRealtimeStatus] = useState('disconnected');
+  const realtimeConnected = realtimeStatus === 'connected';
+
+  const selectedIdRef = useRef(null);
+  const myEmailNormalizedRef = useRef('');
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  useEffect(() => {
+    myEmailNormalizedRef.current = myEmailNormalized;
+  }, [myEmailNormalized]);
 
   const [pendingMediaFile, setPendingMediaFile] = useState(null);
   const [pendingMediaSensitive, setPendingMediaSensitive] = useState(false);
@@ -292,9 +309,6 @@ export default function Messages() {
       }
     };
   }, [groupAvatarPreview]);
-
-  const myEmail = user?.email || '';
-  const myEmailNormalized = useMemo(() => normalizeEmail(myEmail), [myEmail]);
 
   const { data: myBlocks } = useQuery({
     queryKey: ['myBlocks', myEmailNormalized],
@@ -378,13 +392,14 @@ export default function Messages() {
 
   const MESSAGES_PAGE_SIZE = 20;
   const MESSAGE_LIST_FIELDS = useMemo(
-    () => ['sender_email', 'body', 'created_at', 'read_by', 'reactions'].join(','),
+    () => ['sender_email', 'body', 'created_at', 'read_by', 'delivered_to', 'reactions'].join(','),
     []
   );
 
-  function upsertMessageIntoCache(created) {
-    if (!created || !selectedId) return;
-    const messagesKey = ['messages', selectedId, myEmailNormalized];
+  function upsertMessageIntoCache(created, conversationIdOverride) {
+    const cid = conversationIdOverride != null ? String(conversationIdOverride) : (selectedId ? String(selectedId) : '');
+    if (!created || !cid) return;
+    const messagesKey = ['messages', cid, myEmailNormalized];
     queryClient.setQueryData(messagesKey, (old) => {
       if (!old || typeof old !== 'object') return old;
       const pages = Array.isArray(old.pages) ? old.pages : null;
@@ -414,7 +429,8 @@ export default function Messages() {
       const hit = flattened.find((c) => String(c?.id || '') === cid) || null;
       if (!hit) return old;
 
-      const updated = { ...hit, ...(patch && typeof patch === 'object' ? patch : {}) };
+      const computedPatch = typeof patch === 'function' ? patch(hit) : patch;
+      const updated = { ...hit, ...(computedPatch && typeof computedPatch === 'object' ? computedPatch : {}) };
       const nextFlat = [updated, ...flattened.filter((c) => String(c?.id || '') !== cid)];
 
       const nextPages = [];
@@ -430,6 +446,173 @@ export default function Messages() {
       return any ? { ...old, pages: nextPages } : { ...old, pages: [nextFlat] };
     });
   }
+
+  function upsertConversationIntoCache(conversation, patch) {
+    const cid = String(conversation?.id || '');
+    if (!cid) return;
+    const conversationsKey = ['conversations', myEmailNormalized];
+    queryClient.setQueryData(conversationsKey, (old) => {
+      if (!old || typeof old !== 'object') return old;
+      const pages = Array.isArray(old.pages) ? old.pages : null;
+      const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
+      if (!pages || !pageParams) return old;
+
+      const flattened = pages.flatMap((p) => (Array.isArray(p) ? p : []));
+      const hit = flattened.find((c) => String(c?.id || '') === cid) || null;
+      const computedPatch = typeof patch === 'function' ? patch(hit || conversation) : patch;
+      const base = hit ? { ...hit, ...conversation } : { ...conversation };
+      const updated = { ...base, ...(computedPatch && typeof computedPatch === 'object' ? computedPatch : {}) };
+      const nextFlat = [updated, ...flattened.filter((c) => String(c?.id || '') !== cid)];
+
+      const nextPages = [];
+      let cursor = 0;
+      for (let i = 0; i < pages.length; i += 1) {
+        const size = Array.isArray(pages[i]) ? pages[i].length : 0;
+        nextPages.push(nextFlat.slice(cursor, cursor + size));
+        cursor += size;
+      }
+      const any = nextPages.some((p) => Array.isArray(p) && p.length);
+      return any ? { ...old, pages: nextPages } : { ...old, pages: [nextFlat] };
+    });
+  }
+
+  useEffect(() => {
+    if (!accessToken || !myEmailNormalized) return;
+    if (realtimeRef.current) return;
+
+    const client = connectMessagesRealtime({
+      accessToken,
+      onStatus: (s) => setRealtimeStatus(String(s || 'disconnected')),
+      onEvent: (evt) => {
+        const type = String(evt?.type || '');
+        if (!type) return;
+
+        if (type === 'message:new') {
+          const conversationId = evt?.conversationId ? String(evt.conversationId) : '';
+          const message = evt?.message && typeof evt.message === 'object' ? evt.message : null;
+          const conversation = evt?.conversation && typeof evt.conversation === 'object' ? evt.conversation : null;
+          if (!conversationId || !message) return;
+
+          const me = myEmailNormalizedRef.current;
+          const sender = normalizeEmail(message?.sender_email);
+          const mine = !!me && sender === me;
+          const isActive = String(selectedIdRef.current || '') === conversationId;
+          const visible = typeof document !== 'undefined' ? document.visibilityState === 'visible' : true;
+
+          // Ensure the inbox contains this conversation, then update preview + unread counts.
+          if (conversation) {
+            upsertConversationIntoCache(conversation, (cur) => {
+              const nextUnread = mine
+                ? Number(cur?.unread_count || 0)
+                : (isActive && visible)
+                  ? 0
+                  : Number(cur?.unread_count || 0) + 1;
+              return {
+                last_message_body: message?.body ?? cur?.last_message_body ?? null,
+                last_message_at: message?.created_at ?? cur?.last_message_at ?? null,
+                updated_at: message?.created_at ?? cur?.updated_at ?? null,
+                unread_count: nextUnread,
+              };
+            });
+          } else {
+            bumpConversationInCache(conversationId, (cur) => {
+              const nextUnread = mine
+                ? Number(cur?.unread_count || 0)
+                : (isActive && visible)
+                  ? 0
+                  : Number(cur?.unread_count || 0) + 1;
+              return {
+                last_message_body: message?.body ?? cur?.last_message_body ?? null,
+                last_message_at: message?.created_at ?? cur?.last_message_at ?? null,
+                updated_at: message?.created_at ?? cur?.updated_at ?? null,
+                unread_count: nextUnread,
+              };
+            });
+          }
+
+          if (isActive) {
+            upsertMessageIntoCache(message, conversationId);
+          }
+
+          // Acknowledge delivery/read to enable receipts for the sender.
+          if (!mine && message?.id) {
+            client?.send({ type: 'message:delivered', messageId: String(message.id) });
+            if (isActive && visible) {
+              client?.send({ type: 'conversation:read', conversationId });
+            }
+          }
+
+          // Lightweight in-app notification for background conversations.
+          if (!mine && (!isActive || !visible)) {
+            try {
+              toast.message('New message', { description: 'Open Messages to reply.' });
+            } catch {
+              // ignore
+            }
+          }
+
+          return;
+        }
+
+        if (type === 'message:delivered') {
+          const conversationId = evt?.conversationId ? String(evt.conversationId) : '';
+          const messageId = evt?.messageId ? String(evt.messageId) : '';
+          const by = normalizeEmail(evt?.by);
+          if (!conversationId || !messageId || !by) return;
+          const me = myEmailNormalizedRef.current;
+          const isActive = String(selectedIdRef.current || '') === conversationId;
+          if (!isActive) return;
+
+          const messagesKey = ['messages', conversationId, me];
+          queryClient.setQueryData(messagesKey, (old) => {
+            if (!old || typeof old !== 'object') return old;
+            const pages = Array.isArray(old.pages) ? old.pages : null;
+            const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
+            if (!pages || !pageParams) return old;
+
+            const nextPages = pages.map((p) => {
+              if (!Array.isArray(p)) return p;
+              return p.map((m) => {
+                if (String(m?.id || '') !== messageId) return m;
+                const prev = Array.isArray(m?.delivered_to) ? m.delivered_to.map(normalizeEmail).filter(Boolean) : [];
+                if (prev.includes(by)) return m;
+                return { ...m, delivered_to: [...prev, by] };
+              });
+            });
+            return { ...old, pages: nextPages };
+          });
+          return;
+        }
+
+        if (type === 'conversation:updated') {
+          const conversationId = evt?.conversationId ? String(evt.conversationId) : '';
+          const conversation = evt?.conversation && typeof evt.conversation === 'object' ? evt.conversation : null;
+          if (!conversationId || !conversation) return;
+          upsertConversationIntoCache(conversation);
+          return;
+        }
+
+        if (type === 'conversation:read') {
+          const conversationId = evt?.conversationId ? String(evt.conversationId) : '';
+          if (!conversationId) return;
+          // Keep it simple: refetch the conversation/messages so read receipts are accurate.
+          queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalizedRef.current] });
+          queryClient.invalidateQueries({ queryKey: ['messages', conversationId, myEmailNormalizedRef.current] });
+        }
+      },
+    });
+
+    realtimeRef.current = client;
+    return () => {
+      try {
+        realtimeRef.current?.close?.();
+      } catch {
+        // ignore
+      }
+      realtimeRef.current = null;
+      setRealtimeStatus('disconnected');
+    };
+  }, [accessToken, myEmailNormalized, queryClient]);
 
   // Ensure an identity keypair exists locally and publish the public key to the server.
   useEffect(() => {
@@ -478,7 +661,7 @@ export default function Messages() {
       if (lastPage.length < CONVERSATIONS_PAGE_SIZE) return undefined;
       return allPages.length * CONVERSATIONS_PAGE_SIZE;
     },
-    refetchInterval: 2500,
+    refetchInterval: realtimeConnected ? false : 2500,
     refetchOnWindowFocus: true,
     throwOnError: false,
   });
@@ -887,7 +1070,7 @@ export default function Messages() {
       if (lastPage.length < MESSAGES_PAGE_SIZE) return undefined;
       return allPages.length * MESSAGES_PAGE_SIZE;
     },
-    refetchInterval: selectedId ? 1500 : false,
+    refetchInterval: realtimeConnected ? false : (selectedId ? 1500 : false),
     refetchOnWindowFocus: true,
     throwOnError: false,
   });
@@ -918,6 +1101,13 @@ export default function Messages() {
     });
   }, [messages, pendingMessages]);
 
+  const markReadMutation = useMutation({
+    mutationFn: async (conversationId) => markConversationRead(conversationId, { accessToken, myEmail }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
+    },
+  });
+
   useEffect(() => {
     if (!selectedConversation?.id || !myEmailNormalized) return;
     if (Number(selectedConversation?.unread_count || 0) > 0) {
@@ -936,13 +1126,6 @@ export default function Messages() {
 
   const messagesConnectivityError =
     messagesError && looksLikeConnectivityError(messagesErrorObj);
-
-  const markReadMutation = useMutation({
-    mutationFn: async (conversationId) => markConversationRead(conversationId, { accessToken, myEmail }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
-    },
-  });
 
   const buildPendingId = () => {
     try {
@@ -1016,6 +1199,7 @@ export default function Messages() {
         created_at: nowIso,
         sender_email: myEmail,
         read_by: [myEmail],
+        delivered_to: [],
       };
       setPendingMessages((prev) => [...prev, pending]);
       return { clientId };
@@ -1753,6 +1937,13 @@ export default function Messages() {
                         const otherHasRead = mine
                           ? (isGroupConversation ? readByOthers.length > 0 : (otherEmailNormalized && readBy.includes(otherEmailNormalized)))
                           : false;
+                        const deliveredTo = Array.isArray(m?.delivered_to)
+                          ? m.delivered_to.map((x) => String(x).toLowerCase())
+                          : [];
+                        const deliveredToOthers = mine ? deliveredTo.filter((e) => e && e !== myEmailNormalized) : [];
+                        const otherHasDelivered = mine
+                          ? (isGroupConversation ? deliveredToOthers.length > 0 : (otherEmailNormalized && deliveredTo.includes(otherEmailNormalized)))
+                          : false;
                         const senderEmail = normalizeEmail(m?.sender_email);
                         const senderPublicKey = isGroupConversation
                           ? (senderEmail ? groupPublicKeys[senderEmail] : null)
@@ -1765,9 +1956,9 @@ export default function Messages() {
                         const statusLabel = mine
                           ? (isPending
                               ? 'Sending…'
-                              : (otherHasRead
-                                  ? (isGroupConversation ? `Read by ${readByOthers.length}` : 'Read')
-                                  : 'Delivered'))
+                            : (otherHasRead
+                              ? (isGroupConversation ? `Read by ${readByOthers.length}` : 'Read')
+                              : (otherHasDelivered ? 'Delivered' : 'Sent')))
                           : null;
                         return (
                           <div key={String(m?.id)} className={cn('flex', mine ? 'justify-end' : 'justify-start')}>
@@ -1840,7 +2031,13 @@ export default function Messages() {
 
                                 <div className={cn('text-[11px] font-bold inline-flex items-center gap-1', mine ? 'text-white/80' : 'text-slate-400')}>
                                   {formatTime(m?.created_at)}
-                                  {mine ? (otherHasRead ? <CheckCheck className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5" />) : null}
+                                  {mine ? (
+                                    otherHasRead || otherHasDelivered ? (
+                                      <CheckCheck className="w-3.5 h-3.5" />
+                                    ) : (
+                                      <Check className="w-3.5 h-3.5" />
+                                    )
+                                  ) : null}
                                   {statusLabel ? <span className="ml-1">{statusLabel}</span> : null}
                                 </div>
                               </div>

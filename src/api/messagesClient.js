@@ -1,6 +1,27 @@
 /**
  * Messages API client.
  *
+ * ---------------------------------------------------------------------------
+ * Realtime (WebSocket) notes (polish mode)
+ *
+ * - WS path used by the client: `/ws` (same host as `SERVER_BASE`).
+ * - Backend support:
+ *   - `Server/index.js` installs a Fastify `server.on('upgrade')` handler and
+ *     accepts WebSocket upgrades when `url.pathname === '/ws'`.
+ * - WS is NOT required for correctness.
+ *   - It is a best-effort enhancement over polling.
+ *   - If WS is unavailable (refused/blocked/offline), the app keeps working via
+ *     existing React Query polling for:
+ *       - conversation list
+ *       - active conversation messages
+ *
+ * Implementation detail:
+ * - In dev, some browsers resolve `localhost` to IPv6 (`::1`) first. If the
+ *   backend is only listening on IPv4, this can produce scary “connection
+ *   refused” WS errors. We normalize WS connections to `127.0.0.1` when the
+ *   host is `localhost` to keep realtime quiet.
+ * ---------------------------------------------------------------------------
+ *
  * Network-backed (Node server) endpoints (see Server/index.js):
  * - GET  /conversations?type=inbox|requests -> Conversation[]
  * - POST /conversations                    -> Conversation
@@ -50,6 +71,35 @@ import { entities } from '@/api/appClient';
 import { allowLocalMessageFallback } from '@/utils/localFallback';
 
 const BASE_URL = SERVER_BASE;
+
+function toWsBase(httpBase) {
+  const base = String(httpBase || '').trim().replace(/\/+$/, '');
+  if (!base) return '';
+  try {
+    const u = new URL(base);
+    const protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+
+    // Normalize localhost -> 127.0.0.1 for WS to avoid IPv6 localhost issues.
+    const host = String(u.hostname || '').toLowerCase() === 'localhost' ? '127.0.0.1' : u.hostname;
+
+    const port = u.port ? `:${u.port}` : '';
+    return `${protocol}//${host}${port}`;
+  } catch {
+    // Fallback: best-effort protocol swap.
+    if (base.startsWith('https://')) return `wss://${base.slice('https://'.length)}`;
+    if (base.startsWith('http://')) return `ws://${base.slice('http://'.length)}`;
+    return base;
+  }
+}
+
+export function getMessagesWsUrl(accessToken) {
+  const token = accessToken ? String(accessToken).trim() : '';
+  const wsBase = toWsBase(BASE_URL);
+  if (!token || !wsBase) return null;
+  const url = new URL(`${wsBase}/ws`);
+  url.searchParams.set('access_token', token);
+  return url.toString();
+}
 
 function normalizeId(value) {
   if (value == null) return null;

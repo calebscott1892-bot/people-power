@@ -22,7 +22,15 @@ export default class ErrorBoundary extends React.Component {
   render() {
     if (!this.state.hasError) return this.props.children;
 
-    const showDetails = import.meta?.env?.DEV;
+    let showDetails = import.meta?.env?.DEV;
+    if (!showDetails) {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        showDetails = params.get('debug') === '1' || localStorage.getItem('pp_debug') === '1';
+      } catch {
+        // ignore
+      }
+    }
     const safeMessage = this.state.error?.message || this.state.error || 'Unknown error';
 
     return (

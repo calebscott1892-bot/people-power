@@ -83,6 +83,249 @@ const E2EE_BODY_PREFIX = 'pp_e2ee_v1:';
 const MAX_GROUP_PARTICIPANTS = 10;
 const GROUP_POST_MODES = new Set(['owner_only', 'admins', 'selected', 'all']);
 
+// --- Realtime messaging (WebSocket) ---
+// Best-effort realtime: clients still fall back to HTTP refetch.
+const wsClientsByEmail = new Map(); // email -> Set<WebSocket>
+const wsEmailByClient = new WeakMap(); // WebSocket -> email
+let realtimeWss = null;
+let realtimeInitialized = false;
+
+function wsSafeSend(ws, payload) {
+  try {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify(payload));
+  } catch {
+    // ignore
+  }
+}
+
+function wsBroadcastToEmails(emails, payload) {
+  const list = Array.isArray(emails) ? emails : [];
+  const unique = Array.from(new Set(list.map((e) => normalizeEmail(e)).filter(Boolean)));
+  for (const email of unique) {
+    const set = wsClientsByEmail.get(email);
+    if (!set || set.size === 0) continue;
+    for (const ws of set) wsSafeSend(ws, payload);
+  }
+}
+
+async function getAuthedEmailFromAccessToken(token) {
+  const clean = token ? String(token).trim() : '';
+  if (!clean) return null;
+  try {
+    if (!supabase?.auth?.getUser) return null;
+    const { data, error } = await supabase.auth.getUser(clean);
+    if (error || !data?.user) return null;
+    return normalizeEmail(data.user.email);
+  } catch {
+    return null;
+  }
+}
+
+function initRealtimeServer() {
+  if (realtimeInitialized) return;
+  realtimeInitialized = true;
+
+  realtimeWss = new WebSocketServer({ noServer: true });
+
+  fastify.server.on('upgrade', async (req, socket, head) => {
+    try {
+      const url = new URL(req.url || '/', 'http://localhost');
+      if (url.pathname !== '/ws') return;
+
+      const token = url.searchParams.get('access_token') || '';
+      const email = await getAuthedEmailFromAccessToken(token);
+      if (!email) {
+        socket.destroy();
+        return;
+      }
+
+      req.pp_user_email = email;
+      realtimeWss.handleUpgrade(req, socket, head, (ws) => {
+        realtimeWss.emit('connection', ws, req);
+      });
+    } catch {
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  realtimeWss.on('connection', (ws, req) => {
+    const email = normalizeEmail(req?.pp_user_email);
+    if (!email) {
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    const set = wsClientsByEmail.get(email) || new Set();
+    set.add(ws);
+    wsClientsByEmail.set(email, set);
+    wsEmailByClient.set(ws, email);
+
+    fastify.log.info({ path: '/ws' }, 'ws client connected');
+
+    wsSafeSend(ws, { type: 'hello', ok: true });
+
+    ws.on('message', async (raw) => {
+      let msg;
+      try {
+        msg = JSON.parse(String(raw || ''));
+      } catch {
+        return;
+      }
+      const type = msg?.type ? String(msg.type) : '';
+      const byEmail = normalizeEmail(wsEmailByClient.get(ws));
+      if (!byEmail) return;
+
+      if (type === 'ping') {
+        wsSafeSend(ws, { type: 'pong', ts: Date.now() });
+        return;
+      }
+
+      if (type === 'message:delivered') {
+        const messageId = msg?.messageId ? String(msg.messageId) : '';
+        if (!messageId) return;
+        try {
+          if (!hasDatabaseUrl) {
+            const updated = memoryMarkMessageDelivered(messageId, byEmail);
+            if (!updated?.conversation_id) return;
+            const convo = getMemoryConversationById(updated.conversation_id);
+            const participants = Array.isArray(convo?.participant_emails) ? convo.participant_emails : [];
+            wsBroadcastToEmails(participants, {
+              type: 'message:delivered',
+              conversationId: String(updated.conversation_id),
+              messageId,
+              by: byEmail,
+            });
+            return;
+          }
+
+          await ensureMessagesTables();
+          const res = await pool.query(
+            `SELECT m.id, m.conversation_id, m.sender_email, c.participant_emails, c.request_status, c.blocked_by_email
+             FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id
+             WHERE m.id = $1
+             LIMIT 1`,
+            [messageId]
+          );
+          const row = res.rows?.[0] || null;
+          if (!row) return;
+          const participants = Array.isArray(row.participant_emails)
+            ? row.participant_emails.map((x) => normalizeEmail(x)).filter(Boolean)
+            : [];
+          if (!participants.includes(byEmail)) return;
+
+          const status = String(row?.request_status || 'accepted');
+          const blockedBy = normalizeEmail(row?.blocked_by_email);
+          if (status === 'blocked' && blockedBy && blockedBy !== byEmail) return;
+          if (normalizeEmail(row.sender_email) === byEmail) return;
+
+          await pool.query(
+            `UPDATE messages
+             SET delivered_to = CASE
+               WHEN delivered_to @> ARRAY[$2] THEN delivered_to
+               ELSE array_append(delivered_to, $2)
+             END
+             WHERE id = $1`,
+            [messageId, byEmail]
+          );
+
+          wsBroadcastToEmails(participants, {
+            type: 'message:delivered',
+            conversationId: String(row.conversation_id),
+            messageId,
+            by: byEmail,
+          });
+        } catch (e) {
+          fastify.log.warn({ err: e }, 'WS delivered ack failed');
+        }
+        return;
+      }
+
+      if (type === 'conversation:read') {
+        const conversationId = msg?.conversationId ? String(msg.conversationId) : '';
+        if (!conversationId) return;
+
+        try {
+          if (!hasDatabaseUrl) {
+            const convo = getMemoryConversationById(conversationId);
+            if (!convo) return;
+            const participants = Array.isArray(convo?.participant_emails)
+              ? convo.participant_emails.map((x) => normalizeEmail(x)).filter(Boolean)
+              : [];
+            if (!participants.includes(byEmail)) return;
+            memoryMarkConversationRead(conversationId, byEmail);
+            wsBroadcastToEmails(participants, {
+              type: 'conversation:read',
+              conversationId: String(conversationId),
+              by: byEmail,
+              ts: Date.now(),
+            });
+            return;
+          }
+
+          await ensureMessagesTables();
+          const convoRes = await pool.query('SELECT * FROM conversations WHERE id = $1 LIMIT 1', [conversationId]);
+          const convo = convoRes.rows?.[0] || null;
+          if (!convo) return;
+          const participants = Array.isArray(convo.participant_emails)
+            ? convo.participant_emails.map((x) => normalizeEmail(x)).filter(Boolean)
+            : [];
+          if (!participants.includes(byEmail)) return;
+
+          const status = String(convo?.request_status || 'accepted');
+          const blockedBy = normalizeEmail(convo?.blocked_by_email);
+          if (status === 'blocked' && blockedBy && blockedBy !== byEmail) return;
+
+          await pool.query(
+            `UPDATE messages
+             SET read_by = CASE
+               WHEN read_by @> ARRAY[$2] THEN read_by
+               ELSE array_append(read_by, $2)
+             END
+             WHERE conversation_id = $1
+               AND sender_email <> $2`,
+            [conversationId, byEmail]
+          );
+
+          wsBroadcastToEmails(participants, {
+            type: 'conversation:read',
+            conversationId: String(conversationId),
+            by: byEmail,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          fastify.log.warn({ err: e }, 'WS read ack failed');
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      const e = normalizeEmail(wsEmailByClient.get(ws));
+      if (!e) return;
+      const set2 = wsClientsByEmail.get(e);
+      if (!set2) return;
+      set2.delete(ws);
+      if (set2.size === 0) wsClientsByEmail.delete(e);
+
+      fastify.log.info({ path: '/ws' }, 'ws client disconnected');
+    });
+
+    ws.on('error', (err) => {
+      // Keep low-noise; never throw.
+      fastify.log.warn({ err, path: '/ws' }, 'ws client error');
+    });
+  });
+}
+
 function rateLimitKeyGenerator(request) {
   const authHeader = request.headers?.authorization ? String(request.headers.authorization) : '';
   const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
@@ -145,6 +388,7 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { pipeline } = require('stream/promises');
+const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -1719,6 +1963,7 @@ async function ensureMessagesTables() {
       body TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       read_by TEXT[] NOT NULL DEFAULT '{}',
+      delivered_to TEXT[] NOT NULL DEFAULT '{}',
       reactions JSONB NOT NULL DEFAULT '{}'::jsonb
     );
   `);
@@ -1744,6 +1989,7 @@ async function ensureMessagesTables() {
 
   // Ensure new message-related columns exist even if the table predates them.
   await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reactions JSONB NOT NULL DEFAULT '{}'::jsonb");
+  await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_to TEXT[] NOT NULL DEFAULT '{}'");
 }
 
 async function ensureUserFollowsTable() {
@@ -2969,6 +3215,7 @@ function memoryAppendMessage(conversationId, senderEmail, body) {
     body: cleanBody,
     created_at: nowIso(),
     read_by: [String(senderEmail).toLowerCase()],
+    delivered_to: [],
     reactions: {},
   };
   const list = memoryMessagesByConversation.get(String(conversationId)) || [];
@@ -2976,6 +3223,37 @@ function memoryAppendMessage(conversationId, senderEmail, body) {
   memoryMessagesByConversation.set(String(conversationId), list);
   convo.updated_at = nowIso();
   return message;
+}
+
+function memoryMarkMessageDelivered(messageId, recipientEmail) {
+  const id = String(messageId || '');
+  const me = normalizeEmail(recipientEmail);
+  if (!id || !me) return null;
+
+  for (const [conversationId, list] of memoryMessagesByConversation.entries()) {
+    const idx = Array.isArray(list) ? list.findIndex((m) => String(m?.id) === id) : -1;
+    if (idx === -1) continue;
+    const msg = list[idx];
+
+    const convo = getMemoryConversationById(conversationId);
+    if (!convo) return null;
+    const participants = Array.isArray(convo.participant_emails)
+      ? convo.participant_emails.map((x) => String(x).toLowerCase())
+      : [];
+    if (!participants.includes(me)) return null;
+
+    const status = String(convo?.request_status || 'accepted');
+    const blockedBy = normalizeEmail(convo?.blocked_by_email);
+    if (status === 'blocked' && blockedBy && blockedBy !== me) return null;
+    if (normalizeEmail(msg?.sender_email) === me) return msg;
+
+    const prev = Array.isArray(msg.delivered_to) ? msg.delivered_to.map((x) => normalizeEmail(x)).filter(Boolean) : [];
+    if (!prev.includes(me)) msg.delivered_to = [...prev, me];
+    list[idx] = msg;
+    memoryMessagesByConversation.set(String(conversationId), list);
+    return msg;
+  }
+  return null;
 }
 
 function memoryFindMessageById(messageId) {
@@ -7590,6 +7868,11 @@ fastify.post('/conversations/:id/request', async (request, reply) => {
     }
     const idx = memoryConversations.findIndex((c) => String(c?.id) === String(conversationId));
     if (idx !== -1) memoryConversations[idx] = next;
+    wsBroadcastToEmails(next?.participant_emails, {
+      type: 'conversation:updated',
+      conversationId: String(conversationId),
+      conversation: next,
+    });
     return reply.send(next);
   }
 
@@ -7626,7 +7909,15 @@ fastify.post('/conversations/:id/request', async (request, reply) => {
        RETURNING *`,
       [conversationId, patch.is_request, patch.request_status, patch.blocked_by_email ?? null]
     );
-    return reply.send(updated.rows?.[0] || { ok: true });
+    const row = updated.rows?.[0] || null;
+    if (row) {
+      wsBroadcastToEmails(row?.participant_emails, {
+        type: 'conversation:updated',
+        conversationId: String(conversationId),
+        conversation: row,
+      });
+    }
+    return reply.send(row || { ok: true });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to update request status');
     return reply.code(500).send({ error: 'Failed to update request status' });
@@ -7796,6 +8087,12 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
     notifyMessageRecipients({ conversation: convo, body: parsed.data.body, senderEmail: myEmail }).catch((err) => {
       fastify.log.warn({ err }, 'Message notification failed (memory)');
     });
+    wsBroadcastToEmails(convo?.participant_emails, {
+      type: 'message:new',
+      conversationId: String(conversationId),
+      conversation: convo,
+      message,
+    });
     return reply.code(201).send(message);
   }
 
@@ -7837,16 +8134,26 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
     const id = randomUUID();
     const cleanBody = cleanText(parsed.data.body, MAX_TEXT_LENGTHS.messageCiphertext);
     const created = await pool.query(
-      `INSERT INTO messages (id, conversation_id, sender_email, body, read_by)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO messages (id, conversation_id, sender_email, body, read_by, delivered_to)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [id, conversationId, myEmail, cleanBody, [myEmail]]
+      [id, conversationId, myEmail, cleanBody, [myEmail], []]
     );
 
     await pool.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1', [conversationId]);
     notifyMessageRecipients({ conversation: convo, body: cleanBody, senderEmail: myEmail }).catch((err) => {
       fastify.log.warn({ err }, 'Message notification failed');
     });
+
+    const row = created.rows?.[0] || null;
+    if (row) {
+      wsBroadcastToEmails(convo?.participant_emails, {
+        type: 'message:new',
+        conversationId: String(conversationId),
+        conversation: convo,
+        message: row,
+      });
+    }
     return reply.code(201).send(created.rows?.[0] ?? { id });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to send message');
@@ -9376,6 +9683,12 @@ fastify.post('/conversations/:id/read', async (request, reply) => {
     const participants = Array.isArray(convo.participant_emails) ? convo.participant_emails.map((x) => String(x).toLowerCase()) : [];
     if (!participants.includes(myEmail)) return reply.code(403).send({ error: 'Not allowed' });
     const updated = memoryMarkConversationRead(conversationId, myEmail);
+    wsBroadcastToEmails(convo?.participant_emails, {
+      type: 'conversation:read',
+      conversationId: String(conversationId),
+      by: myEmail,
+      ts: Date.now(),
+    });
     return reply.send({ ok: true, updated });
   }
 
@@ -9398,6 +9711,13 @@ fastify.post('/conversations/:id/read', async (request, reply) => {
          AND sender_email <> $2`,
       [conversationId, myEmail]
     );
+
+    wsBroadcastToEmails(convo?.participant_emails, {
+      type: 'conversation:read',
+      conversationId: String(conversationId),
+      by: myEmail,
+      ts: Date.now(),
+    });
 
     return reply.send({ ok: true, updated: result.rowCount ?? 0 });
   } catch (e) {
@@ -9485,6 +9805,7 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
 const start = async () => {
   try {
     await checkDatabaseConnection();
+    initRealtimeServer();
     if (hasDatabaseUrl) {
       try {
         await ensureVotesTable();
