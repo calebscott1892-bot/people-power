@@ -454,6 +454,9 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
     onSuccess: () => {
       toast.success('Report updated successfully');
       onActionComplete();
+    },
+    onError: (e) => {
+      toast.error(String(e?.message || 'Failed to update report'));
     }
   });
 

@@ -1,11 +1,11 @@
-import { getServerBaseUrl } from './serverBase';
+import { SERVER_BASE } from './serverBase';
 import {
   MAX_UPLOAD_BYTES,
   ALLOWED_UPLOAD_MIME_TYPES,
   validateFileUpload,
 } from '@/utils/uploadLimits';
 
-const BASE_URL = getServerBaseUrl();
+const BASE_URL = SERVER_BASE;
 
 async function safeReadJson(res) {
   try {

@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, MapPin, Search as SearchIcon, User as UserIcon } from 'lucide-react';
+import { Loader2, MapPin, Search as SearchIcon } from 'lucide-react';
 import { useAuth } from '@/auth/AuthProvider';
 import { searchMovements, searchUsers } from '@/api/searchClient';
 import { fetchMyProfile } from '@/api/userProfileClient';

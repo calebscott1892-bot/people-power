@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { useAuth } from '@/auth/AuthProvider';
 import { createConversation, sendMessage } from '@/api/messagesClient';
 import { fetchPublicKey, upsertMyPublicKey } from '@/api/keysClient';
+import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import { logError } from '@/utils/logError';
 import {
   Dialog,
@@ -19,7 +20,7 @@ export default function ShareButton({ movement, profile, variant = "default", la
   const { user, session } = useAuth();
   const [showDialog, setShowDialog] = useState(false);
   const [dmOpen, setDmOpen] = useState(false);
-  const [recipientEmail, setRecipientEmail] = useState('');
+  const [recipientUsername, setRecipientUsername] = useState('');
   const [sendingDm, setSendingDm] = useState(false);
   const targetType = movement ? 'movement' : profile ? 'profile' : 'movement';
 
@@ -102,14 +103,14 @@ export default function ShareButton({ movement, profile, variant = "default", la
   const handleShareToDm = async () => {
     const accessToken = session?.access_token ? String(session.access_token) : null;
     const myEmail = user?.email ? String(user.email) : '';
-    const to = String(recipientEmail || '').trim().toLowerCase();
+    const handle = String(recipientUsername || '').trim().replace(/^@+/, '');
 
     if (!accessToken || !myEmail) {
       toast.error('Please log in to share via DM');
       return;
     }
-    if (!to) {
-      toast.error('Recipient email is required');
+    if (!handle) {
+      toast.error('Recipient username is required');
       return;
     }
     if (!shareUrl) {
@@ -130,22 +131,26 @@ export default function ShareButton({ movement, profile, variant = "default", la
       const kp = await getOrCreateIdentityKeypair(myEmail);
       await upsertMyPublicKey(kp.publicKey, { accessToken });
 
-      const otherPublicKey = await fetchPublicKey(to, { accessToken });
+      const otherProfile = await fetchPublicProfileByUsername(handle, { accessToken });
+      const toEmail = String(otherProfile?.user_email || '').trim().toLowerCase();
+      if (!toEmail) throw new Error('User not found');
+
+      const otherPublicKey = await fetchPublicKey(toEmail, { accessToken });
       const key = await deriveSharedSecretKey(kp.privateKey, otherPublicKey);
       const plaintext = [shareTitle, shareUrl].filter(Boolean).join('\n');
       const encrypted = await encryptText(plaintext, key);
       const packed = packEncryptedPayload(encrypted);
 
-      const convo = await createConversation(to, { accessToken });
+      const convo = await createConversation(toEmail, { accessToken });
       if (!convo?.id) throw new Error('Failed to create conversation');
       await sendMessage(String(convo.id), packed, { accessToken });
 
       toast.success('Shared via DM');
       setDmOpen(false);
-      setRecipientEmail('');
+      setRecipientUsername('');
       setShowDialog(false);
     } catch (e) {
-      logError(e, 'ShareButton share to DM failed', { recipient: to });
+      logError(e, 'ShareButton share to DM failed', { recipient: handle });
       toast.error('Failed to share via DM');
     } finally {
       setSendingDm(false);
@@ -345,11 +350,11 @@ export default function ShareButton({ movement, profile, variant = "default", la
           </DialogHeader>
 
           <div className="mt-4 space-y-3">
-            <div className="text-sm font-bold text-slate-700">Recipient email</div>
+            <div className="text-sm font-bold text-slate-700">Recipient username</div>
             <input
-              value={recipientEmail}
-              onChange={(e) => setRecipientEmail(e.target.value)}
-              placeholder="name@example.com"
+              value={recipientUsername}
+              onChange={(e) => setRecipientUsername(e.target.value)}
+              placeholder="@username"
               className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
             />
 

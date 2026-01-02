@@ -103,7 +103,6 @@ export default function DailyChallenges() {
 
   const {
     data: challengeRecords = [],
-    isError: challengesError,
     error: challengesErrorObj,
   } = useQuery({
     queryKey: ['challenges', 'daily'],

@@ -7,6 +7,7 @@ import { useAuth } from '@/auth/AuthProvider';
 import { fetchMovementById } from '@/api/movementsClient';
 import { acceptCollaborationInvite, listMyCollaborationInvites, removeCollaborator } from '@/api/collaboratorsClient';
 import BackButton from '@/components/shared/BackButton';
+import { entities } from '@/api/appClient';
 
 export default function CollaborationInvites() {
   const { user, session } = useAuth();
@@ -21,6 +22,17 @@ export default function CollaborationInvites() {
     queryFn: async () => {
       const pending = await listMyCollaborationInvites({ accessToken });
 
+      let profiles = [];
+      try {
+        profiles = await entities.UserProfile.list('-created_date', 200);
+      } catch {
+        profiles = [];
+      }
+
+      const byEmail = new Map(
+        (Array.isArray(profiles) ? profiles : []).map((p) => [String(p?.user_email || '').trim().toLowerCase(), p])
+      );
+
       const titles = await Promise.all(
         pending.map(async (c) => {
           try {
@@ -32,7 +44,20 @@ export default function CollaborationInvites() {
         })
       );
 
-      return pending.map((c, idx) => ({ ...c, movement_title: titles[idx] }));
+      return pending.map((c, idx) => {
+        const invitedByEmail = String(c?.invited_by || '').trim().toLowerCase();
+        const inviterProfile = invitedByEmail ? byEmail.get(invitedByEmail) : null;
+        const inviterLabel = String(inviterProfile?.display_name || '').trim()
+          ? String(inviterProfile.display_name)
+          : String(inviterProfile?.username || '').trim()
+            ? `@${String(inviterProfile.username).replace(/^@+/, '')}`
+            : null;
+        return {
+          ...c,
+          movement_title: titles[idx],
+          inviter_label: inviterLabel,
+        };
+      });
     },
   });
 
@@ -86,7 +111,7 @@ export default function CollaborationInvites() {
                       {String(inv?.movement_title || inv?.movement_id || 'Movement')}
                     </div>
                     <div className="mt-1 text-xs text-slate-600 font-bold">
-                      Invited by: {String(inv?.invited_by || 'Unknown')} • Role: {String(inv?.role || 'viewer')}
+                      Invited by: {String(inv?.inviter_label || 'Someone')} • Role: {String(inv?.role || 'viewer')}
                     </div>
                   </div>
 

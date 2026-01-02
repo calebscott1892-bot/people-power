@@ -14,7 +14,7 @@ import { inviteCollaborator } from '@/api/collaboratorsClient';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 
 export default function InviteCollaboratorModal({ open, onClose, movementId, currentUser, movement }) {
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [role, setRole] = useState('editor');
   const [suggestions, setSuggestions] = useState([]);
   const queryClient = useQueryClient();
@@ -68,9 +68,28 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
     }
   }, [open, movement, allProfiles, currentUser]);
 
+  const normalizeHandle = (value) => {
+    const raw = value == null ? '' : String(value);
+    const s = raw.trim().replace(/^@+/, '');
+    return s;
+  };
+
+  const findProfileByUsername = (handle) => {
+    const h = normalizeHandle(handle).toLowerCase();
+    if (!h) return null;
+    const match = allProfiles.find((p) => String(p?.username || '').trim().toLowerCase() === h);
+    return match || null;
+  };
+
   const inviteMutation = useMutation({
     mutationFn: async () => {
       if (!accessToken) throw new Error('Please log in to invite collaborators');
+
+      const handle = normalizeHandle(username);
+      if (!handle) throw new Error('Please enter a username');
+
+      const profile = findProfileByUsername(handle);
+      if (!profile?.user_email) throw new Error('User not found');
 
       const rateCheck = await checkActionAllowed({
         email: currentUser?.email ?? null,
@@ -83,15 +102,15 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
         throw new Error(String(rateCheck?.reason || 'Please slow down.') + wait);
       }
 
-      await inviteCollaborator(movementId, { user_email: email, role }, { accessToken });
+      await inviteCollaborator(movementId, { username: handle, role }, { accessToken });
 
       // Best-effort local notification (legacy stub). Don't block invite if this fails.
       try {
         await entities.Notification.create({
-          recipient_email: email,
+          recipient_email: profile.user_email,
           type: 'movement_update',
           actor_email: currentUser.email,
-          actor_name: currentUser.full_name || currentUser.email,
+          actor_name: currentUser.full_name || currentUser.display_name || (currentUser.username ? `@${currentUser.username}` : null),
           content_id: movementId,
           content_title: 'invited you to collaborate'
         });
@@ -100,9 +119,9 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['collaborators'] });
+      queryClient.invalidateQueries({ queryKey: ['collaborators', movementId] });
       toast.success('Invitation sent!');
-      setEmail('');
+      setUsername('');
       onClose();
     },
     onError: (error) => {
@@ -130,7 +149,7 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
                   <button
                     key={profile.id}
                     type="button"
-                    onClick={() => setEmail(profile.user_email)}
+                    onClick={() => setUsername(profile.username ? `@${profile.username}` : '')}
                     className="w-full p-3 bg-white rounded-lg border-2 border-slate-200 hover:border-purple-400 transition-colors text-left"
                   >
                     <div className="flex items-center gap-2 mb-1">
@@ -156,14 +175,17 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
           )}
 
           <div>
-            <label className="text-sm font-bold text-slate-700 mb-2 block">Email Address</label>
+            <label className="text-sm font-bold text-slate-700 mb-2 block">Username</label>
             <Input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="collaborator@example.com"
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="@username"
               className="rounded-xl border-2"
             />
+            <div className="mt-1 text-xs text-slate-500 font-semibold">
+              Invite by username (no email required).
+            </div>
           </div>
 
           <div>
@@ -186,7 +208,7 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
             </Button>
             <Button
               onClick={() => inviteMutation.mutate()}
-              disabled={!email || inviteMutation.isPending}
+              disabled={!username || inviteMutation.isPending}
               className="flex-1 bg-[#3A3DFF] hover:bg-[#2A2DDD] rounded-xl font-bold"
             >
               {inviteMutation.isPending ? (

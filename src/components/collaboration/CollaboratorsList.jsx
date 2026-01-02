@@ -72,7 +72,13 @@ export default function CollaboratorsList({ movementId, isOwner }) {
           <div className="flex items-center gap-3">
             {getRoleIcon(collab.role)}
             <div>
-              <p className="font-bold text-slate-900">{collab.user_email}</p>
+              <p className="font-bold text-slate-900">
+                {String(collab?.display_name || '').trim()
+                  ? String(collab.display_name)
+                  : String(collab?.username || '').trim()
+                    ? `@${String(collab.username).replace(/^@+/, '')}`
+                    : 'Collaborator'}
+              </p>
               <p className="text-xs text-slate-500 font-semibold capitalize">{collab.role}</p>
             </div>
           </div>
@@ -97,7 +103,7 @@ export default function CollaboratorsList({ movementId, isOwner }) {
                 variant="ghost"
                 onClick={() => removeMutation.mutate(collab.id)}
                 className="h-9 w-9 text-red-600 hover:bg-red-50"
-                aria-label={`Remove collaborator ${String(collab.user_email || '')}`}
+                aria-label="Remove collaborator"
                 title="Remove collaborator"
               >
                 <X className="w-4 h-4" />

@@ -1,7 +1,7 @@
 // Lightweight backend status checker for People Power
 // Exports: checkBackendHealth, subscribeBackendStatus, getCurrentBackendStatus
 
-import { getServerBaseUrl } from '@/api/serverBase';
+import { SERVER_BASE } from '@/api/serverBase';
 
 const STATUS = {
   HEALTHY: 'healthy',
@@ -33,21 +33,25 @@ export function subscribeBackendStatus(listener) {
   return () => listeners.delete(listener);
 }
 
-export async function checkBackendHealth({ timeoutMs = 3000 } = {}) {
+const DEFAULT_TIMEOUT_MS = 8000;
+
+export async function checkBackendHealth({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   let status = STATUS.HEALTHY;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const baseUrl = getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/health`, {
+    const res = await fetch(`${SERVER_BASE}/health`, {
       signal: controller.signal,
       headers: { Accept: 'application/json' },
+      cache: 'no-store',
     });
     clearTimeout(timeout);
     if (!res.ok) status = STATUS.DEGRADED;
     else status = STATUS.HEALTHY;
   } catch {
-    status = STATUS.OFFLINE;
+    // If the browser reports online, treat backend failures as degraded to avoid false "offline" banners.
+    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+    status = isOnline ? STATUS.DEGRADED : STATUS.OFFLINE;
   }
   notify(status);
   return status;
@@ -57,7 +61,7 @@ export async function checkBackendHealth({ timeoutMs = 3000 } = {}) {
 function startPolling() {
   if (checkTimeout) clearTimeout(checkTimeout);
   const poll = async () => {
-    await checkBackendHealth({ timeoutMs: 3000 });
+    await checkBackendHealth({ timeoutMs: DEFAULT_TIMEOUT_MS });
     checkTimeout = setTimeout(poll, 10000);
   };
   poll();

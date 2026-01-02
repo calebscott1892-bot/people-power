@@ -1,7 +1,7 @@
 import { entities } from '@/api/appClient';
-import { getServerBaseUrl } from './serverBase';
+import { SERVER_BASE } from './serverBase';
 
-const BASE_URL = getServerBaseUrl();
+const BASE_URL = SERVER_BASE;
 
 async function safeReadJson(res) {
   try {

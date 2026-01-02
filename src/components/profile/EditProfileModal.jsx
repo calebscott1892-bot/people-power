@@ -17,6 +17,8 @@ import { exportMyData } from '@/api/userExportClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { logError } from '@/utils/logError';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
+import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
+import { allowLocalProfileFallback } from '@/utils/localFallback';
 import {
   Dialog,
   DialogContent,
@@ -59,6 +61,18 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       return false;
     }
   });
+  const [movementGroupOptOut, setMovementGroupOptOut] = useState(() => {
+    if (profile && typeof profile === 'object' && 'movement_group_opt_out' in profile) {
+      return !!profile.movement_group_opt_out;
+    }
+    return false;
+  });
+  const [emailNotificationsOptIn, setEmailNotificationsOptIn] = useState(() => {
+    if (profile && typeof profile === 'object' && 'email_notifications_opt_in' in profile) {
+      return !!profile.email_notifications_opt_in;
+    }
+    return false;
+  });
   const [location, setLocation] = useState(() => sanitizePublicLocation(profile?.location) || null);
   const [privateCoords, setPrivateCoords] = useState(() => readPrivateUserCoordinates(userEmail));
   const [catchmentRadius, setCatchmentRadius] = useState(profile?.catchment_radius_km || 50);
@@ -84,6 +98,8 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     setBannerUrl(profile?.banner_url || '');
     setUsernameError('');
     setPendingPhotoFile(null);
+    setMovementGroupOptOut(!!profile?.movement_group_opt_out);
+    setEmailNotificationsOptIn(!!profile?.email_notifications_opt_in);
   }, [open, profile, userEmail]);
 
   React.useEffect(() => {
@@ -115,18 +131,48 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
 
       await upsertMyProfile(data, { accessToken });
 
-      // Keep local cache in sync for migration-mode reads.
+      if (allowLocalProfileFallback) {
+        // Keep local cache in sync for migration-mode reads.
+        try {
+          if (profile?.id) {
+            await entities.UserProfile.update(profile.id, data);
+          } else {
+            await entities.UserProfile.create({
+              user_email: userEmail,
+              ...data
+            });
+          }
+        } catch (e) {
+          logError(e, 'Profile cache update failed');
+        }
+      }
+
       try {
-        if (profile) {
-          await entities.UserProfile.update(profile.id, data);
-        } else {
-          await entities.UserProfile.create({
-            user_email: userEmail,
-            ...data
-          });
+        if (!supabaseConfigError) {
+          const supabase = getSupabaseClient();
+          if (supabase) {
+            const displayName = String(data?.display_name || '').trim();
+            const username = String(data?.username || '').trim();
+            const bio = data?.bio != null ? String(data.bio).trim() : '';
+            const photoUrl = data?.profile_photo_url ? String(data.profile_photo_url).trim() : '';
+            const bannerUrl = data?.banner_url ? String(data.banner_url).trim() : '';
+            const payload = {
+              display_name: displayName || null,
+              full_name: displayName || null,
+              name: displayName || null,
+              username: username || null,
+              bio: bio || null,
+              profile_photo_url: photoUrl || null,
+              avatar_url: photoUrl || null,
+              banner_url: bannerUrl || null,
+              profile_updated_at: new Date().toISOString(),
+            };
+            const { error } = await supabase.auth.updateUser({ data: payload });
+            if (error) throw error;
+          }
         }
       } catch (e) {
-        logError(e, 'Profile cache update failed');
+        logError(e, 'Profile metadata sync failed');
       }
     },
     onSuccess: () => {
@@ -280,6 +326,8 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       banner_url: bannerUrl,
       skills,
       ai_features_enabled: aiEnabled,
+      movement_group_opt_out: movementGroupOptOut,
+      email_notifications_opt_in: emailNotificationsOptIn,
       // Store only coarse location fields (city/region/country), never raw GPS.
       location: sanitizePublicLocation(location),
       catchment_radius_km: catchmentRadius
@@ -567,6 +615,40 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
               <Switch
                 checked={aiEnabled}
                 onCheckedChange={setAiEnabled}
+                className="ml-4"
+              />
+            </div>
+          </div>
+
+          {/* Privacy & Notifications */}
+          <div className="p-4 rounded-xl border-2 border-slate-200 bg-slate-50 space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <label className="block text-sm font-black text-slate-900 mb-1">
+                  Movement group chats
+                </label>
+                <p className="text-xs text-slate-600 font-semibold">
+                  Allow movement organizers to add you to verified participant group chats.
+                </p>
+              </div>
+              <Switch
+                checked={!movementGroupOptOut}
+                onCheckedChange={(next) => setMovementGroupOptOut(!next)}
+                className="ml-4"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <label className="block text-sm font-black text-slate-900 mb-1">
+                  Email notifications
+                </label>
+                <p className="text-xs text-slate-600 font-semibold">
+                  Email me about new messages and collaboration invites.
+                </p>
+              </div>
+              <Switch
+                checked={emailNotificationsOptIn}
+                onCheckedChange={setEmailNotificationsOptIn}
                 className="ml-4"
               />
             </div>

@@ -45,6 +45,7 @@ const PublicImpactReport = React.lazy(() => import('@/components/impact/PublicIm
 const CreatorDashboard = React.lazy(() => import('@/components/analytics/CreatorDashboard'));
 import CollaboratorsList from '@/components/collaboration/CollaboratorsList';
 import InviteCollaboratorModal from '@/components/collaboration/InviteCollaboratorModal';
+import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import PollManager from '@/components/collaboration/PollManager';
 
 import {
@@ -608,20 +609,21 @@ export default function MovementDetails() {
   const movement = offlineMovement || movementData;
 
   useEffect(() => {
-    if (!movement) return;
-    const tagsArray = Array.isArray(movement?.tags) ? movement.tags : [];
+    const currentMovement = offlineMovement || movementData;
+    if (!currentMovement) return;
+    const tagsArray = Array.isArray(currentMovement?.tags) ? currentMovement.tags : [];
     const tagsText = tagsArray.map((t) => String(t).trim()).filter(Boolean).join(', ');
-    const mediaUrls = Array.isArray(movement?.media_urls) ? movement.media_urls : [];
+    const mediaUrls = Array.isArray(currentMovement?.media_urls) ? currentMovement.media_urls : [];
     setEditForm({
-      title: String(movement?.title || movement?.name || ''),
-      summary: String(movement?.summary || ''),
-      description: String(movement?.description || ''),
+      title: String(currentMovement?.title || currentMovement?.name || ''),
+      summary: String(currentMovement?.summary || ''),
+      description: String(currentMovement?.description || ''),
       tags: tagsText,
-      location_city: String(movement?.location_city || movement?.city || ''),
-      location_country: String(movement?.location_country || movement?.country || ''),
+      location_city: String(currentMovement?.location_city || currentMovement?.city || ''),
+      location_country: String(currentMovement?.location_country || currentMovement?.country || ''),
       media_urls: mediaUrls.map((u) => String(u)).filter(Boolean).join('\n'),
     });
-  }, [movement?.id, movement?.title, movement?.summary, movement?.description, movement?.location_city, movement?.location_country]);
+  }, [offlineMovement, movementData]);
 
   // Note: avoid early returns before hooks; render an early view at the end instead.
   const earlyView = !movementId ? (
@@ -1744,15 +1746,25 @@ export default function MovementDetails() {
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDesc, setTaskDesc] = useState('');
   const [taskAssignee, setTaskAssignee] = useState('');
+
+  const normalizeHandle = (value) => String(value || '').trim().replace(/^@+/, '');
   const createTaskMutation = useMutation({
     mutationFn: async () => {
       if (!accessToken) throw new Error('Please log in to add tasks');
+
+      let assignedToEmail;
+      const handle = normalizeHandle(taskAssignee);
+      if (handle) {
+        const prof = await fetchPublicProfileByUsername(handle, { accessToken });
+        assignedToEmail = prof?.user_email ? String(prof.user_email).trim() : undefined;
+      }
+
       return createMovementTask(
         movementId,
         {
           title: String(taskTitle).trim(),
           description: String(taskDesc).trim() || undefined,
-          assigned_to_email: String(taskAssignee).trim() || undefined,
+          assigned_to_email: assignedToEmail,
         },
         { accessToken }
       );
@@ -1764,6 +1776,33 @@ export default function MovementDetails() {
       await queryClient.invalidateQueries({ queryKey: ['movementTasks', movementId] });
     },
   });
+
+  const assignedTaskEmails = useMemo(() => {
+    const emails = (Array.isArray(tasks) ? tasks : [])
+      .map((t) => (t?.assigned_to_email ? String(t.assigned_to_email).trim().toLowerCase() : ''))
+      .filter(Boolean);
+    return Array.from(new Set(emails));
+  }, [tasks]);
+
+  const { data: assignedTaskProfiles = [] } = useQuery({
+    queryKey: ['taskAssignees', movementId, assignedTaskEmails.join('|')],
+    queryFn: () => lookupUsersByEmail(assignedTaskEmails, { accessToken }),
+    enabled: !!accessToken && assignedTaskEmails.length > 0,
+    staleTime: 1000 * 60 * 10,
+  });
+
+  const assignedTaskLookup = useMemo(() => {
+    const map = new Map();
+    for (const p of Array.isArray(assignedTaskProfiles) ? assignedTaskProfiles : []) {
+      const email = p?.user_email ? String(p.user_email).trim().toLowerCase() : (p?.email ? String(p.email).trim().toLowerCase() : '');
+      if (!email) continue;
+      map.set(email, {
+        display_name: p?.display_name ?? null,
+        username: p?.username ?? null,
+      });
+    }
+    return map;
+  }, [assignedTaskProfiles]);
 
   const updateTaskMutation = useMutation({
     mutationFn: async ({ taskId, patch }) => {
@@ -3102,8 +3141,8 @@ export default function MovementDetails() {
                           <TextInput value={taskTitle} onChange={setTaskTitle} placeholder="e.g. Draft flyer copy" />
                         </div>
                         <div>
-                          <Label>Assign to (email, optional)</Label>
-                          <TextInput value={taskAssignee} onChange={setTaskAssignee} placeholder="name@example.com" />
+                          <Label>Assign to (username, optional)</Label>
+                          <TextInput value={taskAssignee} onChange={setTaskAssignee} placeholder="@username" />
                         </div>
                       </div>
                       <div>
@@ -3136,7 +3175,17 @@ export default function MovementDetails() {
                               <div className="font-black text-slate-900 truncate">{String(t?.title || '')}</div>
                               <div className="text-xs text-slate-600 font-bold">
                                 Status: {String(t?.status || 'todo')}
-                                {t?.assigned_to_email ? ` • Assigned: ${String(t.assigned_to_email)}` : ''}
+                                {t?.assigned_to_email
+                                  ? (() => {
+                                      const email = String(t.assigned_to_email || '').trim().toLowerCase();
+                                      const prof = assignedTaskLookup.get(email);
+                                      const display = String(prof?.display_name || '').trim();
+                                      if (display) return ` • Assigned: ${display}`;
+                                      const uname = String(prof?.username || '').trim();
+                                      if (uname) return ` • Assigned: @${uname}`;
+                                      return ' • Assigned';
+                                    })()
+                                  : ''}
                               </div>
                             </div>
                             <div className="flex items-center gap-2 flex-shrink-0">

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Check, CheckCheck, Image as ImageIcon, Loader2, MessageCircle, Plus, Search, Send, SmilePlus } from 'lucide-react';
@@ -26,7 +26,11 @@ import {
   updateGroupSettings,
 } from '@/api/messagesClient';
 import { lookupUsersByEmail } from '@/api/usersClient';
+import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import { fetchMyBlocks } from '@/api/blocksClient';
+import { fetchMyFollowingUsers } from '@/api/userFollowsClient';
+import { acceptCollaborationInvite, listMyCollaborationInvites, removeCollaborator } from '@/api/collaboratorsClient';
+import { fetchMovementById } from '@/api/movementsClient';
 import { fetchPublicKey, upsertMyPublicKey } from '@/api/keysClient';
 import {
   deriveSharedSecretKey,
@@ -74,15 +78,6 @@ function looksLikeConnectivityError(error) {
   const msg = String(error?.message || '').toLowerCase();
   if (!msg) return false;
   return msg.includes('failed to fetch') || msg.includes('network') || msg.includes('load failed') || msg.includes('econnrefused');
-}
-
-function maskEmail(value) {
-  const s = String(value || '').trim();
-  if (!s.includes('@')) return s;
-  const [name, domain] = s.split('@');
-  if (!name || !domain) return s;
-  const prefix = name.slice(0, 2);
-  return `${prefix}***@${domain}`;
 }
 
 function MediaMessage({ payload, messageId }) {
@@ -268,8 +263,9 @@ export default function Messages() {
   const [selectedId, setSelectedId] = useState(null);
   const [draft, setDraft] = useState('');
   const [composeOpen, setComposeOpen] = useState(false);
-  const [box, setBox] = useState('inbox');
+  const [box, setBox] = useState('messages');
   const [search, setSearch] = useState('');
+  const [pendingMessages, setPendingMessages] = useState([]);
 
   const [pendingMediaFile, setPendingMediaFile] = useState(null);
   const [pendingMediaSensitive, setPendingMediaSensitive] = useState(false);
@@ -284,7 +280,7 @@ export default function Messages() {
   const [groupPostMode, setGroupPostMode] = useState('owner_only');
   const [groupPosterSelection, setGroupPosterSelection] = useState([]);
   const [groupAdminSelection, setGroupAdminSelection] = useState([]);
-  const [groupAddEmail, setGroupAddEmail] = useState('');
+  const [groupAddUsername, setGroupAddUsername] = useState('');
   const [movementAddSelection, setMovementAddSelection] = useState([]);
 
   const mediaInputRef = useRef(null);
@@ -310,6 +306,49 @@ export default function Messages() {
     const list = Array.isArray(myBlocks?.blocked) ? myBlocks.blocked : [];
     return new Set(list.map((b) => normalizeEmail(b?.email)).filter(Boolean));
   }, [myBlocks]);
+
+  const {
+    data: following = [],
+    isFetched: followingFetched,
+  } = useQuery({
+    queryKey: ['following', myEmailNormalized],
+    queryFn: async () => {
+      if (!accessToken) return [];
+      return fetchMyFollowingUsers({ accessToken });
+    },
+    enabled: !!accessToken && !!myEmailNormalized,
+    staleTime: 1000 * 60 * 5,
+  });
+
+  const followingEmails = useMemo(() => {
+    return Array.isArray(following)
+      ? following.map((u) => normalizeEmail(u?.email)).filter(Boolean)
+      : [];
+  }, [following]);
+
+  const followingSet = useMemo(() => new Set(followingEmails), [followingEmails]);
+
+  const {
+    data: collabInvites = [],
+  } = useQuery({
+    queryKey: ['collaborationInvites', myEmailNormalized],
+    enabled: !!accessToken && !!myEmailNormalized,
+    queryFn: async () => {
+      const pending = await listMyCollaborationInvites({ accessToken });
+      const titles = await Promise.all(
+        pending.map(async (c) => {
+          try {
+            const mv = await fetchMovementById(String(c?.movement_id || ''), { accessToken });
+            return String(mv?.title || mv?.name || c?.movement_id || '');
+          } catch {
+            return String(c?.movement_id || '');
+          }
+        })
+      );
+      return pending.map((c, idx) => ({ ...c, movement_title: titles[idx] }));
+    },
+    staleTime: 1000 * 60,
+  });
 
   const CONVERSATIONS_PAGE_SIZE = 20;
   const CONVERSATION_LIST_FIELDS = useMemo(
@@ -432,14 +471,16 @@ export default function Messages() {
         offset: pageParam,
         fields: CONVERSATION_LIST_FIELDS,
       }),
-    enabled: !!myEmail,
+    enabled: !!myEmail && !!accessToken,
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       if (!Array.isArray(lastPage)) return undefined;
       if (lastPage.length < CONVERSATIONS_PAGE_SIZE) return undefined;
       return allPages.length * CONVERSATIONS_PAGE_SIZE;
     },
-    refetchInterval: 10000,
+    refetchInterval: 2500,
+    refetchOnWindowFocus: true,
+    throwOnError: false,
   });
 
   const conversations = useMemo(() => {
@@ -482,6 +523,23 @@ export default function Messages() {
     }
     return lookup;
   }, [participantProfiles]);
+
+  const labelForEmail = useCallback(
+    (email, { fallback = 'Member', includeYou = false } = {}) => {
+      const normalized = normalizeEmail(email);
+      if (!normalized) return fallback;
+      if (includeYou && normalized === myEmailNormalized) return 'You';
+      const profile = profileLookup.get(normalized);
+      const display = String(profile?.display_name || '').trim();
+      if (display) return display;
+      const username = String(profile?.username || '').trim().replace(/^@+/, '');
+      if (username) return `@${username}`;
+      return fallback;
+    },
+    [profileLookup, myEmailNormalized]
+  );
+
+  const normalizeHandle = (value) => String(value || '').trim().replace(/^@+/, '');
 
   const signedInLabel = useMemo(() => {
     const profile = myEmailNormalized ? profileLookup.get(myEmailNormalized) : null;
@@ -532,7 +590,7 @@ export default function Messages() {
     setGroupAdminSelection(getGroupAdmins(selectedConversation));
     setGroupAvatarFile(null);
     setGroupAvatarPreview(String(selectedConversation?.group_avatar_url || ''));
-    setGroupAddEmail('');
+    setGroupAddUsername('');
     setMovementAddSelection([]);
   }, [groupSettingsOpen, selectedConversation]);
 
@@ -561,6 +619,31 @@ export default function Messages() {
     const emails = list.map((e) => normalizeEmail(e?.submitter_email)).filter(Boolean);
     return Array.from(new Set(emails));
   }, [verifiedEvidence, isMovementGroup]);
+
+  const {
+    data: verifiedParticipantProfiles = [],
+    isLoading: verifiedParticipantProfilesLoading,
+  } = useQuery({
+    queryKey: ['verifiedParticipantProfiles', selectedConversation?.movement_id, verifiedParticipantEmails.join('|')],
+    queryFn: () => lookupUsersByEmail(verifiedParticipantEmails.slice(0, 50), { accessToken }),
+    enabled: groupSettingsOpen && isMovementGroup && !!accessToken && verifiedParticipantEmails.length > 0,
+    staleTime: 1000 * 60 * 5,
+  });
+
+  const verifiedProfilesLookup = useMemo(() => {
+    const lookup = new Map();
+    const list = Array.isArray(verifiedParticipantProfiles) ? verifiedParticipantProfiles : [];
+    for (const p of list) {
+      const email = normalizeEmail(p?.email || p?.user_email);
+      if (!email) continue;
+      lookup.set(email, {
+        display_name: p?.display_name ?? null,
+        username: p?.username ?? null,
+        movement_group_opt_out: !!p?.movement_group_opt_out,
+      });
+    }
+    return lookup;
+  }, [verifiedParticipantProfiles]);
 
   const groupParticipants = useMemo(() => {
     if (!isGroupConversation) return [];
@@ -601,9 +684,9 @@ export default function Messages() {
   }, [conversations, conversationsLoading, selectedId, setSearchParams]);
 
   useEffect(() => {
-    if (selectedConversation?.is_group) {
-      setBox('groups');
-    }
+    if (!selectedConversation?.is_group) return;
+    const isMovement = String(selectedConversation?.group_type || '') === 'movement_verified';
+    setBox(isMovement ? 'movements' : 'messages');
   }, [selectedConversation]);
 
   const cannotReply = useMemo(() => {
@@ -617,42 +700,103 @@ export default function Messages() {
     return !canPostGroup;
   }, [isGroupConversation, canPostGroup]);
 
-  const filteredConversations = useMemo(() => {
+  const isMovementConversation = (c) => !!c?.is_group && String(c?.group_type || '') === 'movement_verified';
+  const queryLower = useMemo(() => String(search || '').trim().toLowerCase(), [search]);
+  const matchesSearch = useCallback(
+    (c) => {
+      if (!queryLower) return true;
+      const label = String(getConversationLabel(c, myEmail, profileLookup) || '').toLowerCase();
+      const last = String(c?.last_message_body || '').toLowerCase();
+      return label.includes(queryLower) || last.includes(queryLower);
+    },
+    [queryLower, myEmail, profileLookup]
+  );
+
+  const isIncomingRequest = useCallback(
+    (c) => {
+      const status = String(c?.request_status || '').toLowerCase();
+      const requester = normalizeEmail(c?.requester_email);
+      return status === 'pending' && requester && requester !== myEmailNormalized;
+    },
+    [myEmailNormalized]
+  );
+
+  const isRequestFromNonFollower = useCallback(
+    (c) => {
+      if (!isIncomingRequest(c)) return false;
+      if (!followingFetched) return true;
+      const requester = normalizeEmail(c?.requester_email);
+      return requester ? !followingSet.has(requester) : true;
+    },
+    [followingFetched, followingSet, isIncomingRequest]
+  );
+
+  const messageConversations = useMemo(() => {
     const list = Array.isArray(conversations) ? conversations : [];
-    const q = String(search || '').trim().toLowerCase();
-    if (box === 'requests') {
-      return list
-        .filter((c) => String(c?.request_status || '').toLowerCase() === 'pending')
-        .filter((c) => !c?.is_group)
-        .filter((c) => {
-          if (!q) return true;
-          const label = String(getConversationLabel(c, myEmail, profileLookup) || '').toLowerCase();
-          const last = String(c?.last_message_body || '').toLowerCase();
-          return label.includes(q) || last.includes(q);
-        });
-    }
-    if (box === 'groups') {
-      return list
-        .filter((c) => !!c?.is_group)
-        .filter((c) => {
-          if (!q) return true;
-          const label = String(getConversationLabel(c, myEmail, profileLookup) || '').toLowerCase();
-          const last = String(c?.last_message_body || '').toLowerCase();
-          return label.includes(q) || last.includes(q);
-        });
-    }
     return list
       .filter((c) => {
-        const status = String(c?.request_status || 'accepted').toLowerCase();
-        return status !== 'pending' && status !== 'declined' && !c?.is_group;
+        if (isMovementConversation(c)) return false;
+        if (c?.is_group) return true;
+        const incoming = isIncomingRequest(c);
+        if (!incoming) return true;
+        return !isRequestFromNonFollower(c);
       })
-      .filter((c) => {
-        if (!q) return true;
-        const label = String(getConversationLabel(c, myEmail, profileLookup) || '').toLowerCase();
-        const last = String(c?.last_message_body || '').toLowerCase();
-        return label.includes(q) || last.includes(q);
-      });
-  }, [conversations, box, search, myEmail, profileLookup]);
+      .filter(matchesSearch);
+  }, [conversations, matchesSearch, isIncomingRequest, isRequestFromNonFollower]);
+
+  const requestConversations = useMemo(() => {
+    const list = Array.isArray(conversations) ? conversations : [];
+    return list
+      .filter((c) => !isMovementConversation(c))
+      .filter((c) => !c?.is_group)
+      .filter((c) => isIncomingRequest(c))
+      .filter((c) => isRequestFromNonFollower(c))
+      .filter(matchesSearch);
+  }, [conversations, matchesSearch, isIncomingRequest, isRequestFromNonFollower]);
+
+  const movementConversations = useMemo(() => {
+    const list = Array.isArray(conversations) ? conversations : [];
+    return list.filter((c) => isMovementConversation(c)).filter(matchesSearch);
+  }, [conversations, matchesSearch]);
+
+  const messagesUnreadCount = useMemo(
+    () => messageConversations.reduce((sum, c) => sum + Number(c?.unread_count || 0), 0),
+    [messageConversations]
+  );
+  const requestsCount = useMemo(() => requestConversations.length, [requestConversations]);
+  const movementUnreadCount = useMemo(
+    () => movementConversations.reduce((sum, c) => sum + Number(c?.unread_count || 0), 0),
+    [movementConversations]
+  );
+  const collabInviteCount = Array.isArray(collabInvites) ? collabInvites.length : 0;
+  const movementsTotalCount = movementUnreadCount + collabInviteCount;
+
+  const visibleConversations = useMemo(() => {
+    if (box === 'requests') return requestConversations;
+    if (box === 'movements') return movementConversations;
+    return messageConversations;
+  }, [box, requestConversations, movementConversations, messageConversations]);
+
+  const notificationTracker = useRef({ ready: false, messages: 0, invites: 0 });
+
+  useEffect(() => {
+    if (!accessToken) return;
+    const prev = notificationTracker.current;
+    if (prev.ready) {
+      if (messagesUnreadCount > prev.messages) {
+        const delta = messagesUnreadCount - prev.messages;
+        toast(`New message${delta > 1 ? 's' : ''} received`);
+      }
+      if (collabInviteCount > prev.invites) {
+        toast('New collaboration invite');
+      }
+    }
+    notificationTracker.current = {
+      ready: true,
+      messages: messagesUnreadCount,
+      invites: collabInviteCount,
+    };
+  }, [accessToken, messagesUnreadCount, collabInviteCount]);
 
   const otherEmail = useMemo(() => {
     if (!selectedConversation || isGroupConversation) return '';
@@ -736,14 +880,16 @@ export default function Messages() {
         offset: pageParam,
         fields: MESSAGE_LIST_FIELDS,
       }),
-    enabled: !!myEmail && !!selectedConversation,
+    enabled: !!myEmail && !!accessToken && !!selectedConversation,
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       if (!Array.isArray(lastPage)) return undefined;
       if (lastPage.length < MESSAGES_PAGE_SIZE) return undefined;
       return allPages.length * MESSAGES_PAGE_SIZE;
     },
-    refetchInterval: selectedId ? 5000 : false,
+    refetchInterval: selectedId ? 1500 : false,
+    refetchOnWindowFocus: true,
+    throwOnError: false,
   });
 
   const messages = useMemo(() => {
@@ -758,6 +904,19 @@ export default function Messages() {
     if (!blockedEmails.size) return list;
     return list.filter((m) => !blockedEmails.has(normalizeEmail(m?.sender_email)));
   }, [messagesData, blockedEmails]);
+
+  const mergedMessages = useMemo(() => {
+    if (!pendingMessages.length) return messages;
+    const existing = new Set(messages.map((m) => String(m?.id || '')));
+    const pending = pendingMessages.filter((m) => !existing.has(String(m?.id || '')));
+    if (!pending.length) return messages;
+    const combined = [...messages, ...pending];
+    return combined.sort((a, b) => {
+      const ta = a?.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b?.created_at ? new Date(b.created_at).getTime() : 0;
+      return ta - tb;
+    });
+  }, [messages, pendingMessages]);
 
   useEffect(() => {
     if (!selectedConversation?.id || !myEmailNormalized) return;
@@ -785,10 +944,21 @@ export default function Messages() {
     },
   });
 
+  const buildPendingId = () => {
+    try {
+      if (typeof crypto !== 'undefined' && crypto?.randomUUID) {
+        return `pending_${crypto.randomUUID()}`;
+      }
+    } catch {
+      // ignore
+    }
+    return `pending_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  };
+
   const sendMutation = useMutation({
-    mutationFn: async () => {
-      const text = String(draft || '').trim();
-      if (!text) throw new Error('Message cannot be empty');
+    mutationFn: async ({ text }) => {
+      const nextText = String(text || '').trim();
+      if (!nextText) throw new Error('Message cannot be empty');
       if (!selectedId) throw new Error('Select a conversation');
       if (!isGroupConversation) {
         if (!otherEmail) throw new Error('Missing recipient');
@@ -809,7 +979,7 @@ export default function Messages() {
       }
 
       const { privateKey } = await getOrCreateIdentityKeypair(myEmail);
-      const payload = JSON.stringify({ type: 'text', text });
+      const payload = JSON.stringify({ type: 'text', text: nextText });
       if (isGroupConversation) {
         if (!groupParticipants.length) throw new Error('Missing group participants');
         if (!groupPublicKeys || !Object.keys(groupPublicKeys).length) {
@@ -836,8 +1006,25 @@ export default function Messages() {
       const packed = packEncryptedPayload(encrypted);
       return sendMessage(selectedId, packed, { accessToken, myEmail });
     },
-    onSuccess: async (created) => {
+    onMutate: ({ text, clientId }) => {
+      const nowIso = new Date().toISOString();
+      const pending = {
+        id: clientId,
+        body: String(text || ''),
+        pending_text: String(text || ''),
+        pending: true,
+        created_at: nowIso,
+        sender_email: myEmail,
+        read_by: [myEmail],
+      };
+      setPendingMessages((prev) => [...prev, pending]);
+      return { clientId };
+    },
+    onSuccess: async (created, _vars, context) => {
       setDraft('');
+      if (context?.clientId) {
+        setPendingMessages((prev) => prev.filter((m) => String(m?.id || '') !== String(context.clientId)));
+      }
       upsertMessageIntoCache(created);
       bumpConversationInCache(selectedId, {
         last_message_body: created?.body ?? null,
@@ -845,11 +1032,20 @@ export default function Messages() {
         updated_at: new Date().toISOString(),
       });
     },
-    onError: (e) => {
+    onError: (e, _vars, context) => {
+      if (context?.clientId) {
+        setPendingMessages((prev) => prev.filter((m) => String(m?.id || '') !== String(context.clientId)));
+      }
       logError(e, 'Failed to send message', { conversationId: selectedId });
       toast.error(e?.message || 'Failed to send');
     },
   });
+
+  const handleSend = () => {
+    const text = String(draft || '').trim();
+    if (!text) return;
+    sendMutation.mutate({ text, clientId: buildPendingId() });
+  };
 
   const reactionMutation = useMutation({
     mutationFn: async ({ messageId, emoji }) => {
@@ -970,6 +1166,34 @@ export default function Messages() {
     },
   });
 
+  const acceptInviteMutation = useMutation({
+    mutationFn: async (collabId) => {
+      if (!accessToken) throw new Error('Authentication required');
+      return acceptCollaborationInvite(collabId, { accessToken });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['collaborationInvites', myEmailNormalized] });
+      toast.success('Collaboration invite accepted');
+    },
+    onError: (e) => {
+      toast.error(e?.message || 'Failed to accept invite');
+    },
+  });
+
+  const declineInviteMutation = useMutation({
+    mutationFn: async (collabId) => {
+      if (!accessToken) throw new Error('Authentication required');
+      return removeCollaborator(collabId, { accessToken });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['collaborationInvites', myEmailNormalized] });
+      toast.success('Collaboration invite declined');
+    },
+    onError: (e) => {
+      toast.error(e?.message || 'Failed to decline invite');
+    },
+  });
+
   const updateGroupSettingsMutation = useMutation({
     mutationFn: async () => {
       if (!accessToken) throw new Error('Authentication required');
@@ -1022,7 +1246,7 @@ export default function Messages() {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
-      setGroupAddEmail('');
+      setGroupAddUsername('');
       setMovementAddSelection([]);
       toast.success('Group participants updated');
     },
@@ -1146,30 +1370,51 @@ export default function Messages() {
 
             <div className="px-4 pb-4 flex gap-2">
               <Button
-                variant={box === 'inbox' ? 'default' : 'outline'}
-                className={cn('h-10 rounded-xl font-bold', box === 'inbox' && 'bg-[#3A3DFF] hover:bg-[#2A2DDD]')}
-                onClick={() => setBox('inbox')}
+                variant={box === 'messages' ? 'default' : 'outline'}
+                className={cn('h-10 rounded-xl font-bold', box === 'messages' && 'bg-[#3A3DFF] hover:bg-[#2A2DDD]')}
+                onClick={() => setBox('messages')}
               >
-                Inbox
+                <span className="inline-flex items-center gap-2">
+                  Messages
+                  {messagesUnreadCount > 0 ? (
+                    <span className="min-w-5 h-5 px-1.5 rounded-full bg-red-600 text-white text-[11px] font-black inline-flex items-center justify-center">
+                      {messagesUnreadCount}
+                    </span>
+                  ) : null}
+                </span>
               </Button>
               <Button
                 variant={box === 'requests' ? 'default' : 'outline'}
                 className={cn('h-10 rounded-xl font-bold', box === 'requests' && 'bg-[#3A3DFF] hover:bg-[#2A2DDD]')}
                 onClick={() => setBox('requests')}
               >
-                Requests
+                <span className="inline-flex items-center gap-2">
+                  Requests
+                  {requestsCount > 0 ? (
+                    <span className="min-w-5 h-5 px-1.5 rounded-full bg-red-600 text-white text-[11px] font-black inline-flex items-center justify-center">
+                      {requestsCount}
+                    </span>
+                  ) : null}
+                </span>
               </Button>
               <Button
-                variant={box === 'groups' ? 'default' : 'outline'}
-                className={cn('h-10 rounded-xl font-bold', box === 'groups' && 'bg-[#3A3DFF] hover:bg-[#2A2DDD]')}
-                onClick={() => setBox('groups')}
+                variant={box === 'movements' ? 'default' : 'outline'}
+                className={cn('h-10 rounded-xl font-bold', box === 'movements' && 'bg-[#3A3DFF] hover:bg-[#2A2DDD]')}
+                onClick={() => setBox('movements')}
               >
-                Groups
+                <span className="inline-flex items-center gap-2">
+                  Movements
+                  {movementsTotalCount > 0 ? (
+                    <span className="min-w-5 h-5 px-1.5 rounded-full bg-red-600 text-white text-[11px] font-black inline-flex items-center justify-center">
+                      {movementsTotalCount}
+                    </span>
+                  ) : null}
+                </span>
               </Button>
             </div>
-            {box === 'groups' ? (
+            {box === 'movements' ? (
               <div className="px-4 pb-2 text-xs font-bold text-slate-500">
-                Verified participants can be added to author group chats at any time. Group chats live here.
+                Movement group chats and collaboration invites live here.
               </div>
             ) : null}
 
@@ -1190,10 +1435,10 @@ export default function Messages() {
                   Retry
                 </Button>
               </div>
-            ) : filteredConversations.length === 0 ? (
+            ) : visibleConversations.length === 0 && !(box === 'movements' && Array.isArray(collabInvites) && collabInvites.length > 0) ? (
               <div className="p-6 text-slate-600 font-semibold">
-                {box === 'groups'
-                  ? 'No group chats yet. Verified participant chats will appear here.'
+                {box === 'movements'
+                  ? 'No movement chats or collaboration invites yet.'
                   : box === 'requests'
                     ? 'No message requests right now.'
                     : 'No active messages yet. Start a conversation from a profile or movement.'}
@@ -1201,7 +1446,50 @@ export default function Messages() {
             ) : (
               <>
                 <div className="divide-y divide-slate-100">
-                  {filteredConversations.map((c) => {
+                  {box === 'movements' && Array.isArray(collabInvites) && collabInvites.length > 0 ? (
+                    <div className="px-4 py-4 bg-slate-50">
+                      <div className="text-xs font-black text-slate-500">Collaboration invites</div>
+                      <div className="mt-3 space-y-2">
+                        {collabInvites.slice(0, 20).map((invite) => {
+                          const inviteId = String(invite?.id || invite?._id || '');
+                          const title = String(invite?.movement_title || invite?.movement_id || 'Movement');
+                          const role = String(invite?.role || 'collaborator');
+                          return (
+                            <div
+                              key={inviteId}
+                              className="p-3 rounded-2xl border border-slate-200 bg-white flex items-start justify-between gap-3"
+                            >
+                              <div className="min-w-0">
+                                <div className="font-black text-slate-900 truncate">{title}</div>
+                                <div className="text-xs font-bold text-slate-500 mt-1">Invite to collaborate • {role}</div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <Button
+                                  type="button"
+                                  className="h-9 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
+                                  disabled={acceptInviteMutation.isPending || declineInviteMutation.isPending || !inviteId}
+                                  onClick={() => acceptInviteMutation.mutate(inviteId)}
+                                >
+                                  Accept
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  className="h-9 rounded-xl font-bold"
+                                  disabled={acceptInviteMutation.isPending || declineInviteMutation.isPending || !inviteId}
+                                  onClick={() => declineInviteMutation.mutate(inviteId)}
+                                >
+                                  Decline
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {visibleConversations.map((c) => {
                     const id = String(c?.id || '');
                     const isGroup = !!c?.is_group;
                     const other = getConversationLabel(c, myEmail, profileLookup);
@@ -1422,7 +1710,7 @@ export default function Messages() {
                         Retry
                       </Button>
                     </div>
-                  ) : messages.length === 0 ? (
+                  ) : mergedMessages.length === 0 ? (
                     <div className="text-slate-600 font-semibold">
                       No active messages yet. Start a conversation from a profile or movement.
                     </div>
@@ -1448,10 +1736,18 @@ export default function Messages() {
                           </Button>
                         </div>
                       ) : null}
-                      {messages.map((m) => {
+                      {mergedMessages.map((m) => {
                         const mine = String(m?.sender_email || '').toLowerCase() === String(myEmail).toLowerCase();
                         let displayBody = String(m?.body || '');
-                        const encryptedPayload = unpackEncryptedPayload(displayBody);
+                        let encryptedPayload = null;
+                        if (isEncryptedBody(displayBody)) {
+                          try {
+                            encryptedPayload = unpackEncryptedPayload(displayBody);
+                          } catch {
+                            encryptedPayload = null;
+                          }
+                        }
+                        const isPending = !!m?.pending;
                         const readBy = Array.isArray(m?.read_by) ? m.read_by.map((x) => String(x).toLowerCase()) : [];
                         const readByOthers = mine ? readBy.filter((e) => e && e !== myEmailNormalized) : [];
                         const otherHasRead = mine
@@ -1467,9 +1763,11 @@ export default function Messages() {
                           (senderProfile?.username ? `@${String(senderProfile.username).trim()}` : '') ||
                           (mine ? 'You' : 'Member');
                         const statusLabel = mine
-                          ? (otherHasRead
-                              ? (isGroupConversation ? `Read by ${readByOthers.length}` : 'Read')
-                              : 'Delivered')
+                          ? (isPending
+                              ? 'Sending…'
+                              : (otherHasRead
+                                  ? (isGroupConversation ? `Read by ${readByOthers.length}` : 'Read')
+                                  : 'Delivered'))
                           : null;
                         return (
                           <div key={String(m?.id)} className={cn('flex', mine ? 'justify-end' : 'justify-start')}>
@@ -1707,12 +2005,12 @@ export default function Messages() {
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
-                          sendMutation.mutate();
+                          handleSend();
                         }
                       }}
                     />
                     <Button
-                      onClick={() => sendMutation.mutate()}
+                      onClick={handleSend}
                       disabled={
                         sendMutation.isPending ||
                         cannotReply ||
@@ -1826,7 +2124,7 @@ export default function Messages() {
                             checked={groupPosterSelection.includes(email)}
                             onCheckedChange={() => toggleGroupPoster(email)}
                           />
-                          {maskEmail(email)}
+                          {labelForEmail(email, { includeYou: true })}
                         </label>
                       ))}
                     </div>
@@ -1846,7 +2144,7 @@ export default function Messages() {
                           onCheckedChange={() => toggleGroupAdmin(email)}
                           disabled={!isGroupOwner || isOwner}
                         />
-                        {maskEmail(email)} {isOwner ? '(owner)' : ''}
+                        {labelForEmail(email, { includeYou: true })} {isOwner ? '(owner)' : ''}
                       </label>
                     );
                   })}
@@ -1864,7 +2162,7 @@ export default function Messages() {
                     const isOwner = normalizeEmail(email) === normalizeEmail(selectedConversation?.created_by_email);
                     return (
                       <div key={email} className="flex items-center justify-between text-sm font-semibold text-slate-700">
-                        <div>{maskEmail(email)} {isOwner ? '(owner)' : ''}</div>
+                        <div>{labelForEmail(email, { includeYou: true })} {isOwner ? '(owner)' : ''}</div>
                         {(isMovementGroup ? isGroupOwner : isGroupAdminUser) && !isOwner ? (
                           <Button
                             type="button"
@@ -1885,7 +2183,7 @@ export default function Messages() {
                   isMovementGroup ? (
                     <div className="space-y-2 pt-2">
                       <div className="text-xs font-black text-slate-500">Add verified participants</div>
-                      {verifiedEvidenceLoading ? (
+                      {verifiedEvidenceLoading || verifiedParticipantProfilesLoading ? (
                         <div className="text-xs text-slate-500">Loading verified participants…</div>
                       ) : verifiedParticipantEmails.length === 0 ? (
                         <div className="text-xs text-slate-500">No verified participants available.</div>
@@ -1894,51 +2192,114 @@ export default function Messages() {
                           <div className="flex flex-wrap gap-2">
                             {verifiedParticipantEmails
                               .filter((email) => !groupParticipants.includes(email))
+                              .filter((email) => {
+                                const profile = verifiedProfilesLookup.get(normalizeEmail(email));
+                                return profile && !profile.movement_group_opt_out;
+                              })
                               .map((email) => (
                                 <label key={email} className="flex items-center gap-2 text-xs font-bold text-slate-700">
                                   <Checkbox
                                     checked={movementAddSelection.includes(email)}
                                     onCheckedChange={() => toggleMovementAdd(email)}
                                   />
-                                  {maskEmail(email)}
+                                  {(() => {
+                                    const profile = verifiedProfilesLookup.get(normalizeEmail(email));
+                                    const display = String(profile?.display_name || '').trim();
+                                    if (display) return display;
+                                    const uname = String(profile?.username || '').trim();
+                                    if (uname) return `@${uname}`;
+                                    return 'Verified participant';
+                                  })()}
                                 </label>
                               ))}
                           </div>
-                          <Button
-                            type="button"
-                            className="h-9 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
-                            onClick={() =>
-                              updateGroupParticipantsMutation.mutate({ add: movementAddSelection })
-                            }
-                            disabled={!movementAddSelection.length || updateGroupParticipantsMutation.isPending}
-                          >
-                            Add selected
-                          </Button>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              className="h-9 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
+                              onClick={() => {
+                                const openSlots = Math.max(0, 10 - groupParticipants.length);
+                                const eligible = verifiedParticipantEmails
+                                  .filter((email) => !groupParticipants.includes(email))
+                                  .filter((email) => {
+                                    const profile = verifiedProfilesLookup.get(normalizeEmail(email));
+                                    return profile && !profile.movement_group_opt_out;
+                                  })
+                                  .slice(0, openSlots);
+                                if (!eligible.length) {
+                                  toast.error('No eligible verified participants to add');
+                                  return;
+                                }
+                                updateGroupParticipantsMutation.mutate({ add: eligible });
+                              }}
+                              disabled={updateGroupParticipantsMutation.isPending}
+                            >
+                              Add all
+                            </Button>
+                            <Button
+                              type="button"
+                              className="h-9 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
+                              onClick={() => {
+                                const openSlots = Math.max(0, 10 - groupParticipants.length);
+                                const eligible = movementAddSelection
+                                  .filter((email) => !groupParticipants.includes(email))
+                                  .filter((email) => {
+                                    const profile = verifiedProfilesLookup.get(normalizeEmail(email));
+                                    return profile && !profile.movement_group_opt_out;
+                                  })
+                                  .slice(0, openSlots);
+                                if (!eligible.length) {
+                                  toast.error('Select at least one eligible participant');
+                                  return;
+                                }
+                                updateGroupParticipantsMutation.mutate({ add: eligible });
+                              }}
+                              disabled={!movementAddSelection.length || updateGroupParticipantsMutation.isPending}
+                            >
+                              Add selected
+                            </Button>
+                          </div>
                         </>
                       )}
                     </div>
                   ) : (
                     <div className="space-y-2 pt-2">
-                      <div className="text-xs font-black text-slate-500">Add by email</div>
+                      <div className="text-xs font-black text-slate-500">Add by username</div>
                       <div className="flex gap-2">
                         <Input
-                          value={groupAddEmail}
-                          onChange={(e) => setGroupAddEmail(e.target.value)}
-                          placeholder="name@example.com"
+                          value={groupAddUsername}
+                          onChange={(e) => setGroupAddUsername(e.target.value)}
+                          placeholder="@username"
                           className="rounded-xl border-2"
                         />
                         <Button
                           type="button"
                           className="h-10 rounded-xl font-bold bg-[#3A3DFF] hover:bg-[#2A2DDD]"
-                          onClick={() =>
-                            updateGroupParticipantsMutation.mutate({
-                              add: groupAddEmail
-                                .split(',')
-                                .map((e) => normalizeEmail(e))
-                                .filter(Boolean),
-                            })
-                          }
-                          disabled={!groupAddEmail.trim() || updateGroupParticipantsMutation.isPending}
+                          onClick={async () => {
+                            if (!accessToken) return;
+                            const handles = groupAddUsername
+                              .split(',')
+                              .map((h) => normalizeHandle(h))
+                              .filter(Boolean)
+                              .slice(0, 10);
+
+                            if (!handles.length) return;
+
+                            try {
+                              const results = await Promise.all(
+                                handles.map(async (h) => {
+                                  const prof = await fetchPublicProfileByUsername(h, { accessToken });
+                                  const email = normalizeEmail(prof?.user_email);
+                                  return email;
+                                })
+                              );
+                              const emails = results.filter(Boolean);
+                              updateGroupParticipantsMutation.mutate({ add: emails });
+                            } catch (e) {
+                              toast.error(String(e?.message || 'Failed to resolve username'));
+                            }
+                          }}
+                          disabled={!groupAddUsername.trim() || updateGroupParticipantsMutation.isPending}
                         >
                           Add
                         </Button>

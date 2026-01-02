@@ -45,10 +45,11 @@
  * @property {Object|null} reactions
  */
 
-import { getServerBaseUrl } from './serverBase';
+import { SERVER_BASE } from './serverBase';
 import { entities } from '@/api/appClient';
+import { allowLocalMessageFallback } from '@/utils/localFallback';
 
-const BASE_URL = getServerBaseUrl();
+const BASE_URL = SERVER_BASE;
 
 function normalizeId(value) {
   if (value == null) return null;
@@ -351,7 +352,7 @@ export async function fetchConversations(options) {
 
     return Array.isArray(body) ? body : body?.conversations || [];
   } catch (e) {
-    if (myEmail) return localFetchConversations(myEmail);
+    if (allowLocalMessageFallback && myEmail) return localFetchConversations(myEmail);
     throw e;
   }
 }
@@ -391,7 +392,7 @@ export async function fetchConversationsPage(options) {
 
     return Array.isArray(body) ? body : body?.conversations || [];
   } catch (e) {
-    if (myEmail) {
+    if (allowLocalMessageFallback && myEmail) {
       return localFetchConversationsPage(myEmail, { limit, offset, fields, type });
     }
     throw e;
@@ -427,7 +428,7 @@ export async function createConversation(recipientEmail, options) {
 
     return body;
   } catch (e) {
-    if (myEmail) return localFindOrCreateConversation(myEmail, recipientEmail);
+    if (allowLocalMessageFallback && myEmail) return localFindOrCreateConversation(myEmail, recipientEmail);
     throw e;
   }
 }
@@ -582,7 +583,7 @@ export async function fetchMessages(conversationId, options) {
 
     return Array.isArray(body) ? body : body?.messages || [];
   } catch (e) {
-    if (myEmail) return localFetchMessages(id);
+    if (allowLocalMessageFallback && myEmail) return localFetchMessages(id);
     throw e;
   }
 }
@@ -623,7 +624,7 @@ export async function fetchMessagesPage(conversationId, options) {
 
     return Array.isArray(body) ? body : body?.messages || [];
   } catch (e) {
-    if (myEmail) return localFetchMessagesPage(id, { limit, offset, fields });
+    if (allowLocalMessageFallback && myEmail) return localFetchMessagesPage(id, { limit, offset, fields });
     throw e;
   }
 }
@@ -660,7 +661,7 @@ export async function sendMessage(conversationId, bodyText, options) {
 
     return body;
   } catch (e) {
-    if (myEmail) return localSendMessage(myEmail, id, bodyText);
+    if (allowLocalMessageFallback && myEmail) return localSendMessage(myEmail, id, bodyText);
     throw e;
   }
 }
@@ -695,7 +696,7 @@ export async function markConversationRead(conversationId, options) {
 
     return body ?? { ok: true };
   } catch (e) {
-    if (myEmail) return localMarkConversationRead(myEmail, id);
+    if (allowLocalMessageFallback && myEmail) return localMarkConversationRead(myEmail, id);
     throw e;
   }
 }
@@ -713,7 +714,7 @@ export async function actOnConversationRequest(conversationId, action, options) 
       body: { action },
     });
   } catch (e) {
-    if (myEmail) return localActOnConversationRequest(myEmail, id, action);
+    if (allowLocalMessageFallback && myEmail) return localActOnConversationRequest(myEmail, id, action);
     throw e;
   }
 }
@@ -734,7 +735,7 @@ export async function toggleMessageReaction(messageId, emoji, options) {
       body: { emoji: cleanEmoji },
     });
   } catch (e) {
-    if (myEmail) return localToggleReaction(myEmail, id, cleanEmoji);
+    if (allowLocalMessageFallback && myEmail) return localToggleReaction(myEmail, id, cleanEmoji);
     throw e;
   }
 }

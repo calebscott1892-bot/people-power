@@ -1,59 +1,29 @@
-const DEFAULT_SERVER_URL = 'http://localhost:3001';
-const DEFAULT_PROD_BASE = '/api';
+const DEV_BACKEND = 'http://localhost:3001';
+const PROD_BACKEND = 'https://people-power.onrender.com';
 
-function isAbsoluteUrl(value) {
-  return /^https?:\/\//i.test(String(value || '').trim());
+function trimTrailingSlashes(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
 }
 
-function isLocalServerUrl(value) {
-  try {
-    const url = new URL(String(value));
-    return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-  } catch {
-    return false;
-  }
+function isLocalhost() {
+  if (typeof window === 'undefined') return false;
+  const host = String(window.location?.hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1';
 }
 
+// Single source of truth for backend base URL.
+// Rules (per spec):
+// 1) If VITE_API_BASE_URL is defined -> ALWAYS use that
+// 2) If running on localhost -> use http://localhost:3001
+// 3) Otherwise -> use Render backend directly (no /api proxy)
+const envBaseRaw = import.meta?.env?.VITE_API_BASE_URL;
+const envBase = envBaseRaw ? String(envBaseRaw).trim() : '';
+
+export const SERVER_BASE = trimTrailingSlashes(
+  envBase || (isLocalhost() ? DEV_BACKEND : PROD_BACKEND)
+);
+
+// Backwards-compatible helper (many clients historically imported a function).
 export function getServerBaseUrl() {
-  const serverUrlRaw = import.meta?.env?.VITE_SERVER_URL;
-  const apiBaseRaw = import.meta?.env?.VITE_API_BASE_URL;
-  const appApiBaseRaw = import.meta?.env?.VITE_APP_API_BASE_URL;
-  const serverUrl = serverUrlRaw ? String(serverUrlRaw).trim() : '';
-  const apiBase = apiBaseRaw ? String(apiBaseRaw).trim() : '';
-  const appApiBase = appApiBaseRaw ? String(appApiBaseRaw).trim() : '';
-  const isDev = import.meta?.env?.DEV;
-  const isLocalHost =
-    typeof window !== 'undefined' &&
-    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-
-  if (isDev) {
-    if (isAbsoluteUrl(serverUrl)) {
-      if (isLocalHost && !isLocalServerUrl(serverUrl)) {
-        return DEFAULT_SERVER_URL;
-      }
-      return serverUrl.replace(/\/+$/, '');
-    }
-    // If dev env only provides relative base hints, force the local backend.
-    if (serverUrl && serverUrl.startsWith('/')) {
-      return DEFAULT_SERVER_URL;
-    }
-    if (appApiBase.toLowerCase() === 'relative') {
-      return DEFAULT_SERVER_URL;
-    }
-    return DEFAULT_SERVER_URL;
-  }
-
-  if (apiBase.toLowerCase() === 'relative') return '';
-  const base = apiBase || serverUrl || DEFAULT_PROD_BASE;
-  const trimmed = base ? base.replace(/\/+$/, '') : '';
-  if (isLocalHost && trimmed.startsWith('/')) {
-    return DEFAULT_SERVER_URL;
-  }
-  if (!trimmed) {
-    return typeof window !== 'undefined' ? window.location.origin : '';
-  }
-  if (trimmed.startsWith('/') && typeof window !== 'undefined') {
-    return `${window.location.origin}${trimmed}`;
-  }
-  return trimmed;
+  return SERVER_BASE;
 }

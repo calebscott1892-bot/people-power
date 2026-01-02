@@ -3,9 +3,11 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Zap, ArrowRight } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Link } from 'react-router-dom';
+import { useAuth } from '@/auth/AuthProvider';
 
 export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
   const reduceMotion = useReducedMotion();
+  const { user, signOut } = useAuth();
 
   return (
     <AnimatePresence>
@@ -168,7 +170,13 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
                 variant="outline"
                 className="h-12 sm:h-16 w-full sm:w-auto px-8 sm:px-10 rounded-2xl font-black text-base sm:text-xl bg-slate-900 text-white border border-slate-900 hover:bg-slate-800 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-900"
               >
-                <Link to="/login">Sign in / Create account</Link>
+                {user ? (
+                  <button type="button" onClick={() => signOut()}>
+                    Sign out
+                  </button>
+                ) : (
+                  <Link to="/login">Sign in / Create account</Link>
+                )}
               </Button>
             </div>
           </motion.div>

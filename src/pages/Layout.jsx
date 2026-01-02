@@ -14,6 +14,7 @@ import { useFeatureFlag } from '@/utils/featureFlags';
 import { useQuery } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
+import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { toast } from 'sonner';
 import IntroScreen from '@/components/home/IntroScreen';
 
@@ -72,7 +73,7 @@ function LayoutContent({ children }) {
   const { t } = useLanguage();
   const userId = authUser?.id || authUser?.email || null;
   const { enabled: multiLanguageEnabled } = useFeatureFlag('multi_language', userId);
-  const { enabled: dailyChallengesEnabled } = useFeatureFlag('daily_challenges', userId, {
+  useFeatureFlag('daily_challenges', userId, {
     defaultEnabled: true,
     enableWhileLoading: true,
   });
@@ -92,6 +93,7 @@ function LayoutContent({ children }) {
       } catch {
         // fall back to local cached profile
       }
+      if (!allowLocalProfileFallback) return null;
       try {
         const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
         return Array.isArray(profiles) && profiles.length > 0 ? profiles[0] : null;
@@ -113,6 +115,7 @@ function LayoutContent({ children }) {
     const base =
       userProfile?.display_name ||
       userProfile?.username ||
+      authUser?.user_metadata?.display_name ||
       authUser?.user_metadata?.full_name ||
       authUser?.full_name ||
       authUser?.user_metadata?.name ||
@@ -126,6 +129,7 @@ function LayoutContent({ children }) {
     const base =
       userProfile?.display_name ||
       userProfile?.username ||
+      authUser?.user_metadata?.display_name ||
       authUser?.user_metadata?.full_name ||
       authUser?.full_name ||
       authUser?.user_metadata?.name ||

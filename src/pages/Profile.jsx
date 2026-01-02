@@ -21,6 +21,7 @@ import { sanitizePublicLocation } from '@/utils/locationPrivacy';
 import { logError } from '@/utils/logError';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { fetchMyBlocks, unblockUser } from '@/api/blocksClient';
+import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { toast } from 'sonner';
 
 function getMovementAuthorLabel(movement) {
@@ -64,12 +65,12 @@ export default function Profile() {
     queryKey: ['myMovements', user?.email],
     queryFn: async () => {
       const all = await fetchMovementsPage({
+        mine: true,
         limit: 200,
         offset: 0,
         fields: [
           'id',
           'title',
-          'author_email',
           'creator_display_name',
           'creator_username',
           'author_display_name',
@@ -81,9 +82,9 @@ export default function Profile() {
         ].join(','),
         accessToken,
       });
-      return all.filter((m) => String(m?.author_email || '') === String(user.email || ''));
+      return all;
     },
-    enabled: !!user?.email
+    enabled: !!user?.email && !!accessToken
   });
 
   const { data: userProfile } = useQuery({
@@ -99,6 +100,7 @@ export default function Profile() {
       } catch {
         // fall back to migration-mode cache
       }
+      if (!allowLocalProfileFallback) return null;
       try {
         const profiles = await entities.UserProfile.filter({ user_email: user.email });
         if (profiles.length > 0) {
@@ -120,28 +122,46 @@ export default function Profile() {
     enabled: !!user?.email
   });
 
+  const resolvedProfile = useMemo(() => {
+    const base = userProfile && typeof userProfile === 'object' ? userProfile : {};
+    const meta = user?.user_metadata && typeof user.user_metadata === 'object' ? user.user_metadata : {};
+    const displayName = base.display_name ?? meta.display_name ?? meta.full_name ?? meta.name ?? null;
+    const username = base.username ?? meta.username ?? null;
+    const bio = base.bio ?? meta.bio ?? null;
+    const photoUrl =
+      base.profile_photo_url ?? meta.profile_photo_url ?? meta.avatar_url ?? meta.picture ?? null;
+    const bannerUrl = base.banner_url ?? meta.banner_url ?? null;
+
+    return {
+      ...base,
+      display_name: displayName,
+      username,
+      bio,
+      profile_photo_url: photoUrl,
+      banner_url: bannerUrl,
+    };
+  }, [userProfile, user?.user_metadata]);
+
   const safeHandle = useMemo(() => {
     const emailLocal = String(user?.email || '').split('@')[0]?.toLowerCase() || '';
-    const rawUsername = userProfile?.username ? String(userProfile.username) : '';
-    const rawDisplay = userProfile?.display_name || user?.full_name || '';
+    const rawUsername = resolvedProfile?.username ? String(resolvedProfile.username) : '';
+    const rawDisplay = resolvedProfile?.display_name || user?.full_name || '';
     const candidate =
       (rawUsername && rawUsername.toLowerCase() !== emailLocal) ? rawUsername : rawDisplay;
     const trimmed = String(candidate || '').trim();
     if (trimmed) return trimmed.toLowerCase().replace(/[^a-z0-9_]/g, '');
     if (emailLocal) return `member-${emailLocal.slice(0, 3)}${emailLocal.length}`;
     return 'member';
-  }, [userProfile, user]);
+  }, [resolvedProfile, user]);
 
   const profilePhotoUrl = useMemo(() => {
     const raw =
-      userProfile?.profile_photo_url ||
-      userProfile?.avatar_url ||
-      user?.user_metadata?.profile_photo_url ||
-      user?.user_metadata?.avatar_url ||
+      resolvedProfile?.profile_photo_url ||
+      resolvedProfile?.avatar_url ||
       '';
     const trimmed = String(raw || '').trim();
     return trimmed || '';
-  }, [userProfile, user]);
+  }, [resolvedProfile]);
 
   const formatPublicUserLabel = (u) => {
     const display = u?.display_name || u?.username || u?.name;
@@ -253,8 +273,8 @@ export default function Profile() {
         className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
       >
         {/* Header Banner */}
-        {userProfile?.banner_url ? (
-          <div className="h-24 sm:h-32 bg-cover bg-center" style={{ backgroundImage: `url(${userProfile.banner_url})` }} />
+        {resolvedProfile?.banner_url ? (
+          <div className="h-24 sm:h-32 bg-cover bg-center" style={{ backgroundImage: `url(${resolvedProfile.banner_url})` }} />
         ) : (
           <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
@@ -269,14 +289,14 @@ export default function Profile() {
                 ) : (
                   <div className="w-20 h-20 sm:w-28 sm:h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
                     <span className="text-3xl sm:text-5xl font-black text-slate-900">
-                      {(userProfile?.display_name?.[0] || user?.full_name?.[0] || userProfile?.username?.[0] || safeHandle?.[0] || '?').toUpperCase()}
+                      {(resolvedProfile?.display_name?.[0] || user?.full_name?.[0] || resolvedProfile?.username?.[0] || safeHandle?.[0] || '?').toUpperCase()}
                     </span>
                   </div>
                 )}
               </div>
               <div className="pt-2 sm:pt-4 flex-1">
                 <h1 className="text-2xl sm:text-3xl font-black text-slate-900 mb-1">
-                  {userProfile?.display_name || user?.full_name || 'Anonymous User'}
+                  {resolvedProfile?.display_name || user?.full_name || 'Anonymous User'}
                 </h1>
                 <p className="text-sm text-slate-500 font-semibold">
                   @{safeHandle || 'member'}
@@ -286,9 +306,9 @@ export default function Profile() {
                     Admin
                   </span>
                 ) : null}
-                {userProfile?.bio ? (
+                {resolvedProfile?.bio ? (
                   <p className="mt-2 text-sm sm:text-base text-slate-700 whitespace-pre-line">
-                    {userProfile.bio}
+                    {resolvedProfile.bio}
                   </p>
                 ) : null}
               </div>
@@ -302,7 +322,7 @@ export default function Profile() {
               >
                 Edit
               </Button>
-              <ShareButton profile={userProfile} label="Share profile" variant="outline" />
+              <ShareButton profile={resolvedProfile} label="Share profile" variant="outline" />
             </div>
           </div>
 
@@ -503,7 +523,7 @@ export default function Profile() {
       <EditProfileModal
         open={showEditModal}
         onClose={() => setShowEditModal(false)}
-        profile={userProfile}
+        profile={resolvedProfile}
         userEmail={user?.email}
         userStats={userStats}
       />

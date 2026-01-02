@@ -21,9 +21,7 @@
  * @property {string|null} author_email
  */
 
-import { getServerBaseUrl } from './serverBase';
-
-const BASE_URL = getServerBaseUrl();
+import { SERVER_BASE } from './serverBase';
 
 function normalizeMovements(payload) {
   if (Array.isArray(payload)) return payload;
@@ -50,11 +48,12 @@ async function safeReadJson(res) {
   }
 }
 
-export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken } = {}) {
-  const base = BASE_URL.replace(/\/$/, '');
+export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken, mine = false } = {}) {
+  const base = SERVER_BASE.replace(/\/$/, '');
   const params = new URLSearchParams();
   if (limit != null) params.set('limit', String(limit));
   if (offset != null) params.set('offset', String(offset));
+  if (mine) params.set('mine', '1');
 
   const url = `${base}/movements${params.toString() ? `?${params.toString()}` : ''}`;
   const res = await fetch(url, {
@@ -79,7 +78,7 @@ export async function fetchMyFollowedMovements(options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   if (!accessToken) throw new Error('Authentication required');
 
-  const url = `${BASE_URL.replace(/\/$/, '')}/me/followed-movements`;
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/me/followed-movements`;
   const res = await fetch(url, {
     headers: {
       Accept: 'application/json',
@@ -107,7 +106,7 @@ export async function fetchMovementById(id, options) {
 
   // Prefer GET /movements/:id if the server supports it.
   // If not supported (404), fall back to fetching all and searching.
-  const directUrl = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
+  const directUrl = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
 
   try {
     const res = await fetch(directUrl, {
@@ -146,7 +145,7 @@ export async function fetchMovementById(id, options) {
 
 export async function createMovement(payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
-  const url = `${BASE_URL.replace(/\/$/, '')}/movements`;
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/movements`;
 
   const res = await fetch(url, {
     method: 'POST',
@@ -181,7 +180,7 @@ export async function deleteMovement(id, options) {
   if (!movementId) throw new Error('Movement ID is required');
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
-  const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
 
   const res = await fetch(url, {
     method: 'DELETE',
@@ -208,7 +207,7 @@ export async function updateMovement(id, payload, options) {
   if (!movementId) throw new Error('Movement ID is required');
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
-  const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
 
   const res = await fetch(url, {
     method: 'PATCH',
@@ -238,7 +237,7 @@ export async function fetchMovementVotes(id, options) {
   if (!movementId) throw new Error('Movement ID is required');
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
-  const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}/votes`;
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}/votes`;
 
   const res = await fetch(url, {
     headers: {
@@ -266,7 +265,7 @@ export async function voteMovement(id, value, options) {
   if (!movementId) throw new Error('Movement ID is required');
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
-  const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}/vote`;
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}/vote`;
 
   const res = await fetch(url, {
     method: 'POST',

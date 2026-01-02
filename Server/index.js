@@ -1077,6 +1077,99 @@ function buildMovementDeletedEmail({ movementTitle, movementId, deletedByEmail }
   return { subject, text, html };
 }
 
+const ENCRYPTED_MESSAGE_PREFIX = 'pp_e2ee_v1:';
+
+function isEncryptedMessageBody(body) {
+  return String(body || '').startsWith(ENCRYPTED_MESSAGE_PREFIX);
+}
+
+async function listEmailNotificationRecipients(emails) {
+  const list = Array.from(
+    new Set((Array.isArray(emails) ? emails : []).map((e) => normalizeEmail(e)).filter(Boolean))
+  );
+  if (!list.length) return [];
+  if (!hasDatabaseUrl) {
+    return list.filter((email) => !!memoryUserProfiles.get(email)?.email_notifications_opt_in);
+  }
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query(
+      'SELECT user_email, email_notifications_opt_in FROM user_profiles WHERE user_email = ANY($1)',
+      [list]
+    );
+    const opted = new Set(
+      (Array.isArray(res.rows) ? res.rows : [])
+        .filter((r) => r?.email_notifications_opt_in)
+        .map((r) => normalizeEmail(r?.user_email))
+        .filter(Boolean)
+    );
+    return list.filter((email) => opted.has(email));
+  } catch {
+    return [];
+  }
+}
+
+function buildMessageNotificationEmail({ conversation, body, senderEmail }) {
+  const groupName = conversation?.is_group ? String(conversation?.group_name || 'Group chat') : 'Direct message';
+  const senderLabel = senderEmail ? ` from ${escapeHtml(senderEmail)}` : '';
+  const subject = conversation?.is_group
+    ? `New message in ${groupName}`
+    : 'New direct message';
+  const preview = isEncryptedMessageBody(body) ? 'Encrypted message' : String(body || '').slice(0, 140);
+  const safePreview = preview ? escapeHtml(preview) : 'Open the app to view.';
+  const text = `You have a new message${senderLabel} on People Power.\n\n${preview ? `Preview: ${preview}` : 'Open the app to view.'}`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <p>You have a new message${senderLabel} on People Power.</p>
+      <p><strong>${escapeHtml(groupName)}</strong></p>
+      <p>${safePreview}</p>
+      <p>Open the app to reply.</p>
+    </div>
+  `;
+  return { subject, text, html };
+}
+
+async function notifyMessageRecipients({ conversation, body, senderEmail }) {
+  if (!canSendReportEmail()) return;
+  const participants = Array.isArray(conversation?.participant_emails)
+    ? conversation.participant_emails.map((x) => normalizeEmail(x)).filter(Boolean)
+    : [];
+  if (!participants.length) return;
+  const recipients = participants.filter((email) => email !== normalizeEmail(senderEmail));
+  const optedIn = await listEmailNotificationRecipients(recipients);
+  if (!optedIn.length) return;
+  const message = buildMessageNotificationEmail({ conversation, body, senderEmail });
+  await Promise.all(optedIn.map((email) => sendReportEmail({ to: email, ...message })));
+}
+
+function buildCollaborationInviteEmail({ movementTitle, inviterEmail, role }) {
+  const safeTitle = escapeHtml(String(movementTitle || 'a movement').slice(0, 140));
+  const safeInviter = escapeHtml(String(inviterEmail || '').slice(0, 160));
+  const safeRole = escapeHtml(String(role || 'collaborator').slice(0, 40));
+  const subject = `Collaboration invite: ${safeTitle}`;
+  const text = `You have been invited to collaborate on "${movementTitle || 'a movement'}" as ${role || 'collaborator'}.\n` +
+    (inviterEmail ? `Invited by: ${inviterEmail}\n` : '') +
+    `\nOpen People Power to respond.`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <p>You have been invited to collaborate on <strong>${safeTitle}</strong>.</p>
+      <p>Role: <strong>${safeRole}</strong></p>
+      ${safeInviter ? `<p>Invited by: ${safeInviter}</p>` : ''}
+      <p>Open People Power to respond.</p>
+    </div>
+  `;
+  return { subject, text, html };
+}
+
+async function notifyCollaborationInvite({ invitedEmail, inviterEmail, movementTitle, role }) {
+  if (!canSendReportEmail()) return;
+  const recipients = await listEmailNotificationRecipients([invitedEmail]);
+  if (!recipients.length) return;
+  const message = buildCollaborationInviteEmail({ movementTitle, inviterEmail, role });
+  await Promise.all(recipients.map((email) => sendReportEmail({ to: email, ...message })));
+}
+
 async function notifyVerifiedParticipantsOnDeletion({ movementId, movementTitle, deletedByEmail }) {
   const recipients = await listVerifiedParticipantEmails(movementId);
   const filtered = recipients.filter((email) => normalizeEmail(email) !== normalizeEmail(deletedByEmail));
@@ -1117,15 +1210,6 @@ function getStaffRoleForUser(user) {
     normalizeStaffRole(user?.role);
   if (claimed) return claimed;
   return getStaffRoleForEmail(user?.email);
-}
-
-function isAdminUser(user) {
-  return getStaffRoleForUser(user) === 'admin';
-}
-
-function isStaffUser(user) {
-  const role = getStaffRoleForUser(user);
-  return role === 'admin' || role === 'moderator';
 }
 
 // NOTE: Debug routes are dev-only; keep disabled unless explicitly enabled.
@@ -1695,6 +1779,12 @@ async function ensureUserProfilesTable() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await pool.query(
+    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS movement_group_opt_out BOOLEAN NOT NULL DEFAULT FALSE'
+  );
+  await pool.query(
+    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS email_notifications_opt_in BOOLEAN NOT NULL DEFAULT FALSE'
+  );
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles (user_email)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_username ON user_profiles (username)');
   try {
@@ -2451,6 +2541,32 @@ async function listVerifiedParticipantEmails(movementId) {
     return Array.from(new Set(list));
   } catch {
     return [];
+  }
+}
+
+async function filterMovementGroupOptOut(emails) {
+  const list = Array.from(new Set((Array.isArray(emails) ? emails : []).map(normalizeEmail).filter(Boolean)));
+  if (!list.length) return [];
+
+  if (!hasDatabaseUrl) {
+    return list.filter((email) => !memoryUserProfiles.get(email)?.movement_group_opt_out);
+  }
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query(
+      'SELECT user_email, movement_group_opt_out FROM user_profiles WHERE user_email = ANY($1)',
+      [list]
+    );
+    const optedOut = new Set(
+      (Array.isArray(res.rows) ? res.rows : [])
+        .filter((r) => r?.movement_group_opt_out)
+        .map((r) => normalizeEmail(r?.user_email))
+        .filter(Boolean)
+    );
+    return list.filter((email) => !optedOut.has(email));
+  } catch {
+    return list;
   }
 }
 
@@ -3464,6 +3580,17 @@ fastify.get('/movements', async (request, reply) => {
     const limit = parseIntParam(request.query?.limit, 20, { min: 1, max: 100 });
     const offset = parseIntParam(request.query?.offset, 0, { min: 0, max: 1000000 });
     const fields = normalizeFields(request.query?.fields);
+
+    const mineRaw = request.query?.mine;
+    const mine = mineRaw === '1' || mineRaw === 1 || mineRaw === true || String(mineRaw || '').toLowerCase() === 'true';
+
+    let mineEmail = null;
+    if (mine) {
+      const authedUser = await requireVerifiedUser(request, reply);
+      if (!authedUser) return;
+      mineEmail = normalizeEmail(authedUser.email);
+      if (!mineEmail) return reply.code(400).send({ error: 'User email is required' });
+    }
     const viewerEmail = await getOptionalAuthedEmail(request);
     const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
 
@@ -3491,6 +3618,11 @@ fastify.get('/movements', async (request, reply) => {
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
         })
+        .filter((m) => {
+          if (!mineEmail) return true;
+          const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || m?.created_by_email || '');
+          return authorEmail === mineEmail;
+        })
         .filter(canViewMovement)
         .sort(sortByCreatedDesc);
 
@@ -3501,8 +3633,16 @@ fastify.get('/movements', async (request, reply) => {
 
     try {
       await ensureVotesTable();
+      const values = [];
+      let whereClause = '';
+      if (mineEmail) {
+        values.push(mineEmail);
+        whereClause = `WHERE LOWER(COALESCE(m.author_email, m.creator_email, m.created_by_email, '')) = LOWER($${values.length})`;
+      }
+
       const result = await pool.query(
-        `SELECT
+        {
+          text: `SELECT
            m.*,
            COALESCE(v.upvotes, 0)::int AS upvotes,
            COALESCE(v.downvotes, 0)::int AS downvotes,
@@ -3516,8 +3656,11 @@ fastify.get('/movements', async (request, reply) => {
            FROM movement_votes
            GROUP BY movement_id
          ) v ON v.movement_id = m.id
+         ${whereClause}
          ORDER BY m.created_at DESC
-         LIMIT 500`
+         LIMIT 500`,
+          values,
+        }
       );
 
       const rows = Array.isArray(result.rows) ? result.rows : [];
@@ -3551,6 +3694,11 @@ fastify.get('/movements', async (request, reply) => {
             score: summary.score,
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
+        })
+        .filter((m) => {
+          if (!mineEmail) return true;
+          const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || m?.created_by_email || '');
+          return authorEmail === mineEmail;
         })
         .filter(canViewMovement)
         .sort(sortByCreatedDesc);
@@ -4743,13 +4891,24 @@ fastify.post('/movements/:id/group-chat', { config: { rateLimit: RATE_LIMITS.con
     return reply.code(400).send({ error: 'No verified participants yet' });
   }
 
+  const eligibleEmails = await filterMovementGroupOptOut(verifiedEmails);
+  const eligibleSet = new Set(eligibleEmails);
+  if (!eligibleSet.size) {
+    return reply.code(400).send({ error: 'All verified participants opted out of movement group chats' });
+  }
+
   const requested = Array.isArray(parsed.data.participant_emails)
     ? parsed.data.participant_emails.map((e) => normalizeEmail(e)).filter(Boolean)
-    : verifiedEmails;
+    : eligibleEmails;
 
   const invalid = requested.filter((e) => !verifiedSet.has(e));
-  if (invalid.length) {
-    return reply.code(400).send({ error: 'Only verified participants can be added', invalid });
+  const optedOut = requested.filter((e) => verifiedSet.has(e) && !eligibleSet.has(e));
+  if (invalid.length || optedOut.length) {
+    return reply.code(400).send({
+      error: 'Some participants cannot be added',
+      invalid,
+      opted_out: optedOut,
+    });
   }
 
   const participantSet = new Set([owner, ...requested]);
@@ -6556,7 +6715,14 @@ fastify.patch('/reports/:id', { config: { rateLimit: RATE_LIMITS.admin } }, asyn
   }
 
   const schema = z.object({
-    status: z.enum(['pending', 'in_review', 'resolved', 'dismissed']).optional(),
+    status: z.enum([
+      'pending',
+      'in_review',
+      'needs_info',
+      'pending_second_approval',
+      'resolved',
+      'dismissed',
+    ]).optional(),
     moderator_notes: z.string().max(4000).optional().nullable(),
     action_taken: z.string().max(200).optional().nullable(),
   });
@@ -7298,8 +7464,18 @@ fastify.post('/conversations/:id/participants', { config: { rateLimit: RATE_LIMI
     if (isMovementGroup && add.length) {
       const verified = await listVerifiedParticipantEmails(convo?.movement_id);
       const verifiedSet = new Set(verified);
+      const eligible = await filterMovementGroupOptOut(verified);
+      const eligibleSet = new Set(eligible);
       const invalid = add.filter((email) => !verifiedSet.has(email));
-      if (invalid.length) return { error: 'Only verified participants can be added', code: 400, invalid };
+      const optedOut = add.filter((email) => verifiedSet.has(email) && !eligibleSet.has(email));
+      if (invalid.length || optedOut.length) {
+        return {
+          error: 'Only verified participants who opted in can be added',
+          code: 400,
+          invalid,
+          opted_out: optedOut,
+        };
+      }
     }
 
     const nextSet = new Set(participants);
@@ -7617,6 +7793,9 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
 
     const message = memoryAppendMessage(conversationId, myEmail, parsed.data.body);
     if (!message) return reply.code(400).send({ error: 'Message body is required' });
+    notifyMessageRecipients({ conversation: convo, body: parsed.data.body, senderEmail: myEmail }).catch((err) => {
+      fastify.log.warn({ err }, 'Message notification failed (memory)');
+    });
     return reply.code(201).send(message);
   }
 
@@ -7665,6 +7844,9 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
     );
 
     await pool.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1', [conversationId]);
+    notifyMessageRecipients({ conversation: convo, body: cleanBody, senderEmail: myEmail }).catch((err) => {
+      fastify.log.warn({ err }, 'Message notification failed');
+    });
     return reply.code(201).send(created.rows?.[0] ?? { id });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to send message');
@@ -7913,7 +8095,7 @@ fastify.get('/users/search', async (request, reply) => {
     await ensureUserProfilesTable();
     const like = `%${query}%`;
     const res = await pool.query(
-      `SELECT user_email, display_name, username, profile_photo_url, location
+      `SELECT user_email, display_name, username, profile_photo_url, location, movement_group_opt_out
        FROM user_profiles
        WHERE display_name ILIKE $1 OR username ILIKE $1 OR user_email ILIKE $1
        ORDER BY display_name NULLS LAST
@@ -7929,6 +8111,7 @@ fastify.get('/users/search', async (request, reply) => {
         username: r?.username ?? null,
         profile_photo_url: r?.profile_photo_url ?? null,
         location: r?.location ?? null,
+        movement_group_opt_out: !!r?.movement_group_opt_out,
       }))
       .filter((r) => r.email && !isBlockedForViewer(r.email, viewerBlocks));
     return reply.send({ users });
@@ -7952,7 +8135,7 @@ fastify.post('/users/lookup', async (request, reply) => {
   try {
     await ensureUserProfilesTable();
     const res = await pool.query(
-      `SELECT user_email, display_name, username, profile_photo_url, location
+      `SELECT user_email, display_name, username, profile_photo_url, location, movement_group_opt_out
        FROM user_profiles
        WHERE user_email = ANY($1)`,
       [parsed.data.emails.map((e) => String(e).trim().toLowerCase())]
@@ -7966,6 +8149,7 @@ fastify.post('/users/lookup', async (request, reply) => {
         username: r?.username ?? null,
         profile_photo_url: r?.profile_photo_url ?? null,
         location: r?.location ?? null,
+        movement_group_opt_out: !!r?.movement_group_opt_out,
       }))
       .filter((r) => r.email && !isBlockedForViewer(r.email, viewerBlocks));
     return reply.send({ users });
@@ -8231,6 +8415,8 @@ async function handleGetMyProfile(request, reply) {
       catchment_radius_km: null,
       skills: null,
       ai_features_enabled: false,
+      movement_group_opt_out: false,
+      email_notifications_opt_in: false,
       created_at: nowIso(),
       updated_at: nowIso(),
     };
@@ -8268,6 +8454,8 @@ async function handlePostMyProfile(request, reply) {
     catchment_radius_km: z.number().int().min(1).max(1000).optional().nullable(),
     skills: z.array(z.string().max(MAX_TEXT_LENGTHS.profileSkill)).max(50).optional().nullable(),
     ai_features_enabled: z.boolean().optional(),
+    movement_group_opt_out: z.boolean().optional(),
+    email_notifications_opt_in: z.boolean().optional(),
   });
 
   const parsed = schema.safeParse(request.body ?? {});
@@ -8290,6 +8478,8 @@ async function handlePostMyProfile(request, reply) {
     catchment_radius_km: parsed.data.catchment_radius_km != null ? Number(parsed.data.catchment_radius_km) : existing?.catchment_radius_km ?? null,
     skills: parsed.data.skills != null ? parsed.data.skills.map((s) => cleanText(s, MAX_TEXT_LENGTHS.profileSkill)).filter(Boolean) : existing?.skills ?? null,
     ai_features_enabled: parsed.data.ai_features_enabled != null ? !!parsed.data.ai_features_enabled : existing?.ai_features_enabled ?? false,
+    movement_group_opt_out: parsed.data.movement_group_opt_out != null ? !!parsed.data.movement_group_opt_out : existing?.movement_group_opt_out ?? false,
+    email_notifications_opt_in: parsed.data.email_notifications_opt_in != null ? !!parsed.data.email_notifications_opt_in : existing?.email_notifications_opt_in ?? false,
   });
 
   if (!hasDatabaseUrl) {
@@ -8308,6 +8498,8 @@ async function handlePostMyProfile(request, reply) {
       user_email: email,
       created_at: now,
       updated_at: now,
+      movement_group_opt_out: false,
+      email_notifications_opt_in: false,
     };
     const next = buildNextProfile(existing);
     const merged = {
@@ -8351,7 +8543,9 @@ async function handlePostMyProfile(request, reply) {
              catchment_radius_km = $8,
              skills = $9,
              ai_features_enabled = $10,
-             updated_at = $11
+             movement_group_opt_out = $11,
+             email_notifications_opt_in = $12,
+             updated_at = $13
          WHERE user_email = $1`,
         [
           email,
@@ -8364,6 +8558,8 @@ async function handlePostMyProfile(request, reply) {
           next.catchment_radius_km,
           next.skills,
           next.ai_features_enabled,
+          next.movement_group_opt_out,
+          next.email_notifications_opt_in,
           now,
         ]
       );
@@ -8371,8 +8567,8 @@ async function handlePostMyProfile(request, reply) {
       const id = randomUUID();
       await pool.query(
         `INSERT INTO user_profiles
-         (id, user_email, display_name, username, bio, profile_photo_url, banner_url, location, catchment_radius_km, skills, ai_features_enabled, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)`,
+         (id, user_email, display_name, username, bio, profile_photo_url, banner_url, location, catchment_radius_km, skills, ai_features_enabled, movement_group_opt_out, email_notifications_opt_in, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)`,
         [
           id,
           email,
@@ -8385,6 +8581,8 @@ async function handlePostMyProfile(request, reply) {
           next.catchment_radius_km,
           next.skills,
           next.ai_features_enabled,
+          next.movement_group_opt_out,
+          next.email_notifications_opt_in,
           now,
         ]
       );
@@ -8558,6 +8756,7 @@ fastify.get('/movements/:id/collaborators', async (request, reply) => {
 
   try {
     await ensureCollaboratorsTable();
+    await ensureUserProfilesTable();
 
     const isMemberRes = await pool.query(
       'SELECT 1 FROM collaborators WHERE movement_id = $1 AND user_email = $2 AND status = $3 LIMIT 1',
@@ -8568,11 +8767,21 @@ fastify.get('/movements/:id/collaborators', async (request, reply) => {
 
     const res = allowAll
       ? await pool.query(
-          'SELECT id, movement_id, user_email, role, status, invited_by, created_date, accepted_date FROM collaborators WHERE movement_id = $1 ORDER BY created_date DESC',
+          `SELECT c.id, c.movement_id, c.user_email, c.role, c.status, c.invited_by, c.created_date, c.accepted_date,
+                  up.username AS username, up.display_name AS display_name
+           FROM collaborators c
+           LEFT JOIN user_profiles up ON up.user_email = c.user_email
+           WHERE c.movement_id = $1
+           ORDER BY c.created_date DESC`,
           [String(movementId)]
         )
       : await pool.query(
-          'SELECT id, movement_id, user_email, role, status, invited_by, created_date, accepted_date FROM collaborators WHERE movement_id = $1 AND status = $2 ORDER BY created_date DESC',
+          `SELECT c.id, c.movement_id, c.user_email, c.role, c.status, c.invited_by, c.created_date, c.accepted_date,
+                  up.username AS username, up.display_name AS display_name
+           FROM collaborators c
+           LEFT JOIN user_profiles up ON up.user_email = c.user_email
+           WHERE c.movement_id = $1 AND c.status = $2
+           ORDER BY c.created_date DESC`,
           [String(movementId), 'accepted']
         );
 
@@ -8591,7 +8800,7 @@ fastify.post('/movements/:id/collaborators/invite', async (request, reply) => {
   if (!movementId) return reply.code(400).send({ error: 'Movement id is required' });
 
   const schema = z.object({
-    user_email: z.string().email(),
+    username: z.string().min(1).max(80),
     role: z.enum(['admin', 'editor', 'viewer']).optional(),
   });
   const parsed = schema.safeParse(request.body ?? {});
@@ -8600,8 +8809,31 @@ fastify.post('/movements/:id/collaborators/invite', async (request, reply) => {
   const inviterEmail = normalizeEmail(authedUser.email);
   if (!inviterEmail) return reply.code(400).send({ error: 'User email is required' });
 
-  const invitedEmail = normalizeEmail(parsed.data.user_email);
-  if (!invitedEmail) return reply.code(400).send({ error: 'Invite email is required' });
+  const usernameRaw = String(parsed.data.username || '').trim().replace(/^@+/, '');
+  if (!usernameRaw) return reply.code(400).send({ error: 'Username is required' });
+
+  let invitedEmail = null;
+  try {
+    if (!hasDatabaseUrl) {
+      // Memory mode: profiles may still exist in memory.
+      const profile = Array.from(memoryUserProfiles.values()).find(
+        (p) => String(p?.username || '').trim().toLowerCase() === usernameRaw.toLowerCase()
+      );
+      invitedEmail = normalizeEmail(profile?.user_email || profile?.email);
+    } else {
+      await ensureUserProfilesTable();
+      const res = await pool.query(
+        'SELECT user_email FROM user_profiles WHERE LOWER(username) = LOWER($1) LIMIT 1',
+        [usernameRaw]
+      );
+      invitedEmail = normalizeEmail(res.rows?.[0]?.user_email);
+    }
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to resolve username for collaborator invite');
+    return reply.code(500).send({ error: 'Failed to resolve username' });
+  }
+
+  if (!invitedEmail) return reply.code(404).send({ error: 'User not found' });
 
   const staffRole = getStaffRoleForEmail(inviterEmail);
   const ownerEmail = await getMovementOwnerEmail(movementId);
@@ -8624,6 +8856,14 @@ fastify.post('/movements/:id/collaborators/invite', async (request, reply) => {
     const existing = memoryListCollaborators(movementId).some((c) => normalizeEmail(c?.user_email) === invitedEmail);
     if (existing) return reply.code(409).send({ error: 'User is already a collaborator' });
     memoryUpsertCollaborator(movementId, record);
+    getMovementTitle(movementId).then((title) =>
+      notifyCollaborationInvite({
+        invitedEmail,
+        inviterEmail,
+        movementTitle: title,
+        role,
+      }).catch((err) => fastify.log.warn({ err }, 'Collaboration invite email failed (memory)'))
+    );
     return reply.code(201).send({ collaborator: record });
   }
 
@@ -8647,6 +8887,14 @@ fastify.post('/movements/:id/collaborators/invite', async (request, reply) => {
     );
     const row = inserted.rows?.[0] || null;
     if (!row) return reply.code(409).send({ error: 'User is already a collaborator' });
+    getMovementTitle(movementId).then((title) =>
+      notifyCollaborationInvite({
+        invitedEmail,
+        inviterEmail,
+        movementTitle: title,
+        role,
+      }).catch((err) => fastify.log.warn({ err }, 'Collaboration invite email failed'))
+    );
     return reply.code(201).send({ collaborator: row });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to invite collaborator');

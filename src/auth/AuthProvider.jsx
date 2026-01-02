@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { getStaffRole } from '@/utils/staff';
@@ -101,7 +101,7 @@ export function AuthProvider({ children }) {
   };
 
   // Logout: calls Supabase signOut and clears local auth state.
-  const logout = async () => {
+  const logout = useCallback(async () => {
     const supabase = getSupabaseClient();
     if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
     const { error } = await supabase.auth.signOut();
@@ -109,11 +109,7 @@ export function AuthProvider({ children }) {
     setSession(null);
     setUser(null);
     setServerStaffRole(null);
-  };
-
-  const signOut = async () => {
-    await logout();
-  };
+  }, [authDisabledMessage]);
 
   const value = useMemo(
     () => ({
@@ -122,7 +118,7 @@ export function AuthProvider({ children }) {
       loading,
       signIn,
       signUp,
-      signOut,
+      signOut: logout,
       staffRole,
       isAdmin,
       isStaff,
@@ -130,7 +126,7 @@ export function AuthProvider({ children }) {
       authErrorMessage: supabaseConfigError ? authDisabledMessage : null,
       logout,
     }),
-    [session, user, loading, supabaseConfigError, authDisabledMessage, staffRole, isAdmin, isStaff, logout]
+    [session, user, loading, staffRole, isAdmin, isStaff, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

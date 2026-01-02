@@ -1,6 +1,4 @@
-import { getServerBaseUrl } from './serverBase';
-
-const BASE_URL = getServerBaseUrl();
+import { SERVER_BASE } from './serverBase';
 
 async function safeReadJson(res) {
   try {
@@ -13,6 +11,8 @@ async function safeReadJson(res) {
 export async function upsertMyProfile(payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   if (!accessToken) throw new Error('Authentication required');
+
+  const BASE_URL = SERVER_BASE;
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/profile`;
   const res = await fetch(url, {
@@ -47,6 +47,8 @@ export async function fetchMyProfile(options) {
   const includeMeta = options?.includeMeta === true;
   if (!accessToken) throw new Error('Authentication required');
 
+  const BASE_URL = SERVER_BASE;
+
   const url = `${BASE_URL.replace(/\/$/, '')}/me/profile${includeMeta ? '?include_meta=1' : ''}`;
   const res = await fetch(url, {
     headers: {
@@ -71,6 +73,8 @@ export async function fetchMyProfile(options) {
 export async function fetchPublicProfileByUsername(username, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   if (!accessToken) throw new Error('Authentication required');
+
+  const BASE_URL = SERVER_BASE;
 
   const handle = String(username || '').trim();
   if (!handle) throw new Error('Username is required');

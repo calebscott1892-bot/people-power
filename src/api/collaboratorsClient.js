@@ -10,9 +10,9 @@
  * - DELETE /collaborators/:id
  */
 
-import { getServerBaseUrl } from './serverBase';
+import { SERVER_BASE } from './serverBase';
 
-const BASE_URL = getServerBaseUrl();
+const BASE_URL = SERVER_BASE;
 
 function base() {
   return String(BASE_URL || '').replace(/\/$/, '');
@@ -60,7 +60,7 @@ export async function listMovementCollaborators(movementId, { accessToken } = {}
   return Array.isArray(data?.collaborators) ? data.collaborators : [];
 }
 
-export async function inviteCollaborator(movementId, { user_email, role } = {}, { accessToken } = {}) {
+export async function inviteCollaborator(movementId, { username, role } = {}, { accessToken } = {}) {
   const id = normalizeId(movementId);
   if (!id) throw new Error('Movement ID is required');
   if (!accessToken) throw new Error('Authentication required');
@@ -69,7 +69,7 @@ export async function inviteCollaborator(movementId, { user_email, role } = {}, 
     method: 'POST',
     accessToken,
     body: {
-      user_email: user_email != null ? String(user_email).trim() : '',
+      username: username != null ? String(username).trim().replace(/^@+/, '') : '',
       role: role != null ? String(role).trim() : undefined,
     },
   });

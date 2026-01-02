@@ -47,7 +47,7 @@ function deleteConfig(id, accessToken) {
 
 export default function ResearchConfig() {
   const queryClient = useQueryClient();
-  const { user, session, isAdmin } = useAuth();
+  const { session, isAdmin } = useAuth();
   const accessToken = session?.access_token || null;
   const { data, isLoading, error } = useQuery({
     queryKey: ['researchConfigs'],
