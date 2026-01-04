@@ -442,6 +442,15 @@ export default function UserProfile() {
                     </Button>
                     <Button
                       onClick={async () => {
+                        const dmDisabled = true;
+                        if (dmDisabled) {
+                          toast.message(
+                            'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
+                          );
+                          return;
+                        }
+
+                        // TODO: Re-enable direct messaging by removing this gate.
                         try {
                           if (!accessToken) throw new Error('Sign in to message');
                           const convo = await createConversation(resolvedProfileEmail, { accessToken });

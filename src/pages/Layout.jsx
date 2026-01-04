@@ -172,7 +172,7 @@ function LayoutContent({ children }) {
     { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
     { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
-    { name: t('messages'), page: 'Messages', icon: MessageCircle },
+    { name: `${t('messages') || 'Messages'} (soon)`, page: 'Messages', icon: MessageCircle, comingSoon: true },
     { name: t('profile'), page: 'Profile', icon: User },
   ];
 
@@ -332,6 +332,7 @@ function LayoutContent({ children }) {
                 const Icon = item.icon;
                 const active = isActive(item.page);
                 const isCreate = item.variant === 'create';
+                const comingSoon = !!item.comingSoon;
 
                 return (
                   <Link
@@ -341,7 +342,7 @@ function LayoutContent({ children }) {
                     className={cn(
                       "flex flex-col items-center gap-1 px-3 py-2 rounded-xl transition-all min-w-[54px] sm:min-w-[60px]",
                       isCreate && "-mt-5 sm:-mt-6 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 shadow-lg shadow-yellow-400/40",
-                      !isCreate && (active ? "text-[#3A3DFF]" : "text-slate-500")
+                      !isCreate && (active ? "text-[#3A3DFF]" : (comingSoon ? "text-slate-400" : "text-slate-500"))
                     )}
                   >
                     <Icon

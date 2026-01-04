@@ -23,6 +23,7 @@ export default function ShareButton({ movement, profile, variant = "default", la
   const [recipientUsername, setRecipientUsername] = useState('');
   const [sendingDm, setSendingDm] = useState(false);
   const targetType = movement ? 'movement' : profile ? 'profile' : 'movement';
+  const dmDisabled = true;
 
   const e2eePromiseRef = useRef(null);
   const loadE2EE = async () => {
@@ -101,6 +102,14 @@ export default function ShareButton({ movement, profile, variant = "default", la
   };
 
   const handleShareToDm = async () => {
+    if (dmDisabled) {
+      toast.message(
+        'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
+      );
+      return;
+    }
+
+    // TODO: Re-enable Share to DM by removing this gate.
     const accessToken = session?.access_token ? String(session.access_token) : null;
     const myEmail = user?.email ? String(user.email) : '';
     const handle = String(recipientUsername || '').trim().replace(/^@+/, '');
@@ -229,6 +238,12 @@ export default function ShareButton({ movement, profile, variant = "default", la
               onClick={() => {
                 if (!user) {
                   toast.error('Please log in to share via DM');
+                  return;
+                }
+                if (dmDisabled) {
+                  toast.message(
+                    'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
+                  );
                   return;
                 }
                 setDmOpen(true);

@@ -2355,7 +2355,17 @@ export default function MovementDetails() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setGroupChatOpen(true)}
+                  onClick={() => {
+                    const dmDisabled = true;
+                    if (dmDisabled) {
+                      toast.message(
+                        'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
+                      );
+                      return;
+                    }
+                    // TODO: Re-enable movement group chats by removing this gate.
+                    setGroupChatOpen(true);
+                  }}
                   disabled={groupEvidenceLoading || verifiedParticipantEmails.length === 0}
                   className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black hover:opacity-90 disabled:opacity-60"
                 >
@@ -3581,7 +3591,18 @@ export default function MovementDetails() {
             <button
               type="button"
               className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
-              onClick={() => createGroupChatMutation.mutate()}
+              onClick={() => {
+                const dmDisabled = true;
+                if (dmDisabled) {
+                  toast.message(
+                    'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
+                  );
+                  setGroupChatOpen(false);
+                  return;
+                }
+                // TODO: Re-enable movement group chats by removing this gate.
+                createGroupChatMutation.mutate();
+              }}
               disabled={
                 createGroupChatMutation.isPending ||
                 groupEvidenceLoading ||

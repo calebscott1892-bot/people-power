@@ -13,7 +13,7 @@ const Login = React.lazy(() => import('@/pages/Login'));
 const Profile = React.lazy(() => import('@/pages/Profile'));
 const CreateMovement = React.lazy(() => import('@/pages/CreateMovement'));
 const MovementDetails = React.lazy(() => import('@/pages/MovementDetails'));
-const Messages = React.lazy(() => import('@/pages/Messages'));
+const MessagesComingSoon = React.lazy(() => import('@/pages/MessagesComingSoon'));
 const DailyChallenges = React.lazy(() => import('@/pages/DailyChallenges'));
 const Leaderboard = React.lazy(() => import('@/pages/Leaderboard'));
 const Notifications = React.lazy(() => import('@/pages/Notifications'));
@@ -132,7 +132,8 @@ export default function App() {
                 <Route path="/CreateMovement" element={<CreateMovement />} />
 
                 {/* Main content pages */}
-                <Route path="/messages" element={<Messages />} />
+                <Route path="/messages" element={<MessagesComingSoon />} />
+                <Route path="/Messages" element={<MessagesComingSoon />} />
                 <Route path="/daily-challenges" element={<DailyChallenges />} />
                 <Route path="/leaderboard" element={<Leaderboard />} />
                 <Route path="/notifications" element={<Notifications />} />
