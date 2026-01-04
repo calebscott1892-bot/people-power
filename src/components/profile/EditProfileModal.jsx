@@ -17,7 +17,6 @@ import { exportMyData } from '@/api/userExportClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { logError } from '@/utils/logError';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
-import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import {
   Dialog,
@@ -145,34 +144,6 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         } catch (e) {
           logError(e, 'Profile cache update failed');
         }
-      }
-
-      try {
-        if (!supabaseConfigError) {
-          const supabase = getSupabaseClient();
-          if (supabase) {
-            const displayName = String(data?.display_name || '').trim();
-            const username = String(data?.username || '').trim();
-            const bio = data?.bio != null ? String(data.bio).trim() : '';
-            const photoUrl = data?.profile_photo_url ? String(data.profile_photo_url).trim() : '';
-            const bannerUrl = data?.banner_url ? String(data.banner_url).trim() : '';
-            const payload = {
-              display_name: displayName || null,
-              full_name: displayName || null,
-              name: displayName || null,
-              username: username || null,
-              bio: bio || null,
-              profile_photo_url: photoUrl || null,
-              avatar_url: photoUrl || null,
-              banner_url: bannerUrl || null,
-              profile_updated_at: new Date().toISOString(),
-            };
-            const { error } = await supabase.auth.updateUser({ data: payload });
-            if (error) throw error;
-          }
-        }
-      } catch (e) {
-        logError(e, 'Profile metadata sync failed');
       }
     },
     onSuccess: () => {

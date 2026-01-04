@@ -2053,6 +2053,7 @@ async function ensureUserProfilesTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_profiles (
       id TEXT PRIMARY KEY,
+      user_id TEXT NULL,
       user_email TEXT NOT NULL UNIQUE,
       display_name TEXT NULL,
       username TEXT NULL,
@@ -2067,12 +2068,21 @@ async function ensureUserProfilesTable() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS user_id TEXT NULL');
   await pool.query(
     'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS movement_group_opt_out BOOLEAN NOT NULL DEFAULT FALSE'
   );
   await pool.query(
     'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS email_notifications_opt_in BOOLEAN NOT NULL DEFAULT FALSE'
   );
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles (user_id)');
+  try {
+    await pool.query(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_user_id_unique ON user_profiles (user_id) WHERE user_id IS NOT NULL'
+    );
+  } catch (e) {
+    fastify.log.warn({ err: e }, 'Failed to ensure unique user_id index');
+  }
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles (user_email)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_username ON user_profiles (username)');
   try {
@@ -2963,6 +2973,7 @@ async function getPublicProfilesByEmail(emails) {
       const profile = memoryUserProfiles.get(email);
       if (profile) {
         lookup.set(email, {
+          user_id: profile?.user_id ?? null,
           display_name: profile?.display_name ?? null,
           username: profile?.username ?? null,
           profile_photo_url: profile?.profile_photo_url ?? null,
@@ -2975,7 +2986,7 @@ async function getPublicProfilesByEmail(emails) {
   try {
     await ensureUserProfilesTable();
     const res = await pool.query(
-      `SELECT user_email, display_name, username, profile_photo_url
+      `SELECT user_id, user_email, display_name, username, profile_photo_url
        FROM user_profiles
        WHERE user_email = ANY($1)`,
       [list]
@@ -2984,6 +2995,7 @@ async function getPublicProfilesByEmail(emails) {
       const email = normalizeEmail(row?.user_email);
       if (!email) continue;
       lookup.set(email, {
+        user_id: row?.user_id ?? null,
         display_name: row?.display_name ?? null,
         username: row?.username ?? null,
         profile_photo_url: row?.profile_photo_url ?? null,
@@ -3010,8 +3022,10 @@ async function attachCreatorProfilesToMovements(movements) {
     const displayName = profile?.display_name ?? null;
     const username = profile?.username ?? null;
     const photo = profile?.profile_photo_url ?? null;
+    const creatorUserId = profile?.user_id ?? null;
     return {
       ...movement,
+      creator_user_id: creatorUserId,
       creator_display_name: displayName,
       creator_username: username,
       creator_profile_photo_url: photo,
@@ -4456,7 +4470,14 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
     const list = memoryCommentsByMovement.get(String(id)) || [];
     const sorted = [...list].sort(sortByCreatedDesc);
     const page = sorted.filter(isVisibleComment).slice(offset, offset + limit);
-    return reply.send({ comments: page.map((c) => projectRecord(c, fields)) });
+    const emails = Array.from(new Set(page.map((c) => normalizeEmail(c?.author_email)).filter(Boolean)));
+    const lookup = await getPublicProfilesByEmail(emails);
+    const enriched = page.map((c) => {
+      const email = normalizeEmail(c?.author_email || '');
+      const profile = email ? lookup.get(email) : null;
+      return { ...c, author_user_id: profile?.user_id ?? null };
+    });
+    return reply.send({ comments: enriched.map((c) => projectRecord(c, fields)) });
   }
 
   try {
@@ -4467,7 +4488,14 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
     const filtered = rows.filter(isVisibleComment);
-    return reply.send({ comments: filtered.map((c) => projectRecord(c, fields)) });
+    const emails = Array.from(new Set(filtered.map((c) => normalizeEmail(c?.author_email)).filter(Boolean)));
+    const lookup = await getPublicProfilesByEmail(emails);
+    const enriched = filtered.map((c) => {
+      const email = normalizeEmail(c?.author_email || '');
+      const profile = email ? lookup.get(email) : null;
+      return { ...c, author_user_id: profile?.user_id ?? null };
+    });
+    return reply.send({ comments: enriched.map((c) => projectRecord(c, fields)) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load comments');
     return reply.code(500).send({ error: 'Failed to load comments' });
@@ -4496,6 +4524,7 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
   }
 
   const content = cleanText(parsed.data.content);
+  const authorUserId = authedUser?.id ? String(authedUser.id) : null;
 
   if (!hasDatabaseUrl) {
     const settings = getMemoryCommentSettings(id);
@@ -4542,6 +4571,7 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
       id: randomUUID(),
       movement_id: String(id),
       author_email: email,
+      author_user_id: authorUserId,
       content,
       created_at: nowIso(),
     };
@@ -4612,7 +4642,8 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
       'INSERT INTO movement_comments (id, movement_id, author_email, content) VALUES ($1, $2, $3, $4) RETURNING id, movement_id, author_email, content, created_at',
       [comment.id, comment.movement_id, comment.author_email, comment.content]
     );
-    return reply.code(201).send({ comment: insertRes.rows?.[0] || comment });
+    const created = insertRes.rows?.[0] || comment;
+    return reply.code(201).send({ comment: { ...created, author_user_id: authorUserId } });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to post comment');
     return reply.code(500).send({ error: 'Failed to post comment' });
@@ -4958,7 +4989,14 @@ fastify.get('/movements/:id/evidence', async (request, reply) => {
     const list = memoryListExtras(memoryMovementEvidenceByMovement, id).sort(sortByCreatedDesc);
     const filtered = status === 'all' ? list : list.filter((e) => String(e?.status || 'pending') === status);
     const page = filtered.slice(offset, offset + limit).map((e) => projectRecord(e, fields));
-    const safe = status === 'approved' && !isReviewer ? page.map(stripSensitive) : page;
+    const emails = Array.from(new Set(page.map((e) => normalizeEmail(e?.submitter_email)).filter(Boolean)));
+    const lookup = await getPublicProfilesByEmail(emails);
+    const withIds = page.map((e) => {
+      const email = normalizeEmail(e?.submitter_email || '');
+      const profile = email ? lookup.get(email) : null;
+      return { ...e, submitter_user_id: profile?.user_id ?? null };
+    });
+    const safe = status === 'approved' && !isReviewer ? withIds.map(stripSensitive) : withIds;
     return reply.send({ evidence: safe });
   }
 
@@ -4983,7 +5021,14 @@ fastify.get('/movements/:id/evidence', async (request, reply) => {
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
     const projected = rows.map((e) => projectRecord(e, fields));
-    const safe = status === 'approved' && !isReviewer ? projected.map(stripSensitive) : projected;
+    const emails = Array.from(new Set(projected.map((e) => normalizeEmail(e?.submitter_email)).filter(Boolean)));
+    const lookup = await getPublicProfilesByEmail(emails);
+    const withIds = projected.map((e) => {
+      const email = normalizeEmail(e?.submitter_email || '');
+      const profile = email ? lookup.get(email) : null;
+      return { ...e, submitter_user_id: profile?.user_id ?? null };
+    });
+    const safe = status === 'approved' && !isReviewer ? withIds.map(stripSensitive) : withIds;
     return reply.send({ evidence: safe });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load movement evidence');
@@ -5017,6 +5062,8 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const submitterUserId = authedUser?.id ? String(authedUser.id) : null;
 
   const mediaType = String(parsed.data.media_type);
   const rawUrl = parsed.data.url ? String(parsed.data.url).trim() : '';
@@ -5083,7 +5130,7 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
     if (String(saved?.status || '') === 'approved') {
       updateMemoryMovementVerifiedParticipants(id);
     }
-    return reply.code(201).send({ evidence: saved });
+    return reply.code(201).send({ evidence: { ...saved, submitter_user_id: submitterUserId } });
   }
 
   try {
@@ -5112,7 +5159,7 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
     if (String(evidence?.status || '') === 'approved') {
       await updateMovementVerifiedParticipants(id);
     }
-    return reply.code(201).send({ evidence });
+    return reply.code(201).send({ evidence: { ...evidence, submitter_user_id: submitterUserId } });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to submit movement evidence');
     return reply.code(500).send({ error: 'Failed to submit evidence' });
@@ -6005,7 +6052,26 @@ fastify.get('/movements/:id/tasks', async (request, reply) => {
   if (!hasDatabaseUrl) {
     const list = memoryListExtras(memoryMovementTasksByMovement, id).sort(sortByUpdatedDesc);
     const page = list.slice(offset, offset + limit);
-    return reply.send({ tasks: page.map((t) => projectRecord(t, fields)) });
+    const emails = Array.from(
+      new Set(
+        page
+          .flatMap((t) => [normalizeEmail(t?.assigned_to_email), normalizeEmail(t?.created_by_email)])
+          .filter(Boolean)
+      )
+    );
+    const lookup = await getPublicProfilesByEmail(emails);
+    const enriched = page.map((t) => {
+      const assignedEmail = normalizeEmail(t?.assigned_to_email || '');
+      const createdEmail = normalizeEmail(t?.created_by_email || '');
+      const assigned = assignedEmail ? lookup.get(assignedEmail) : null;
+      const created = createdEmail ? lookup.get(createdEmail) : null;
+      return {
+        ...t,
+        assigned_to_user_id: assigned?.user_id ?? null,
+        created_by_user_id: created?.user_id ?? null,
+      };
+    });
+    return reply.send({ tasks: enriched.map((t) => projectRecord(t, fields)) });
   }
 
   try {
@@ -6015,7 +6081,26 @@ fastify.get('/movements/:id/tasks', async (request, reply) => {
       [String(id), limit, offset]
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
-    return reply.send({ tasks: rows.map((t) => projectRecord(t, fields)) });
+    const emails = Array.from(
+      new Set(
+        rows
+          .flatMap((t) => [normalizeEmail(t?.assigned_to_email), normalizeEmail(t?.created_by_email)])
+          .filter(Boolean)
+      )
+    );
+    const lookup = await getPublicProfilesByEmail(emails);
+    const enriched = rows.map((t) => {
+      const assignedEmail = normalizeEmail(t?.assigned_to_email || '');
+      const createdEmail = normalizeEmail(t?.created_by_email || '');
+      const assigned = assignedEmail ? lookup.get(assignedEmail) : null;
+      const created = createdEmail ? lookup.get(createdEmail) : null;
+      return {
+        ...t,
+        assigned_to_user_id: assigned?.user_id ?? null,
+        created_by_user_id: created?.user_id ?? null,
+      };
+    });
+    return reply.send({ tasks: enriched.map((t) => projectRecord(t, fields)) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load movement tasks');
     return reply.code(500).send({ error: 'Failed to load tasks' });
@@ -6053,7 +6138,15 @@ fastify.post('/movements/:id/tasks', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
-    return reply.code(201).send({ task: memoryAppendExtra(memoryMovementTasksByMovement, id, row) });
+    let assignedUserId = null;
+    if (row.assigned_to_email) {
+      const lookup = await getPublicProfilesByEmail([row.assigned_to_email]);
+      assignedUserId = lookup.get(row.assigned_to_email)?.user_id ?? null;
+    }
+    const saved = memoryAppendExtra(memoryMovementTasksByMovement, id, row);
+    return reply.code(201).send({
+      task: { ...saved, created_by_user_id: creatorUserId, assigned_to_user_id: assignedUserId },
+    });
   }
 
   try {
@@ -6064,7 +6157,18 @@ fastify.post('/movements/:id/tasks', async (request, reply) => {
        RETURNING *`,
       [row.id, row.movement_id, row.title, row.description, row.status, row.assigned_to_email, row.created_by_email]
     );
-    return reply.code(201).send({ task: inserted.rows?.[0] || row });
+    const created = inserted.rows?.[0] || row;
+    let assignedUserId = null;
+    if (created?.assigned_to_email) {
+      const assignedEmail = normalizeEmail(created.assigned_to_email);
+      if (assignedEmail) {
+        const lookup = await getPublicProfilesByEmail([assignedEmail]);
+        assignedUserId = lookup.get(assignedEmail)?.user_id ?? null;
+      }
+    }
+    return reply.code(201).send({
+      task: { ...created, created_by_user_id: creatorUserId, assigned_to_user_id: assignedUserId },
+    });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create task');
     return reply.code(500).send({ error: 'Failed to create task' });
@@ -6174,7 +6278,14 @@ fastify.get('/movements/:id/discussions', async (request, reply) => {
   if (!hasDatabaseUrl) {
     const list = memoryListExtras(memoryMovementDiscussionsByMovement, id).sort(sortByCreatedDesc);
     const page = list.slice(offset, offset + limit);
-    return reply.send({ messages: page.map((m) => projectRecord(m, fields)) });
+    const emails = Array.from(new Set(page.map((m) => normalizeEmail(m?.author_email)).filter(Boolean)));
+    const lookup = await getPublicProfilesByEmail(emails);
+    const enriched = page.map((m) => {
+      const email = normalizeEmail(m?.author_email || '');
+      const profile = email ? lookup.get(email) : null;
+      return { ...m, author_user_id: profile?.user_id ?? null };
+    });
+    return reply.send({ messages: enriched.map((m) => projectRecord(m, fields)) });
   }
 
   try {
@@ -6184,7 +6295,14 @@ fastify.get('/movements/:id/discussions', async (request, reply) => {
       [String(id), limit, offset]
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
-    return reply.send({ messages: rows.map((m) => projectRecord(m, fields)) });
+    const emails = Array.from(new Set(rows.map((m) => normalizeEmail(m?.author_email)).filter(Boolean)));
+    const lookup = await getPublicProfilesByEmail(emails);
+    const enriched = rows.map((m) => {
+      const email = normalizeEmail(m?.author_email || '');
+      const profile = email ? lookup.get(email) : null;
+      return { ...m, author_user_id: profile?.user_id ?? null };
+    });
+    return reply.send({ messages: enriched.map((m) => projectRecord(m, fields)) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load movement discussions');
     return reply.code(500).send({ error: 'Failed to load discussions' });
@@ -6209,12 +6327,14 @@ fastify.post('/movements/:id/discussions', async (request, reply) => {
     id: randomUUID(),
     movement_id: String(id),
     author_email: email,
+    author_user_id: authorUserId,
     message: cleanText(parsed.data.message),
     created_at: nowIso(),
   };
 
   if (!hasDatabaseUrl) {
-    return reply.code(201).send({ message: memoryAppendExtra(memoryMovementDiscussionsByMovement, id, row) });
+    const saved = memoryAppendExtra(memoryMovementDiscussionsByMovement, id, row);
+    return reply.code(201).send({ message: { ...saved, author_user_id: authorUserId } });
   }
 
   try {
@@ -6225,7 +6345,8 @@ fastify.post('/movements/:id/discussions', async (request, reply) => {
        RETURNING *`,
       [row.id, row.movement_id, row.author_email, row.message]
     );
-    return reply.code(201).send({ message: inserted.rows?.[0] || row });
+    const created = inserted.rows?.[0] || row;
+    return reply.code(201).send({ message: { ...created, author_user_id: authorUserId } });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create discussion message');
     return reply.code(500).send({ error: 'Failed to post discussion message' });
@@ -8351,6 +8472,7 @@ fastify.get('/me/following-users', async (request, reply) => {
       const users = emails.map((email) => {
         const profile = lookup.get(email) || null;
         return {
+          user_id: profile?.user_id ?? null,
           email,
           display_name: profile?.display_name ?? null,
           username: profile?.username ?? null,
@@ -8376,6 +8498,7 @@ fastify.get('/me/following-users', async (request, reply) => {
     const users = emails.map((email) => {
       const profile = lookup.get(email) || null;
       return {
+        user_id: profile?.user_id ?? null,
         email,
         display_name: profile?.display_name ?? null,
         username: profile?.username ?? null,
@@ -8407,6 +8530,7 @@ fastify.get('/me/followers', async (request, reply) => {
       const users = emails.map((email) => {
         const profile = lookup.get(email) || null;
         return {
+          user_id: profile?.user_id ?? null,
           email,
           display_name: profile?.display_name ?? null,
           username: profile?.username ?? null,
@@ -8432,6 +8556,7 @@ fastify.get('/me/followers', async (request, reply) => {
     const users = emails.map((email) => {
       const profile = lookup.get(email) || null;
       return {
+        user_id: profile?.user_id ?? null,
         email,
         display_name: profile?.display_name ?? null,
         username: profile?.username ?? null,
@@ -8463,7 +8588,7 @@ fastify.get('/users/search', async (request, reply) => {
     await ensureUserProfilesTable();
     const like = `%${query}%`;
     const res = await pool.query(
-      `SELECT user_email, display_name, username, profile_photo_url, location, movement_group_opt_out
+      `SELECT user_id, user_email, display_name, username, profile_photo_url, location, movement_group_opt_out
        FROM user_profiles
        WHERE display_name ILIKE $1 OR username ILIKE $1 OR user_email ILIKE $1
        ORDER BY display_name NULLS LAST
@@ -8474,6 +8599,7 @@ fastify.get('/users/search', async (request, reply) => {
     const users = rows
       .map((r) => sanitizeUserProfileRecord(r))
       .map((r) => ({
+        user_id: r?.user_id ?? null,
         email: r?.user_email ?? null,
         display_name: r?.display_name ?? null,
         username: r?.username ?? null,
@@ -8494,7 +8620,14 @@ fastify.post('/users/lookup', async (request, reply) => {
   if (!authedUser) return;
 
   const viewerBlocks = await getUserBlockSets(authedUser.email);
-  const schema = z.object({ emails: z.array(z.string().email()).max(50) });
+  const schema = z
+    .object({
+      emails: z.array(z.string().email()).max(50).optional(),
+      user_ids: z.array(z.string().min(1)).max(50).optional(),
+    })
+    .refine((v) => (Array.isArray(v.emails) && v.emails.length) || (Array.isArray(v.user_ids) && v.user_ids.length), {
+      message: 'Provide emails or user_ids',
+    });
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
@@ -8502,16 +8635,22 @@ fastify.post('/users/lookup', async (request, reply) => {
 
   try {
     await ensureUserProfilesTable();
+
+    const emails = (parsed.data.emails || []).map((e) => String(e).trim().toLowerCase());
+    const userIds = (parsed.data.user_ids || []).map((id) => String(id).trim()).filter(Boolean);
+
     const res = await pool.query(
-      `SELECT user_email, display_name, username, profile_photo_url, location, movement_group_opt_out
+      `SELECT user_id, user_email, display_name, username, profile_photo_url, location, movement_group_opt_out
        FROM user_profiles
-       WHERE user_email = ANY($1)`,
-      [parsed.data.emails.map((e) => String(e).trim().toLowerCase())]
+       WHERE (COALESCE(array_length($1::text[], 1), 0) > 0 AND user_email = ANY($1))
+          OR (COALESCE(array_length($2::text[], 1), 0) > 0 AND user_id = ANY($2))`,
+      [emails, userIds]
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
     const users = rows
       .map((r) => sanitizeUserProfileRecord(r))
       .map((r) => ({
+        user_id: r?.user_id ?? null,
         email: r?.user_email ?? null,
         display_name: r?.display_name ?? null,
         username: r?.username ?? null,
@@ -8707,6 +8846,7 @@ fastify.get('/search/users', { config: { rateLimit: RATE_LIMITS.search } }, asyn
       const isAdmin = email ? getStaffRoleForEmail(email) === 'admin' : false;
       if (isBlockedForViewer(email, viewerBlocks)) return null;
       return {
+        user_id: profile?.user_id ?? null,
         display_name: profile?.display_name ?? null,
         username: profile?.username ?? null,
         profile_photo_url: profile?.profile_photo_url ?? null,
@@ -8731,7 +8871,7 @@ fastify.get('/search/users', { config: { rateLimit: RATE_LIMITS.search } }, asyn
     await ensureUserProfilesTable();
     const like = `%${q}%`;
     const res = await pool.query(
-      `SELECT user_email, display_name, username, profile_photo_url, location
+      `SELECT user_id, user_email, display_name, username, profile_photo_url, location
        FROM user_profiles
        WHERE display_name ILIKE $1 OR username ILIKE $1
        ORDER BY display_name NULLS LAST
@@ -8752,6 +8892,8 @@ async function handleGetMyProfile(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
+  const userIdRaw = authedUser?.id != null ? String(authedUser.id).trim() : '';
+  const userId = userIdRaw || null;
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
   const includeMetaRaw = String(request.query?.include_meta || '').trim().toLowerCase();
@@ -8767,14 +8909,9 @@ async function handleGetMyProfile(request, reply) {
     }
     const fallback = {
       id: randomUUID(),
+      user_id: userId,
       user_email: email,
-      display_name:
-        String(
-          authedUser?.user_metadata?.full_name ||
-            authedUser?.user_metadata?.name ||
-            authedUser?.user_metadata?.username ||
-            ''
-        ).trim() || null,
+      display_name: null,
       username: normalizeUsername(String(email).split('@')[0] || '') || null,
       bio: null,
       profile_photo_url: null,
@@ -8795,8 +8932,47 @@ async function handleGetMyProfile(request, reply) {
 
   try {
     await ensureUserProfilesTable();
-    const res = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
-    const profile = sanitizeUserProfileRecord(res.rows?.[0] || null);
+    let row = null;
+    if (userId) {
+      const byId = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId]);
+      row = byId.rows?.[0] || null;
+    }
+    if (!row) {
+      const byEmail = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+      row = byEmail.rows?.[0] || null;
+      if (row?.id && userId && !row.user_id) {
+        await pool.query('UPDATE user_profiles SET user_id = $1, updated_at = NOW() WHERE id = $2', [userId, row.id]);
+        row = { ...row, user_id: userId };
+      }
+    }
+
+    if (!row) {
+      const id = randomUUID();
+      const now = nowIso();
+      await pool.query(
+        'INSERT INTO user_profiles (id, user_id, user_email, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)',
+        [id, userId, email, now]
+      );
+      row = {
+        id,
+        user_id: userId,
+        user_email: email,
+        display_name: null,
+        username: null,
+        bio: null,
+        profile_photo_url: null,
+        banner_url: null,
+        location: null,
+        catchment_radius_km: null,
+        skills: null,
+        ai_features_enabled: false,
+        movement_group_opt_out: false,
+        email_notifications_opt_in: false,
+        created_at: now,
+        updated_at: now,
+      };
+    }
+    const profile = sanitizeUserProfileRecord(row || null);
     const payload = { profile };
     return reply.send(includeMeta ? { ...payload, meta } : payload);
   } catch (e) {
@@ -8809,6 +8985,8 @@ async function handlePostMyProfile(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
+  const userIdRaw = authedUser?.id != null ? String(authedUser.id).trim() : '';
+  const userId = userIdRaw || null;
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
@@ -8863,6 +9041,7 @@ async function handlePostMyProfile(request, reply) {
     }
     const existing = memoryUserProfiles.get(email) || {
       id: randomUUID(),
+      user_id: userId,
       user_email: email,
       created_at: now,
       updated_at: now,
@@ -8873,6 +9052,7 @@ async function handlePostMyProfile(request, reply) {
     const merged = {
       ...existing,
       ...next,
+      user_id: existing.user_id ?? userId,
       updated_at: now,
       created_at: existing.created_at || now,
     };
@@ -8885,16 +9065,34 @@ async function handlePostMyProfile(request, reply) {
 
     if (normalizedUsername) {
       const dup = await pool.query(
-        'SELECT user_email FROM user_profiles WHERE LOWER(username) = LOWER($1) AND user_email != $2 LIMIT 1',
-        [normalizedUsername, email]
+        `SELECT 1
+         FROM user_profiles
+         WHERE LOWER(username) = LOWER($1)
+           AND NOT (
+             (user_id IS NOT NULL AND user_id = $2)
+             OR user_email = $3
+           )
+         LIMIT 1`,
+        [normalizedUsername, userId, email]
       );
       if (dup.rows?.length) {
         return reply.code(409).send({ error: 'USERNAME_TAKEN', message: 'That username is already taken.' });
       }
     }
 
-    const existingRes = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
-    const existing = existingRes.rows?.[0] || null;
+    let existing = null;
+    if (userId) {
+      const byId = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId]);
+      existing = byId.rows?.[0] || null;
+    }
+    if (!existing) {
+      const byEmail = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+      existing = byEmail.rows?.[0] || null;
+      if (existing?.id && userId && !existing.user_id) {
+        await pool.query('UPDATE user_profiles SET user_id = $1, updated_at = NOW() WHERE id = $2', [userId, existing.id]);
+        existing = { ...existing, user_id: userId };
+      }
+    }
 
     const next = buildNextProfile(existing);
 
@@ -8902,21 +9100,25 @@ async function handlePostMyProfile(request, reply) {
     if (existing?.id) {
       await pool.query(
         `UPDATE user_profiles
-         SET display_name = $2,
-             username = $3,
-             bio = $4,
-             profile_photo_url = $5,
-             banner_url = $6,
-             location = $7,
-             catchment_radius_km = $8,
-             skills = $9,
-             ai_features_enabled = $10,
-             movement_group_opt_out = $11,
-             email_notifications_opt_in = $12,
-             updated_at = $13
-         WHERE user_email = $1`,
+         SET user_email = $2,
+             user_id = $3,
+             display_name = $4,
+             username = $5,
+             bio = $6,
+             profile_photo_url = $7,
+             banner_url = $8,
+             location = $9,
+             catchment_radius_km = $10,
+             skills = $11,
+             ai_features_enabled = $12,
+             movement_group_opt_out = $13,
+             email_notifications_opt_in = $14,
+             updated_at = $15
+         WHERE id = $1`,
         [
+          existing.id,
           email,
+          userId,
           next.display_name,
           next.username,
           next.bio,
@@ -8935,10 +9137,11 @@ async function handlePostMyProfile(request, reply) {
       const id = randomUUID();
       await pool.query(
         `INSERT INTO user_profiles
-         (id, user_email, display_name, username, bio, profile_photo_url, banner_url, location, catchment_radius_km, skills, ai_features_enabled, movement_group_opt_out, email_notifications_opt_in, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)`,
+         (id, user_id, user_email, display_name, username, bio, profile_photo_url, banner_url, location, catchment_radius_km, skills, ai_features_enabled, movement_group_opt_out, email_notifications_opt_in, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)`,
         [
           id,
+          userId,
           email,
           next.display_name,
           next.username,
@@ -8956,7 +9159,9 @@ async function handlePostMyProfile(request, reply) {
       );
     }
 
-    const updatedRes = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+    const updatedRes = userId
+      ? await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId])
+      : await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
     const updated = sanitizeUserProfileRecord(updatedRes.rows?.[0] || null);
     return reply.send({ profile: updated });
   } catch (e) {

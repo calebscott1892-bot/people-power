@@ -159,14 +159,9 @@ export default function CreateMovement() {
       .map((t) => String(t).trim())
       .filter(Boolean)
       .filter((t) => allowed.has(t));
-    const previewDisplayName =
-      user?.user_metadata?.full_name ||
-      user?.user_metadata?.name ||
-      user?.user_metadata?.username ||
-      (user?.email ? String(user.email).split('@')[0] : '');
-    const previewUsername =
-      user?.user_metadata?.username ||
-      (user?.email ? String(user.email).split('@')[0] : '');
+    const emailLocal = user?.email ? String(user.email).split('@')[0] : '';
+    const previewDisplayName = emailLocal;
+    const previewUsername = emailLocal;
 
     return {
       id: 'preview',

@@ -32,7 +32,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { fetchMyMovementFollow, setMyMovementFollow } from '@/api/movementFollowsClient';
 import { listMovementCollaborators } from '@/api/collaboratorsClient';
-import { lookupUsersByEmail } from '@/api/usersClient';
+import { lookupUsers } from '@/api/usersClient';
 import { createMovementGroupConversation } from '@/api/messagesClient';
 
 import CommentSection from '@/components/details/CommentSection';
@@ -851,9 +851,10 @@ export default function MovementDetails() {
 
   const currentUserForCollab = useMemo(() => {
     if (!user?.email) return null;
+    const emailLocal = String(user.email).split('@')[0] || null;
     return {
       email: String(user.email),
-      full_name: user?.user_metadata?.full_name || user?.user_metadata?.name || user?.user_metadata?.username || null,
+      full_name: emailLocal,
     };
   }, [user]);
 
@@ -992,23 +993,33 @@ export default function MovementDetails() {
         offset: 0,
         status: 'approved',
         accessToken,
-        fields: ['id', 'submitter_email'],
+        fields: ['id', 'submitter_email', 'submitter_user_id'],
       }),
     retry: 1,
   });
 
-  const verifiedParticipantEmails = useMemo(() => {
-    const emails = Array.isArray(approvedEvidenceForGroup)
-      ? approvedEvidenceForGroup.map((ev) => normalizeEmail(ev?.submitter_email))
-      : [];
-    const unique = Array.from(new Set(emails.filter(Boolean)));
-    return ownerEmail ? unique.filter((e) => e !== normalizeEmail(ownerEmail)) : unique;
+  const { verifiedParticipantEmails, verifiedParticipantUserIds } = useMemo(() => {
+    const list = Array.isArray(approvedEvidenceForGroup) ? approvedEvidenceForGroup : [];
+    const emails = list.map((ev) => normalizeEmail(ev?.submitter_email)).filter(Boolean);
+    const userIds = list
+      .map((ev) => (ev?.submitter_user_id ? String(ev.submitter_user_id).trim() : ''))
+      .filter(Boolean);
+    const uniqueEmails = Array.from(new Set(emails));
+    const uniqueUserIds = Array.from(new Set(userIds));
+    return {
+      verifiedParticipantEmails: ownerEmail ? uniqueEmails.filter((e) => e !== normalizeEmail(ownerEmail)) : uniqueEmails,
+      verifiedParticipantUserIds: uniqueUserIds,
+    };
   }, [approvedEvidenceForGroup, ownerEmail]);
 
   const { data: verifiedParticipantProfiles = [] } = useQuery({
-    queryKey: ['movementVerifiedParticipantProfiles', verifiedParticipantEmails.join('|')],
-    enabled: verifiedParticipantEmails.length > 0 && !!accessToken && isOwner,
-    queryFn: async () => lookupUsersByEmail(verifiedParticipantEmails, { accessToken }),
+    queryKey: [
+      'movementVerifiedParticipantProfiles',
+      verifiedParticipantUserIds.join('|'),
+      verifiedParticipantEmails.join('|'),
+    ],
+    enabled: (verifiedParticipantUserIds.length > 0 || verifiedParticipantEmails.length > 0) && !!accessToken && isOwner,
+    queryFn: async () => lookupUsers({ userIds: verifiedParticipantUserIds, emails: verifiedParticipantEmails }, { accessToken }),
     retry: 1,
   });
 
@@ -1017,8 +1028,9 @@ export default function MovementDetails() {
     const list = Array.isArray(verifiedParticipantProfiles) ? verifiedParticipantProfiles : [];
     for (const profile of list) {
       const email = normalizeEmail(profile?.email || profile?.user_email);
-      if (!email) continue;
-      map.set(email, profile);
+      const userId = profile?.user_id ? String(profile.user_id).trim() : '';
+      if (userId) map.set(userId, profile);
+      if (email) map.set(email, profile);
     }
     return map;
   }, [verifiedParticipantProfiles]);
@@ -1180,7 +1192,9 @@ export default function MovementDetails() {
           'description',
           'status',
           'assigned_to_email',
+          'assigned_to_user_id',
           'created_by_email',
+          'created_by_user_id',
           'created_at',
           'updated_at',
         ],
@@ -1212,7 +1226,7 @@ export default function MovementDetails() {
       fetchMovementDiscussionsPage(movementId, {
         limit: 12,
         offset: pageParam,
-        fields: ['id', 'movement_id', 'author_email', 'message', 'created_at'],
+        fields: ['id', 'movement_id', 'author_email', 'author_user_id', 'message', 'created_at'],
       }),
     getNextPageParam: (lastPage, pages) => {
       const list = Array.isArray(lastPage) ? lastPage : [];
@@ -1227,35 +1241,39 @@ export default function MovementDetails() {
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
   }, [discussionsPages]);
 
-  const [discussionAuthors, setDiscussionAuthors] = useState({});
+  const [discussionAuthors, setDiscussionAuthors] = useState({ byEmail: {}, byUserId: {} });
 
   useEffect(() => {
     let cancelled = false;
     async function loadAuthorProfiles() {
       if (!accessToken) return;
-      const emails = Array.from(
+      const userIds = Array.from(
         new Set(
-          discussions
-            .map((m) => String(m?.author_email || '').trim().toLowerCase())
+          (Array.isArray(discussions) ? discussions : [])
+            .map((m) => (m?.author_user_id ? String(m.author_user_id).trim() : ''))
             .filter(Boolean)
         )
       );
-      if (!emails.length) return;
+      const emails = Array.from(new Set((Array.isArray(discussions) ? discussions : []).map((m) => String(m?.author_email || '').trim().toLowerCase()).filter(Boolean)));
+      if (!userIds.length && !emails.length) return;
       try {
-        const users = await lookupUsersByEmail(emails, { accessToken });
+        const users = await lookupUsers({ userIds, emails }, { accessToken });
         if (cancelled) return;
-        const next = {};
+        const nextByEmail = {};
+        const nextByUserId = {};
         for (const u of Array.isArray(users) ? users : []) {
           const email = String(u?.email || '').trim().toLowerCase();
-          if (!email) continue;
-          next[email] = {
+          const userId = u?.user_id ? String(u.user_id).trim() : '';
+          const record = {
             display_name: u?.display_name ?? null,
             username: u?.username ?? null,
           };
+          if (email) nextByEmail[email] = record;
+          if (userId) nextByUserId[userId] = record;
         }
-        setDiscussionAuthors(next);
+        setDiscussionAuthors({ byEmail: nextByEmail, byUserId: nextByUserId });
       } catch {
-        if (!cancelled) setDiscussionAuthors({});
+        if (!cancelled) setDiscussionAuthors({ byEmail: {}, byUserId: {} });
       }
     }
     loadAuthorProfiles();
@@ -1777,17 +1795,17 @@ export default function MovementDetails() {
     },
   });
 
-  const assignedTaskEmails = useMemo(() => {
-    const emails = (Array.isArray(tasks) ? tasks : [])
-      .map((t) => (t?.assigned_to_email ? String(t.assigned_to_email).trim().toLowerCase() : ''))
-      .filter(Boolean);
-    return Array.from(new Set(emails));
+  const { assignedTaskEmails, assignedTaskUserIds } = useMemo(() => {
+    const list = Array.isArray(tasks) ? tasks : [];
+    const emails = list.map((t) => (t?.assigned_to_email ? String(t.assigned_to_email).trim().toLowerCase() : '')).filter(Boolean);
+    const userIds = list.map((t) => (t?.assigned_to_user_id ? String(t.assigned_to_user_id).trim() : '')).filter(Boolean);
+    return { assignedTaskEmails: Array.from(new Set(emails)), assignedTaskUserIds: Array.from(new Set(userIds)) };
   }, [tasks]);
 
   const { data: assignedTaskProfiles = [] } = useQuery({
-    queryKey: ['taskAssignees', movementId, assignedTaskEmails.join('|')],
-    queryFn: () => lookupUsersByEmail(assignedTaskEmails, { accessToken }),
-    enabled: !!accessToken && assignedTaskEmails.length > 0,
+    queryKey: ['taskAssignees', movementId, assignedTaskUserIds.join('|'), assignedTaskEmails.join('|')],
+    queryFn: () => lookupUsers({ userIds: assignedTaskUserIds, emails: assignedTaskEmails }, { accessToken }),
+    enabled: !!accessToken && (assignedTaskUserIds.length > 0 || assignedTaskEmails.length > 0),
     staleTime: 1000 * 60 * 10,
   });
 
@@ -1795,11 +1813,13 @@ export default function MovementDetails() {
     const map = new Map();
     for (const p of Array.isArray(assignedTaskProfiles) ? assignedTaskProfiles : []) {
       const email = p?.user_email ? String(p.user_email).trim().toLowerCase() : (p?.email ? String(p.email).trim().toLowerCase() : '');
-      if (!email) continue;
-      map.set(email, {
+      const userId = p?.user_id ? String(p.user_id).trim() : '';
+      const record = {
         display_name: p?.display_name ?? null,
         username: p?.username ?? null,
-      });
+      };
+      if (userId) map.set(userId, record);
+      if (email) map.set(email, record);
     }
     return map;
   }, [assignedTaskProfiles]);
@@ -3185,10 +3205,11 @@ export default function MovementDetails() {
                               <div className="font-black text-slate-900 truncate">{String(t?.title || '')}</div>
                               <div className="text-xs text-slate-600 font-bold">
                                 Status: {String(t?.status || 'todo')}
-                                {t?.assigned_to_email
+                                {t?.assigned_to_email || t?.assigned_to_user_id
                                   ? (() => {
+                                      const userId = t?.assigned_to_user_id ? String(t.assigned_to_user_id).trim() : '';
                                       const email = String(t.assigned_to_email || '').trim().toLowerCase();
-                                      const prof = assignedTaskLookup.get(email);
+                                      const prof = (userId ? assignedTaskLookup.get(userId) : null) || (email ? assignedTaskLookup.get(email) : null);
                                       const display = String(prof?.display_name || '').trim();
                                       if (display) return ` • Assigned: ${display}`;
                                       const uname = String(prof?.username || '').trim();
@@ -3276,8 +3297,11 @@ export default function MovementDetails() {
                   ) : (
                     <div className="space-y-2">
                       {discussions.map((m) => {
+                        const authorUserId = m?.author_user_id ? String(m.author_user_id).trim() : '';
                         const emailKey = String(m?.author_email || '').trim().toLowerCase();
-                        const authorProfile = emailKey ? discussionAuthors[emailKey] : null;
+                        const authorProfile =
+                          (authorUserId && discussionAuthors?.byUserId ? discussionAuthors.byUserId[authorUserId] : null) ||
+                          (emailKey && discussionAuthors?.byEmail ? discussionAuthors.byEmail[emailKey] : null);
                         const authorLabel =
                           authorProfile?.display_name ||
                           (authorProfile?.username ? `@${authorProfile.username}` : 'Member');

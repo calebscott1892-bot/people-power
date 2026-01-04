@@ -7,7 +7,7 @@ import { User, Loader2, Lock, TimerReset } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { format } from 'date-fns';
 import { useAuth } from '@/auth/AuthProvider';
-import { lookupUsersByEmail } from '@/api/usersClient';
+import { lookupUsers } from '@/api/usersClient';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 import {
   AlertDialog,
@@ -75,7 +75,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
   const [pendingPostText, setPendingPostText] = useState('');
 
   const accessToken = session?.access_token ? String(session.access_token) : null;
-  const [commentAuthors, setCommentAuthors] = useState({});
+  const [commentAuthors, setCommentAuthors] = useState({ byEmail: {}, byUserId: {} });
 
   const { data: commentSettings, isLoading: settingsLoading } = useQuery({
     queryKey: ['commentSettings', safeMovementId],
@@ -118,7 +118,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       return fetchMovementCommentsPage(safeMovementId, {
         limit: 20,
         offset: pageParam,
-        fields: ['id', 'movement_id', 'author_email', 'content', 'created_at'],
+        fields: ['id', 'movement_id', 'author_email', 'author_user_id', 'content', 'created_at'],
         accessToken,
       });
     },
@@ -137,37 +137,42 @@ export default function CommentSection({ movementId, movement, canModerate = fal
 
   useEffect(() => {
     if (!accessToken) {
-      setCommentAuthors({});
+      setCommentAuthors({ byEmail: {}, byUserId: {} });
       return;
     }
-    const emails = Array.from(
+    const userIds = Array.from(
       new Set(
         comments
-          .map((c) => String(c?.author_email || '').trim().toLowerCase())
+          .map((c) => (c?.author_user_id ? String(c.author_user_id).trim() : ''))
           .filter(Boolean)
       )
     );
-    if (!emails.length) {
-      setCommentAuthors({});
+    const emails = Array.from(new Set(comments.map((c) => String(c?.author_email || '').trim().toLowerCase()).filter(Boolean)));
+
+    if (!userIds.length && !emails.length) {
+      setCommentAuthors({ byEmail: {}, byUserId: {} });
       return;
     }
     let cancelled = false;
-    lookupUsersByEmail(emails, { accessToken })
+    lookupUsers({ userIds, emails }, { accessToken })
       .then((users) => {
         if (cancelled) return;
-        const next = {};
+        const nextByEmail = {};
+        const nextByUserId = {};
         for (const u of Array.isArray(users) ? users : []) {
           const email = String(u?.email || '').trim().toLowerCase();
-          if (!email) continue;
-          next[email] = {
+          const userId = u?.user_id ? String(u.user_id).trim() : '';
+          const record = {
             display_name: u?.display_name ?? null,
             username: u?.username ?? null,
           };
+          if (email) nextByEmail[email] = record;
+          if (userId) nextByUserId[userId] = record;
         }
-        setCommentAuthors(next);
+        setCommentAuthors({ byEmail: nextByEmail, byUserId: nextByUserId });
       })
       .catch(() => {
-        if (!cancelled) setCommentAuthors({});
+        if (!cancelled) setCommentAuthors({ byEmail: {}, byUserId: {} });
       });
     return () => {
       cancelled = true;
@@ -436,8 +441,11 @@ export default function CommentSection({ movementId, movement, canModerate = fal
                     </div>
                     <div>
                     {(() => {
+                      const authorUserId = c?.author_user_id ? String(c.author_user_id).trim() : '';
                       const emailKey = String(c?.author_email || '').trim().toLowerCase();
-                      const authorProfile = emailKey ? commentAuthors[emailKey] : null;
+                      const authorProfile =
+                        (authorUserId && commentAuthors?.byUserId ? commentAuthors.byUserId[authorUserId] : null) ||
+                        (emailKey && commentAuthors?.byEmail ? commentAuthors.byEmail[emailKey] : null);
                       const authorLabel =
                         authorProfile?.display_name ||
                         (authorProfile?.username ? `@${authorProfile.username}` : 'Member');

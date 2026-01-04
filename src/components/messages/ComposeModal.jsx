@@ -14,7 +14,7 @@ import {
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchMyFollowers, fetchMyFollowingUsers } from '@/api/userFollowsClient';
 import { createConversation, createGroupConversation } from '@/api/messagesClient';
-import { lookupUsersByEmail, searchUsers } from '@/api/usersClient';
+import { lookupUsers, searchUsers } from '@/api/usersClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { uploadFile } from '@/api/uploadsClient';
@@ -163,23 +163,57 @@ export default function ComposeModal({ open, onClose, currentUser, onConversatio
       : [];
   }, [following]);
 
+  const followingUserIds = useMemo(() => {
+    return Array.isArray(following)
+      ? following.map((u) => String(u?.user_id || '').trim()).filter(Boolean)
+      : [];
+  }, [following]);
+
+  const followingEmailsMissingId = useMemo(() => {
+    if (!Array.isArray(following)) return [];
+    return following
+      .filter((u) => !u?.user_id)
+      .map((u) => String(u?.email || '').trim())
+      .filter(Boolean);
+  }, [following]);
+
   const followerEmails = useMemo(() => {
     return Array.isArray(followers)
       ? followers.map((u) => String(u?.email || '').trim()).filter(Boolean)
       : [];
   }, [followers]);
 
+  const followerUserIds = useMemo(() => {
+    return Array.isArray(followers)
+      ? followers.map((u) => String(u?.user_id || '').trim()).filter(Boolean)
+      : [];
+  }, [followers]);
+
+  const followerEmailsMissingId = useMemo(() => {
+    if (!Array.isArray(followers)) return [];
+    return followers
+      .filter((u) => !u?.user_id)
+      .map((u) => String(u?.email || '').trim())
+      .filter(Boolean);
+  }, [followers]);
+
   const { data: followingProfiles = [], isLoading: followingProfilesLoading } = useQuery({
-    queryKey: ['followingProfiles', followingEmails.join('|')],
-    queryFn: () => lookupUsersByEmail(followingEmails, { accessToken }),
-    enabled: open && !!accessToken && followingEmails.length > 0,
+    queryKey: ['followingProfiles', followingUserIds.join('|') || followingEmails.join('|')],
+    queryFn: () => lookupUsers({
+      userIds: followingUserIds,
+      emails: followingUserIds.length ? followingEmailsMissingId : followingEmails,
+    }, { accessToken }),
+    enabled: open && !!accessToken && (followingUserIds.length > 0 || followingEmails.length > 0),
     staleTime: 1000 * 60 * 5,
   });
 
   const { data: followerProfiles = [], isLoading: followerProfilesLoading } = useQuery({
-    queryKey: ['followerProfiles', followerEmails.join('|')],
-    queryFn: () => lookupUsersByEmail(followerEmails, { accessToken }),
-    enabled: open && !!accessToken && followerEmails.length > 0,
+    queryKey: ['followerProfiles', followerUserIds.join('|') || followerEmails.join('|')],
+    queryFn: () => lookupUsers({
+      userIds: followerUserIds,
+      emails: followerUserIds.length ? followerEmailsMissingId : followerEmails,
+    }, { accessToken }),
+    enabled: open && !!accessToken && (followerUserIds.length > 0 || followerEmails.length > 0),
     staleTime: 1000 * 60 * 5,
   });
 

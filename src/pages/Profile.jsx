@@ -124,30 +124,14 @@ export default function Profile() {
 
   const resolvedProfile = useMemo(() => {
     const base = userProfile && typeof userProfile === 'object' ? userProfile : {};
-    const meta = user?.user_metadata && typeof user.user_metadata === 'object' ? user.user_metadata : {};
-    const displayName = base.display_name ?? meta.display_name ?? meta.full_name ?? meta.name ?? null;
-    const username = base.username ?? meta.username ?? null;
-    const bio = base.bio ?? meta.bio ?? null;
-    const photoUrl =
-      base.profile_photo_url ?? meta.profile_photo_url ?? meta.avatar_url ?? meta.picture ?? null;
-    const bannerUrl = base.banner_url ?? meta.banner_url ?? null;
-
-    return {
-      ...base,
-      display_name: displayName,
-      username,
-      bio,
-      profile_photo_url: photoUrl,
-      banner_url: bannerUrl,
-    };
-  }, [userProfile, user?.user_metadata]);
+    return { ...base };
+  }, [userProfile]);
 
   const safeHandle = useMemo(() => {
     const emailLocal = String(user?.email || '').split('@')[0]?.toLowerCase() || '';
     const rawUsername = resolvedProfile?.username ? String(resolvedProfile.username) : '';
-    const rawDisplay = resolvedProfile?.display_name || user?.full_name || '';
-    const candidate =
-      (rawUsername && rawUsername.toLowerCase() !== emailLocal) ? rawUsername : rawDisplay;
+    const rawDisplay = resolvedProfile?.display_name || '';
+    const candidate = rawUsername || rawDisplay;
     const trimmed = String(candidate || '').trim();
     if (trimmed) return trimmed.toLowerCase().replace(/[^a-z0-9_]/g, '');
     if (emailLocal) return `member-${emailLocal.slice(0, 3)}${emailLocal.length}`;

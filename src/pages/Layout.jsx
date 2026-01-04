@@ -82,7 +82,7 @@ function LayoutContent({ children }) {
 
   const { data: userProfile } = useQuery({
     queryKey: ['userProfile', profileEmail],
-    enabled: !!profileEmail,
+    enabled: !!profileEmail && !!accessToken,
     queryFn: async () => {
       if (!profileEmail) return null;
       try {
@@ -115,42 +115,29 @@ function LayoutContent({ children }) {
     const base =
       userProfile?.display_name ||
       userProfile?.username ||
-      authUser?.user_metadata?.display_name ||
-      authUser?.user_metadata?.full_name ||
-      authUser?.full_name ||
-      authUser?.user_metadata?.name ||
-      authUser?.user_metadata?.username ||
       '';
     const trimmed = String(base).trim();
     return trimmed || 'Account';
-  }, [authUser, userProfile]);
+  }, [userProfile]);
 
   const profileInitial = useMemo(() => {
     const base =
       userProfile?.display_name ||
       userProfile?.username ||
-      authUser?.user_metadata?.display_name ||
-      authUser?.user_metadata?.full_name ||
-      authUser?.full_name ||
-      authUser?.user_metadata?.name ||
-      authUser?.user_metadata?.username ||
       '';
     const trimmed = String(base).trim();
     if (trimmed) return trimmed[0].toUpperCase();
     return '?';
-  }, [authUser, userProfile]);
+  }, [userProfile]);
 
   const profilePhotoUrl = useMemo(() => {
     const raw =
       userProfile?.profile_photo_url ||
       userProfile?.avatar_url ||
-      authUser?.user_metadata?.profile_photo_url ||
-      authUser?.user_metadata?.avatar_url ||
-      authUser?.user_metadata?.picture ||
       '';
     const trimmed = String(raw || '').trim();
     return trimmed || '';
-  }, [authUser, userProfile]);
+  }, [userProfile]);
 
   // Logout: calls Supabase signOut and returns to home/intro.
   const handleLogout = async () => {

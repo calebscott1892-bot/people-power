@@ -25,7 +25,7 @@ import {
   updateGroupParticipants,
   updateGroupSettings,
 } from '@/api/messagesClient';
-import { lookupUsersByEmail } from '@/api/usersClient';
+import { lookupUsers } from '@/api/usersClient';
 import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import { fetchMyBlocks } from '@/api/blocksClient';
 import { fetchMyFollowingUsers } from '@/api/userFollowsClient';
@@ -396,24 +396,30 @@ export default function Messages() {
     []
   );
 
-  function upsertMessageIntoCache(created, conversationIdOverride) {
-    const cid = conversationIdOverride != null ? String(conversationIdOverride) : (selectedId ? String(selectedId) : '');
-    if (!created || !cid) return;
-    const messagesKey = ['messages', cid, myEmailNormalized];
-    queryClient.setQueryData(messagesKey, (old) => {
-      if (!old || typeof old !== 'object') return old;
-      const pages = Array.isArray(old.pages) ? old.pages : null;
-      const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
-      if (!pages || !pageParams) return old;
+  const upsertMessageIntoCache = useCallback(
+    (created, conversationIdOverride) => {
+      const cid =
+        conversationIdOverride != null
+          ? String(conversationIdOverride)
+          : (selectedId ? String(selectedId) : '');
+      if (!created || !cid) return;
+      const messagesKey = ['messages', cid, myEmailNormalized];
+      queryClient.setQueryData(messagesKey, (old) => {
+        if (!old || typeof old !== 'object') return old;
+        const pages = Array.isArray(old.pages) ? old.pages : null;
+        const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
+        if (!pages || !pageParams) return old;
 
-      const createdId = String(created?.id || '');
-      const first = Array.isArray(pages[0]) ? pages[0] : [];
-      const withoutDup = createdId ? first.filter((m) => String(m?.id || '') !== createdId) : first;
-      const nextFirst = [created, ...withoutDup];
-      const nextPages = [nextFirst, ...pages.slice(1)];
-      return { ...old, pages: nextPages };
-    });
-  }
+        const createdId = String(created?.id || '');
+        const first = Array.isArray(pages[0]) ? pages[0] : [];
+        const withoutDup = createdId ? first.filter((m) => String(m?.id || '') !== createdId) : first;
+        const nextFirst = [created, ...withoutDup];
+        const nextPages = [nextFirst, ...pages.slice(1)];
+        return { ...old, pages: nextPages };
+      });
+    },
+    [myEmailNormalized, queryClient, selectedId]
+  );
 
   const bumpConversationInCache = useCallback(
     (conversationId, patch) => {
@@ -694,7 +700,7 @@ export default function Messages() {
 
   const { data: participantProfiles = [] } = useQuery({
     queryKey: ['messageParticipants', participantEmails.join('|')],
-    queryFn: () => lookupUsersByEmail(participantEmails, { accessToken }),
+    queryFn: () => lookupUsers({ emails: participantEmails }, { accessToken }),
     enabled: !!accessToken && participantEmails.length > 0,
     staleTime: 1000 * 60 * 5,
   });
@@ -736,13 +742,9 @@ export default function Messages() {
     if (display) return display;
     const username = String(profile?.username || '').trim();
     if (username) return `@${username}`;
-    const meta =
-      user?.user_metadata?.full_name ||
-      user?.user_metadata?.name ||
-      user?.user_metadata?.username ||
-      '';
-    return String(meta || '').trim() || 'Account';
-  }, [profileLookup, myEmailNormalized, user]);
+    const emailLocal = myEmailNormalized ? myEmailNormalized.split('@')[0] : '';
+    return emailLocal || 'Account';
+  }, [profileLookup, myEmailNormalized]);
 
   useEffect(() => {
     const idFromUrl = searchParams.get('conversationId');
@@ -794,7 +796,7 @@ export default function Messages() {
     queryFn: () =>
       fetchMovementEvidencePage(selectedConversation?.movement_id, {
         status: 'approved',
-        fields: ['submitter_email'],
+        fields: ['submitter_email', 'submitter_user_id'],
         limit: 200,
         offset: 0,
         accessToken,
@@ -802,20 +804,40 @@ export default function Messages() {
     enabled: groupSettingsOpen && isMovementGroup && !!accessToken && !!selectedConversation?.movement_id,
   });
 
-  const verifiedParticipantEmails = useMemo(() => {
-    if (!isMovementGroup) return [];
+  const { verifiedParticipantEmails, verifiedParticipantUserIds } = useMemo(() => {
+    if (!isMovementGroup) return { verifiedParticipantEmails: [], verifiedParticipantUserIds: [] };
     const list = Array.isArray(verifiedEvidence) ? verifiedEvidence : [];
     const emails = list.map((e) => normalizeEmail(e?.submitter_email)).filter(Boolean);
-    return Array.from(new Set(emails));
+    const userIds = list.map((e) => (e?.submitter_user_id ? String(e.submitter_user_id).trim() : '')).filter(Boolean);
+    return {
+      verifiedParticipantEmails: Array.from(new Set(emails)),
+      verifiedParticipantUserIds: Array.from(new Set(userIds)),
+    };
   }, [verifiedEvidence, isMovementGroup]);
 
   const {
     data: verifiedParticipantProfiles = [],
     isLoading: verifiedParticipantProfilesLoading,
   } = useQuery({
-    queryKey: ['verifiedParticipantProfiles', selectedConversation?.movement_id, verifiedParticipantEmails.join('|')],
-    queryFn: () => lookupUsersByEmail(verifiedParticipantEmails.slice(0, 50), { accessToken }),
-    enabled: groupSettingsOpen && isMovementGroup && !!accessToken && verifiedParticipantEmails.length > 0,
+    queryKey: [
+      'verifiedParticipantProfiles',
+      selectedConversation?.movement_id,
+      verifiedParticipantUserIds.join('|'),
+      verifiedParticipantEmails.join('|'),
+    ],
+    queryFn: () =>
+      lookupUsers(
+        {
+          userIds: verifiedParticipantUserIds.slice(0, 50),
+          emails: verifiedParticipantEmails.slice(0, 50),
+        },
+        { accessToken }
+      ),
+    enabled:
+      groupSettingsOpen &&
+      isMovementGroup &&
+      !!accessToken &&
+      (verifiedParticipantUserIds.length > 0 || verifiedParticipantEmails.length > 0),
     staleTime: 1000 * 60 * 5,
   });
 

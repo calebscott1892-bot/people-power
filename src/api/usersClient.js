@@ -43,24 +43,38 @@ export async function searchUsers(query, options) {
   return Array.isArray(body?.users) ? body.users : [];
 }
 
-export async function lookupUsersByEmail(emails, options) {
+export async function lookupUsers({ emails, userIds } = {}, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   if (!accessToken) throw new Error('Authentication required');
 
-  const list = Array.isArray(emails) ? emails.map((e) => String(e || '').trim()).filter(Boolean) : [];
-  if (!list.length) return [];
+  const emailList = Array.isArray(emails)
+    ? emails.map((e) => String(e || '').trim()).filter(Boolean)
+    : [];
+  const userIdList = Array.isArray(userIds)
+    ? userIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
 
-  const deduped = Array.from(new Set(list.map((e) => e.toLowerCase())));
+  const dedupedEmails = Array.from(new Set(emailList.map((e) => e.toLowerCase())));
+  const dedupedUserIds = Array.from(new Set(userIdList));
+
+  if (!dedupedEmails.length && !dedupedUserIds.length) return [];
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/lookup`;
   const chunkSize = 50;
-  const chunks = [];
-  for (let i = 0; i < deduped.length; i += chunkSize) {
-    chunks.push(deduped.slice(i, i + chunkSize));
+  const emailChunks = [];
+  for (let i = 0; i < dedupedEmails.length; i += chunkSize) {
+    emailChunks.push(dedupedEmails.slice(i, i + chunkSize));
+  }
+  const userIdChunks = [];
+  for (let i = 0; i < dedupedUserIds.length; i += chunkSize) {
+    userIdChunks.push(dedupedUserIds.slice(i, i + chunkSize));
   }
 
   const users = [];
-  for (const chunk of chunks) {
+  const maxChunks = Math.max(emailChunks.length, userIdChunks.length);
+  for (let i = 0; i < maxChunks; i += 1) {
+    const emailChunk = emailChunks[i] || [];
+    const userIdChunk = userIdChunks[i] || [];
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -68,7 +82,7 @@ export async function lookupUsersByEmail(emails, options) {
         'Content-Type': 'application/json',
         ...authHeaders(accessToken),
       },
-      body: JSON.stringify({ emails: chunk }),
+      body: JSON.stringify({ emails: emailChunk, user_ids: userIdChunk }),
     });
 
     const body = await safeReadJson(res);
@@ -89,4 +103,8 @@ export async function lookupUsersByEmail(emails, options) {
     out.push(u);
   }
   return out;
+}
+
+export async function lookupUsersByEmail(emails, options) {
+  return lookupUsers({ emails }, options);
 }
