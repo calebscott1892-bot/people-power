@@ -46,7 +46,7 @@ const PublicImpactReport = React.lazy(() => import('@/components/impact/PublicIm
 const CreatorDashboard = React.lazy(() => import('@/components/analytics/CreatorDashboard'));
 import CollaboratorsList from '@/components/collaboration/CollaboratorsList';
 import InviteCollaboratorModal from '@/components/collaboration/InviteCollaboratorModal';
-import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
+import { fetchMyProfile, fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import PollManager from '@/components/collaboration/PollManager';
 
 import {
@@ -73,7 +73,6 @@ import { listMovementPetitionsPage, createMovementPetition } from '@/api/petitio
 import { filterNotifications, upsertNotification } from '@/api/notificationsClient';
 
 import { fetchEventRsvpSummary, setMyEventAttendance, setMyEventRsvp } from '@/api/eventRsvpsClient';
-import { entities } from '@/api/appClient';
 import { fetchPetitionSignatureSummary, signPetition, withdrawPetitionSignature } from '@/api/petitionSignaturesClient';
 import { uploadFile } from '@/api/uploadsClient';
 import { getServerBaseUrl } from '@/api/serverBase';
@@ -1065,13 +1064,12 @@ export default function MovementDetails() {
     queryKey: ['movementCollaborators', movementId, myEmail],
     enabled: !!movementId && !!accessToken,
     queryFn: async () => {
-      try {
-        return await listMovementCollaborators(movementId, { accessToken });
-      } catch {
-        return [];
-      }
+      return await listMovementCollaborators(movementId, { accessToken });
     },
     retry: 1,
+    onError: (e) => {
+      toastFriendlyError(e, 'Failed to load collaborators');
+    },
   });
 
   const myCollaboratorRole = useMemo(() => {
@@ -1405,22 +1403,17 @@ export default function MovementDetails() {
     };
   }, [accessToken, discussions]);
 
-  const { data: collaborators = [] } = useQuery({
-    queryKey: ['collaborators', movementId],
-    enabled: !!movementId,
-    retry: 1,
-    queryFn: async () => {
-      const collabs = await entities.Collaborator.filter({ movement_id: movementId });
-      return Array.isArray(collabs) ? collabs.filter((c) => c?.status === 'accepted') : [];
-    },
-  });
+  const acceptedCollaborators = useMemo(() => {
+    const list = Array.isArray(collaboratorRecords) ? collaboratorRecords : [];
+    return list.filter((c) => String(c?.status || '').toLowerCase() === 'accepted');
+  }, [collaboratorRecords]);
 
   const isLoggedIn = !!accessToken;
   const isCollaborator = useMemo(() => {
     if (!myEmail) return false;
-    if (!Array.isArray(collaborators)) return false;
-    return collaborators.some((c) => String(c?.user_email || '').trim().toLowerCase() === myEmail);
-  }, [collaborators, myEmail]);
+    if (!Array.isArray(acceptedCollaborators)) return false;
+    return acceptedCollaborators.some((c) => String(c?.user_email || '').trim().toLowerCase() === myEmail);
+  }, [acceptedCollaborators, myEmail]);
 
   const isTeamMember = isLoggedIn && (isOwner || isAdmin || isCollaborator);
 
@@ -1442,11 +1435,13 @@ export default function MovementDetails() {
 
   const { data: userProfile = null } = useQuery({
     queryKey: ['userProfile', myEmail],
-    enabled: !!myEmail,
-    retry: 1,
+    enabled: !!accessToken,
+    retry: 0,
     queryFn: async () => {
-      const profiles = await entities.UserProfile.filter({ user_email: myEmail });
-      return Array.isArray(profiles) && profiles.length > 0 ? profiles[0] : null;
+      return await fetchMyProfile({ accessToken });
+    },
+    onError: (e) => {
+      toastFriendlyError(e, 'Failed to load your profile');
     },
   });
 
@@ -1455,6 +1450,7 @@ export default function MovementDetails() {
     if (userProfile && typeof userProfile === 'object' && 'ai_features_enabled' in userProfile) {
       return !!userProfile.ai_features_enabled;
     }
+    if (!import.meta?.env?.DEV) return false;
     try {
       return localStorage.getItem('peoplepower_ai_opt_in') === 'true';
     } catch {

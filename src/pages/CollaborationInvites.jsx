@@ -6,8 +6,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchMovementById } from '@/api/movementsClient';
 import { acceptCollaborationInvite, listMyCollaborationInvites, removeCollaborator } from '@/api/collaboratorsClient';
+import { lookupUsers } from '@/api/usersClient';
 import BackButton from '@/components/shared/BackButton';
-import { entities } from '@/api/appClient';
 
 export default function CollaborationInvites() {
   const { user, session } = useAuth();
@@ -22,15 +22,23 @@ export default function CollaborationInvites() {
     queryFn: async () => {
       const pending = await listMyCollaborationInvites({ accessToken });
 
-      let profiles = [];
+      const inviterEmails = Array.from(
+        new Set(
+          (Array.isArray(pending) ? pending : [])
+            .map((c) => String(c?.invited_by || '').trim().toLowerCase())
+            .filter(Boolean)
+        )
+      );
+
+      let inviterUsers = [];
       try {
-        profiles = await entities.UserProfile.list('-created_date', 200);
+        inviterUsers = inviterEmails.length ? await lookupUsers({ emails: inviterEmails }, { accessToken }) : [];
       } catch {
-        profiles = [];
+        inviterUsers = [];
       }
 
       const byEmail = new Map(
-        (Array.isArray(profiles) ? profiles : []).map((p) => [String(p?.user_email || '').trim().toLowerCase(), p])
+        (Array.isArray(inviterUsers) ? inviterUsers : []).map((u) => [String(u?.email || u?.user_email || '').trim().toLowerCase(), u])
       );
 
       const titles = await Promise.all(

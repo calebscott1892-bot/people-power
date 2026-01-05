@@ -92,23 +92,26 @@ function LayoutContent({ children }) {
   const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
     queryKey: ['userProfile', profileEmail],
     enabled: !!profileEmail && !!accessToken,
+    retry: 1,
     queryFn: async () => {
       if (!profileEmail) return null;
+      if (!accessToken) return null;
+
       try {
-        if (accessToken) {
-          const profile = await fetchMyProfile({ accessToken });
-          return profile || null;
+        const profile = await fetchMyProfile({ accessToken });
+        return profile || null;
+      } catch (e) {
+        if (!allowLocalProfileFallback) throw e;
+        try {
+          const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
+          return Array.isArray(profiles) && profiles.length > 0 ? profiles[0] : null;
+        } catch {
+          return null;
         }
-      } catch {
-        // fall back to local cached profile
       }
-      if (!allowLocalProfileFallback) return null;
-      try {
-        const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
-        return Array.isArray(profiles) && profiles.length > 0 ? profiles[0] : null;
-      } catch {
-        return null;
-      }
+    },
+    onError: (e) => {
+      toastFriendlyError(e, "Couldn't load your profile");
     },
   });
 
