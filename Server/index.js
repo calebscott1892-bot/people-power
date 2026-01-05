@@ -1612,7 +1612,13 @@ function safeParseDatabaseUrl(raw) {
   }
 }
 
-const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+const nodeEnv = String(process.env.NODE_ENV || '').toLowerCase();
+const isHosted =
+  String(process.env.RENDER || '').toLowerCase() === 'true' ||
+  String(process.env.RENDER || '') === '1' ||
+  !!process.env.RENDER_SERVICE_ID ||
+  !!process.env.RENDER_EXTERNAL_URL;
+const isProd = nodeEnv === 'production' || isHosted;
 // Render Postgres generally requires SSL. Also honor sslmode=require in DATABASE_URL.
 const parsedDbUrl = safeParseDatabaseUrl(DATABASE_URL);
 const sslMode = parsedDbUrl?.sslmode ? String(parsedDbUrl.sslmode).toLowerCase() : '';
@@ -1631,6 +1637,28 @@ function storageStartupLine({ mode, databaseHost }) {
   const m = String(mode || 'unknown');
   const host = databaseHost != null ? String(databaseHost) : 'none';
   return `[storage] mode=${m} database_host=${host}`;
+}
+
+function getDbDiagnostic(err) {
+  if (!err || typeof err !== 'object') return null;
+  const code = typeof err.code === 'string' ? err.code : null;
+  const table = typeof err.table === 'string' ? err.table : null;
+  const column = typeof err.column === 'string' ? err.column : null;
+  const constraint = typeof err.constraint === 'string' ? err.constraint : null;
+  const routine = typeof err.routine === 'string' ? err.routine : null;
+  if (!code && !table && !column && !constraint && !routine) return null;
+  return { code, table, column, constraint, routine };
+}
+
+function formatDbDiagnostic(diag) {
+  if (!diag) return '';
+  const parts = [];
+  if (diag.code) parts.push(`db_code=${diag.code}`);
+  if (diag.table) parts.push(`table=${diag.table}`);
+  if (diag.column) parts.push(`column=${diag.column}`);
+  if (diag.constraint) parts.push(`constraint=${diag.constraint}`);
+  if (diag.routine) parts.push(`routine=${diag.routine}`);
+  return parts.join(' ');
 }
 
 function createPgPool({ useSsl }) {
@@ -7085,10 +7113,13 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       });
     }
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to check platform acknowledgment');
+    const requestId = request?.id ? String(request.id) : null;
+    const diag = formatDbDiagnostic(getDbDiagnostic(e));
+    fastify.log.error({ err: e, request_id: requestId }, 'Failed to check platform acknowledgment');
     return reply.code(500).send({
       error: 'Failed to validate acknowledgment',
-      request_id: request?.id ? String(request.id) : null,
+      message: diag || undefined,
+      request_id: requestId,
     });
   }
 
@@ -7241,9 +7272,10 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     const result = await pool.query(insert.text, insert.values);
     const row = result.rows?.[0] || null;
     if (!row) {
+      const requestId = request?.id ? String(request.id) : null;
       return reply.code(500).send({
         error: 'Failed to create movement',
-        request_id: request?.id ? String(request.id) : null,
+        request_id: requestId,
       });
     }
     fastify.log.info(
@@ -7269,12 +7301,15 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
     return reply.code(201).send(enriched);
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to create movement');
+    const requestId = request?.id ? String(request.id) : null;
+    const diag = formatDbDiagnostic(getDbDiagnostic(e));
+    fastify.log.error({ err: e, request_id: requestId }, 'Failed to create movement');
 
     if (isProd) {
       return reply.code(500).send({
         error: 'Failed to create movement',
-        request_id: request?.id ? String(request.id) : null,
+        message: diag || undefined,
+        request_id: requestId,
       });
     }
 
@@ -9918,8 +9953,14 @@ async function handleGetMyProfile(request, reply) {
     const payload = { profile };
     return reply.send(includeMeta ? { ...payload, meta } : payload);
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to load user profile');
-    return reply.code(500).send({ error: 'Failed to load profile' });
+    const requestId = request?.id ? String(request.id) : null;
+    const diag = formatDbDiagnostic(getDbDiagnostic(e));
+    fastify.log.error({ err: e, request_id: requestId }, 'Failed to load user profile');
+    return reply.code(500).send({
+      error: 'Failed to load profile',
+      message: diag || undefined,
+      request_id: requestId,
+    });
   }
 }
 
@@ -10224,8 +10265,14 @@ async function handlePostMyProfile(request, reply) {
     );
     return reply.send({ profile: updated });
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to upsert user profile');
-    return reply.code(500).send({ error: 'Failed to update profile' });
+    const requestId = request?.id ? String(request.id) : null;
+    const diag = formatDbDiagnostic(getDbDiagnostic(e));
+    fastify.log.error({ err: e, request_id: requestId }, 'Failed to upsert user profile');
+    return reply.code(500).send({
+      error: 'Failed to update profile',
+      message: diag || undefined,
+      request_id: requestId,
+    });
   }
 }
 
