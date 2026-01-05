@@ -1951,14 +1951,12 @@ async function ensureVotesTable() {
   `);
 }
 
-// Dev schema bootstrap:
+// Schema bootstrap:
 // Some environments start with an empty database (no migrations applied).
-// We auto-create the minimal `movements` table in dev so core feeds work and
-// don't silently fall back due to missing relations (42P01).
-// Production should still fail loudly on schema issues.
+// We auto-create the minimal `movements` table so core feeds and creation work.
+// This keeps Postgres as the source of truth (no in-memory persistence).
 async function ensureMovementsTable() {
   if (!hasDatabaseUrl) return;
-  if (isProd) return;
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS movements (
