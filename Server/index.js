@@ -1581,6 +1581,24 @@ function createPgPool({ useSsl }) {
 
 let pool = createPgPool({ useSsl: shouldUseSsl });
 
+async function poolQueryOnce(config) {
+  return pool.query(config);
+}
+
+async function poolQueryWithRetry(config) {
+  try {
+    return await poolQueryOnce(config);
+  } catch (e) {
+    // Connection pools can become stale (deploys, idle timeouts). Recreate and retry once.
+    try {
+      pool = createPgPool({ useSsl: shouldUseSsl });
+    } catch {
+      // ignore
+    }
+    return poolQueryOnce(config);
+  }
+}
+
 async function checkDatabaseConnection() {
   if (!hasDatabaseUrl) {
     if (isProd) {
@@ -4112,7 +4130,9 @@ fastify.get('/public-keys/:email', async (request, reply) => {
   }
 });
 
-// NOTE: /movements is hardened to never 500 due to query params; on error it falls back to a safe test movement.
+// NOTE: /movements is hardened to never 500 due to query params.
+// In production, DB failures must be surfaced (no silent memory fallback), otherwise
+// engagement counts can appear "stuck" across the app.
 fastify.get('/movements', async (request, reply) => {
   try {
     function parseIntParam(value, fallback, { min = 0, max = 500 } = {}) {
@@ -4244,9 +4264,8 @@ fastify.get('/movements', async (request, reply) => {
         whereClause = `WHERE LOWER(COALESCE(m.author_email, m.creator_email, m.created_by_email, '')) = LOWER($${values.length})`;
       }
 
-      const result = await pool.query(
-        {
-          text: `SELECT
+      const result = await poolQueryWithRetry({
+        text: `SELECT
            m.*,
            COALESCE(v.upvotes, 0)::int AS upvotes,
            COALESCE(v.upvotes, 0)::int AS boosts_count,
@@ -4264,9 +4283,8 @@ fastify.get('/movements', async (request, reply) => {
          ${whereClause}
          ORDER BY m.created_at DESC
          LIMIT 500`,
-          values,
-        }
-      );
+        values,
+      });
 
       const rows = Array.isArray(result.rows) ? result.rows : [];
       const seen = new Set(rows.map((r) => String(r?.id)));
@@ -4289,6 +4307,10 @@ fastify.get('/movements', async (request, reply) => {
       const enriched = await attachCreatorProfilesToMovements(page);
       return reply.send(enriched.map((m) => projectRecord(m, fields)));
     } catch (e) {
+      if (isProd) {
+        fastify.log.error({ err: e }, 'DB query failed for GET /movements');
+        return reply.code(500).send({ error: 'Failed to load movements' });
+      }
       fastify.log.warn({ err: e }, 'DB query failed for GET /movements; using memory fallback');
       const merged = memoryMovements
         .map((m) => {
@@ -4314,7 +4336,10 @@ fastify.get('/movements', async (request, reply) => {
       return reply.send(enriched.map((m) => projectRecord(m, fields)));
     }
   } catch (err) {
-    fastify.log.error({ err }, 'GET /movements failed; returning fallback');
+    fastify.log.error({ err }, 'GET /movements failed');
+    if (isProd) {
+      return reply.code(500).send({ error: 'Failed to load movements' });
+    }
     return reply.send({
       ok: true,
       movements: [
@@ -4326,7 +4351,7 @@ fastify.get('/movements', async (request, reply) => {
           created_at: new Date().toISOString(),
           momentum_score: 0,
           upvotes: 0,
-            boosts_count: 0,
+          boosts_count: 0,
           downvotes: 0,
           score: 0,
         },
