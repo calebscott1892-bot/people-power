@@ -1571,10 +1571,15 @@ const shouldUseSsl =
   sslMode === 'verify-ca' ||
   sslMode === 'verify-full' ||
   hostLooksRemote;
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ...(shouldUseSsl ? { ssl: { rejectUnauthorized: false } } : null),
-});
+
+function createPgPool({ useSsl }) {
+  return new Pool({
+    connectionString: DATABASE_URL,
+    ...(useSsl ? { ssl: { rejectUnauthorized: false } } : null),
+  });
+}
+
+let pool = createPgPool({ useSsl: shouldUseSsl });
 
 async function checkDatabaseConnection() {
   if (!hasDatabaseUrl) {
@@ -1600,6 +1605,31 @@ async function checkDatabaseConnection() {
   } catch (err) {
     const message = err?.message ? String(err.message) : 'unknown error';
     const code = err?.code ? String(err.code) : 'unknown';
+
+    // DEV resiliency: some providers require SSL even when the connection string
+    // can't be parsed by URL() (e.g., unescaped special chars in passwords).
+    // If the server says SSL/TLS is required, retry once with SSL enabled.
+    if (!isProd && !shouldUseSsl && /ssl|tls/i.test(message)) {
+      try {
+        console.warn('[storage] DEV: Postgres requires SSL; retrying with SSL enabled');
+        pool = createPgPool({ useSsl: true });
+        await pool.query('SELECT 1');
+        storageMode = 'postgres';
+        hasDatabaseUrl = true;
+        const parsed = safeParseDatabaseUrl(DATABASE_URL);
+        const host = parsed?.host ? String(parsed.host) : 'unknown';
+        const dbName = parsed?.dbName ? String(parsed.dbName) : 'unknown';
+        console.info('[storage] Postgres connection ok (SSL retry)');
+        console.info(`[storage] mode=postgres host=${host} db=${dbName}`);
+        console.info('[storage] mode=postgres');
+        return;
+      } catch (retryErr) {
+        const retryMessage = retryErr?.message ? String(retryErr.message) : 'unknown error';
+        const retryCode = retryErr?.code ? String(retryErr.code) : 'unknown';
+        console.error(`[storage] DEV: Postgres SSL retry failed: ${retryCode} ${retryMessage}`);
+      }
+    }
+
     if (isProd) {
       console.error(`[storage] FATAL: Postgres connection failed; aborting startup: ${code} ${message}`);
       process.exit(1);

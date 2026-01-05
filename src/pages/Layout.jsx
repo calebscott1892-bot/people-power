@@ -216,7 +216,7 @@ function LayoutContent({ children }) {
         <div className="w-full border-b border-slate-200 bg-slate-900 text-white px-4 sm:px-6 py-2">
           <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
             <Loader2 className="w-4 h-4 animate-spin" />
-            <span>You're offline. Browsing may use saved data — reconnecting…</span>
+            <span>You&apos;re offline. Browsing may use saved data — reconnecting…</span>
           </div>
         </div>
       ) : backendStatus === 'degraded' ? (

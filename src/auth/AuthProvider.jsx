@@ -10,6 +10,7 @@ import { getStaffRole } from '@/utils/staff';
 import { configureAuthFetch, installAuthFetch } from '@/auth/authFetch';
 
 const AuthContext = createContext(null);
+const AUTH_DISABLED_MESSAGE = 'Sign-in is temporarily unavailable; configuration error. Please contact support.';
 
 export function AuthProvider({ children }) {
   const navigate = useNavigate();
@@ -20,7 +21,6 @@ export function AuthProvider({ children }) {
   const [serverStaffRole, setServerStaffRole] = useState(null);
   const lastKeyPublishRef = useRef({ accessToken: null, email: null });
   const sessionRef = useRef(null);
-  const authDisabledMessage = 'Sign-in is temporarily unavailable; configuration error. Please contact support.';
   const staffRole = useMemo(() => {
     const serverRole = String(serverStaffRole || '').trim().toLowerCase();
     if (serverRole === 'admin' || serverRole === 'moderator') return serverRole;
@@ -89,7 +89,7 @@ export function AuthProvider({ children }) {
       mounted = false;
       sub?.subscription?.unsubscribe?.();
     };
-  }, []);
+  }, [applySession]);
 
   // Keep React Query caches in sync with auth state.
   useEffect(() => {
@@ -184,9 +184,9 @@ export function AuthProvider({ children }) {
     };
   }, [session?.access_token, user?.email]);
 
-  const signIn = async (email, password) => {
+  const signIn = useCallback(async (email, password) => {
     const supabase = getSupabaseClient();
-    if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
+    if (supabaseConfigError || !supabase) throw new Error(AUTH_DISABLED_MESSAGE);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
       const msg = String(error?.message || 'Sign-in failed');
@@ -201,11 +201,11 @@ export function AuthProvider({ children }) {
     // Ensure UI updates immediately even before onAuthStateChange fires.
     if (data?.session) applySession(data.session);
     return { status: 'signed_in', session: data?.session ?? null, user: data?.user ?? null };
-  };
+  }, [applySession]);
 
-  const signUp = async (email, password, options = {}) => {
+  const signUp = useCallback(async (email, password, options = {}) => {
     const supabase = getSupabaseClient();
-    if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
+    if (supabaseConfigError || !supabase) throw new Error(AUTH_DISABLED_MESSAGE);
     const emailRedirectTo = options?.emailRedirectTo ? String(options.emailRedirectTo) : null;
     const { data, error } = await supabase.auth.signUp({
       email,
@@ -229,11 +229,11 @@ export function AuthProvider({ children }) {
       user: data?.user ?? null,
       confirmationSentAt,
     };
-  };
+  }, [applySession]);
 
-  const resendConfirmationEmail = async (email, options = {}) => {
+  const resendConfirmationEmail = useCallback(async (email, options = {}) => {
     const supabase = getSupabaseClient();
-    if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
+    if (supabaseConfigError || !supabase) throw new Error(AUTH_DISABLED_MESSAGE);
     const toEmail = String(email || '').trim();
     if (!toEmail) throw new Error('Email is required');
 
@@ -251,11 +251,11 @@ export function AuthProvider({ children }) {
     });
     if (error) throw error;
     return { ok: true };
-  };
+  }, []);
 
-  const resetPasswordForEmail = async (email, options = {}) => {
+  const resetPasswordForEmail = useCallback(async (email, options = {}) => {
     const supabase = getSupabaseClient();
-    if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
+    if (supabaseConfigError || !supabase) throw new Error(AUTH_DISABLED_MESSAGE);
     const toEmail = String(email || '').trim();
     if (!toEmail) throw new Error('Email is required');
     const redirectTo = options?.redirectTo ? String(options.redirectTo) : null;
@@ -265,12 +265,12 @@ export function AuthProvider({ children }) {
     );
     if (error) throw error;
     return { ok: true };
-  };
+  }, []);
 
   // Logout: calls Supabase signOut and clears local auth state.
   const logout = useCallback(async () => {
     const supabase = getSupabaseClient();
-    if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
+    if (supabaseConfigError || !supabase) throw new Error(AUTH_DISABLED_MESSAGE);
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
     setSession(null);
@@ -282,7 +282,7 @@ export function AuthProvider({ children }) {
     } catch {
       // ignore
     }
-  }, [authDisabledMessage]);
+  }, [queryClient]);
 
   const value = useMemo(
     () => ({
@@ -302,10 +302,25 @@ export function AuthProvider({ children }) {
       isEmailVerified,
       isAuthReady,
       isSupabaseConfigured: !supabaseConfigError,
-      authErrorMessage: supabaseConfigError ? authDisabledMessage : null,
+      authErrorMessage: supabaseConfigError ? AUTH_DISABLED_MESSAGE : null,
       logout,
     }),
-    [session, user, loading, staffRole, isAdmin, isStaff, emailConfirmedAt, isEmailVerified, isAuthReady, logout]
+    [
+      session,
+      user,
+      loading,
+      signIn,
+      signUp,
+      resendConfirmationEmail,
+      resetPasswordForEmail,
+      logout,
+      staffRole,
+      isAdmin,
+      isStaff,
+      emailConfirmedAt,
+      isEmailVerified,
+      isAuthReady,
+    ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

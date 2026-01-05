@@ -12,7 +12,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signIn, signUp, resendConfirmationEmail, resetPasswordForEmail, isSupabaseConfigured, authErrorMessage } = useAuth();
+  const { signIn, signUp, resendConfirmationEmail, resetPasswordForEmail, logout, isSupabaseConfigured, authErrorMessage } = useAuth();
 
   // Current auth UX flow summary (frontend):
   // - Signup calls Supabase signUp.
@@ -25,6 +25,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
 
   const [pendingEmail, setPendingEmail] = useState('');
+  const [pendingConfirmationSentAt, setPendingConfirmationSentAt] = useState(null);
   const [forgotEmail, setForgotEmail] = useState('');
   const [checkEmailReason, setCheckEmailReason] = useState('signup_sent'); // 'signup_sent' | 'login_needs_verify'
 
@@ -106,13 +107,24 @@ export default function Login() {
         );
 
         if (result?.status === 'signed_in') {
-          navigate('/welcome', { replace: true, state: { signedInJustNow: true } });
+          // If Supabase returns a session immediately on signup, it usually means
+          // email confirmations are disabled in the Supabase project settings.
+          // This product requires verification emails to be sent.
+          try {
+            await logout();
+          } catch {
+            // ignore
+          }
+          setStatus(
+            'Email verification is currently disabled. Please contact support — we require a verification email before accounts can be used.'
+          );
           return;
         }
 
         // Confirmation required: show a dedicated screen.
         const emailValue = String(email || '').trim();
         setPendingEmail(emailValue);
+        setPendingConfirmationSentAt(result?.confirmationSentAt || null);
         setCheckEmailReason('signup_sent');
         setMode('check_email');
         return;
@@ -195,6 +207,11 @@ export default function Login() {
                     <div className="text-sm font-semibold text-slate-800">
                       We’ve sent a verification link to <span className="font-black">{pendingEmail || email || 'your email'}</span>.
                     </div>
+                    {pendingConfirmationSentAt ? (
+                      <div className="text-xs text-slate-500 font-semibold mt-2">
+                        Sent at {new Date(pendingConfirmationSentAt).toLocaleString()}.
+                      </div>
+                    ) : null}
                     <div className="text-xs text-slate-600 font-semibold mt-2">
                       Check your inbox (and spam folder), click the link to verify your account, then sign in.
                     </div>
