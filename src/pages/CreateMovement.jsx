@@ -389,12 +389,8 @@ export default function CreateMovement() {
       setSubmitBanner({ type: 'success', message: successMessage });
       toast.success(successMessage);
 
-      const createdId = created?.id ?? created?._id;
-      if (createdId) {
-        navigate(`/movement/${encodeURIComponent(String(createdId))}`);
-      } else {
-        navigate('/');
-      }
+      // Do not auto-navigate after creation. Show the congratulations screen
+      // and let the user choose what to do next.
     } catch (err) {
       logError(err, 'Failed to create movement');
       const rawMessage = err?.message ? String(err.message) : '';
@@ -452,10 +448,13 @@ export default function CreateMovement() {
               </div>
             )}
 
-            <BackButton
+            <button
+              type="button"
+              onClick={() => navigate('/')}
               className="w-full inline-flex items-center justify-center px-4 py-3 rounded-2xl border border-slate-200 bg-white text-slate-900 font-black hover:bg-slate-50"
-              iconClassName="hidden"
-            />
+            >
+              Continue to home
+            </button>
           </div>
         </div>
       </div>
