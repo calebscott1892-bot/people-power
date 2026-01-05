@@ -90,7 +90,7 @@ export default function AgeVerification({ onVerify, minAge = 13 }) {
                 setError('');
               }}
               max={new Date().toISOString().split('T')[0]}
-              className="h-12 rounded-xl border-3"
+              className="h-12 rounded-xl border-2 border-slate-300 bg-slate-50 text-slate-900"
             />
           </div>
 

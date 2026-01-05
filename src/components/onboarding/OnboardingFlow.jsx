@@ -140,11 +140,18 @@ export default function OnboardingFlow({ user, onComplete }) {
   useEffect(() => {
     if (!onboarding) return;
     const persistedStep = typeof onboarding?.current_step === 'number' ? onboarding.current_step : 0;
-    const nextStep = Math.max(0, Math.min(persistedStep, steps.length - 1));
+
+    // Hard gate: users must complete the 4 safety/legal acknowledgements before
+    // they can continue the onboarding tour (even if they previously advanced).
+    const legalIndex = steps.findIndex((s) => s?.id === 'legal');
+    const mustCompleteLegal = !(legalAccepted && platformAckAccepted && ageConfirmed && safetyAckAccepted);
+    const desiredStep = mustCompleteLegal && legalIndex >= 0 ? legalIndex : persistedStep;
+
+    const nextStep = Math.max(0, Math.min(desiredStep, steps.length - 1));
     setCurrentStep(nextStep);
     setSelectedInterests(Array.isArray(onboarding?.interests) ? onboarding.interests : []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onboarding]);
+  }, [onboarding, legalAccepted, platformAckAccepted, ageConfirmed, safetyAckAccepted]);
 
   const updateOnboardingMutation = useMutation({
     mutationFn: async (updates) => {
@@ -166,6 +173,11 @@ export default function OnboardingFlow({ user, onComplete }) {
   });
 
   const completeOnboarding = () => {
+    const mustCompleteLegal = !(legalAccepted && platformAckAccepted && ageConfirmed && safetyAckAccepted);
+    if (mustCompleteLegal) {
+      toast.error('Please complete the safety and legal acknowledgements before continuing.');
+      return;
+    }
     updateOnboardingMutation.mutate({
       completed: true,
       interests: selectedInterests,
@@ -228,6 +240,12 @@ export default function OnboardingFlow({ user, onComplete }) {
   ];
 
   const nextStep = () => {
+    const isLegalStep = steps[currentStep]?.id === 'legal';
+    const mustCompleteLegal = !(legalAccepted && platformAckAccepted && ageConfirmed && safetyAckAccepted);
+    if (isLegalStep && mustCompleteLegal) {
+      toast.error('Please accept all four acknowledgements to continue.');
+      return;
+    }
     if (currentStep < steps.length - 1) {
       const next = currentStep + 1;
       setCurrentStep(next);

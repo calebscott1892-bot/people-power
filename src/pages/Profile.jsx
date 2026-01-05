@@ -88,13 +88,6 @@ export default function Profile() {
     enabled: !!user?.email && !!accessToken
   });
 
-  const softTrustMarkers = useMemo(() => {
-    const movementsPosted = Array.isArray(myMovements) ? myMovements.length : 0;
-    const boostsEarned = computeBoostsEarned(myMovements);
-    const joinedAt = user?.created_date || userProfile?.created_at || null;
-    return getSoftTrustMarkers({ movementsPosted, boostsEarned, joinedAt });
-  }, [myMovements, user?.created_date, userProfile?.created_at]);
-
   const {
     data: userProfile,
     isError: userProfileIsError,
@@ -136,6 +129,13 @@ export default function Profile() {
     },
     enabled: !!user?.email && (!!accessToken || allowLocalProfileFallback)
   });
+
+  const softTrustMarkers = useMemo(() => {
+    const movementsPosted = Array.isArray(myMovements) ? myMovements.length : 0;
+    const boostsEarned = computeBoostsEarned(myMovements);
+    const joinedAt = user?.created_date || userProfile?.created_at || null;
+    return getSoftTrustMarkers({ movementsPosted, boostsEarned, joinedAt });
+  }, [myMovements, user?.created_date, userProfile?.created_at]);
 
   useEffect(() => {
     if (!userProfileIsError) return;
