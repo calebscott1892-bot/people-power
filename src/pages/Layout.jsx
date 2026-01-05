@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, Flag, LogOut, HelpCircle, Loader2 } from 'lucide-react';
+import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -19,6 +19,7 @@ import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
 import IntroScreen from '@/components/home/IntroScreen';
 import UpdateBanner from '@/components/updates/UpdateBanner';
+import UpdatesPanel from '@/components/updates/UpdatesPanel';
 import TutorialModal from '@/components/tutorial/TutorialModal';
 import FeedbackBugDialog from '@/components/shared/FeedbackBugDialog';
 
@@ -79,6 +80,7 @@ function LayoutContent({ children }) {
   const queryClient = useQueryClient();
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [updatesOpen, setUpdatesOpen] = useState(false);
   const [hideTutorialPromptThisSession, setHideTutorialPromptThisSession] = useState(false);
   const userId = authUser?.id || authUser?.email || null;
   const { enabled: multiLanguageEnabled } = useFeatureFlag('multi_language', userId);
@@ -250,6 +252,21 @@ function LayoutContent({ children }) {
         />
       ) : null}
 
+      {/* Always-available update reports */}
+      <UpdatesPanel
+        open={updatesOpen}
+        onOpenChange={setUpdatesOpen}
+        profileEmail={profileEmail}
+        accessToken={accessToken}
+        onMarkedSeen={(latestVersion) => {
+          if (!profileEmail) return;
+          queryClient.setQueryData(['userProfile', profileEmail], (prev) => {
+            if (!prev || typeof prev !== 'object') return prev;
+            return { ...prev, last_seen_update_version: latestVersion };
+          });
+        }}
+      />
+
       {showIntroAgain ? (
         <IntroScreen onContinue={() => setShowIntroAgain(false)} isExiting={false} />
       ) : null}
@@ -303,14 +320,16 @@ function LayoutContent({ children }) {
                     <span className="hidden md:inline text-xs font-bold">Help</span>
                   </button>
                 ) : null}
-                <Link
-                  to={createPageUrl('ReportCenter')}
+                <button
+                  type="button"
+                  onClick={() => setUpdatesOpen(true)}
                   className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
-                  aria-label="Report a problem"
+                  aria-label="View update reports"
+                  title="What’s new"
                 >
-                  <Flag className="w-4 h-4" />
-                  <span className="hidden md:inline text-xs font-bold">Report</span>
-                </Link>
+                  <Bell className="w-4 h-4" />
+                  <span className="hidden md:inline text-xs font-bold">Updates</span>
+                </button>
                 {authUser ? (
                   <button
                     type="button"
