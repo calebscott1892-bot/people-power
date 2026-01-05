@@ -2,6 +2,7 @@ import { fetchMovementLocks } from '@/api/movementLocksClient';
 import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { useNavigate } from 'react-router-dom';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
 import { Sparkles, Upload, X, Zap } from 'lucide-react';
@@ -75,6 +76,8 @@ export default function CreateMovement() {
   const [selectedTags, setSelectedTags] = useState([]);
   const [showTagOptions, setShowTagOptions] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const [visibility, setVisibility] = useState('public');
 
   const [locationCity, setLocationCity] = useState('');
   const [locationCountry, setLocationCountry] = useState('');
@@ -242,6 +245,7 @@ export default function CreateMovement() {
         summary: descriptionFallback || undefined,
         description_html: descriptionHtmlPayload || undefined,
         tags,
+        visibility: String(visibility || 'public').trim().toLowerCase() || 'public',
         author_email: user?.email ?? null,
         location_city: String(locationCity || '').trim() || undefined,
         location_country: String(locationCountry || '').trim() || undefined,
@@ -303,7 +307,7 @@ export default function CreateMovement() {
           email: user?.email ?? null,
           action: 'movement_create',
           contextId: 'global',
-          accessToken,
+            accessToken,
         });
         if (!rateCheck?.ok) {
           const wait = rateCheck?.retryAfterMs ? ` Try again in ${formatWaitMs(rateCheck.retryAfterMs)}.` : '';
@@ -318,7 +322,7 @@ export default function CreateMovement() {
 
       // Anti-mob governance: cap simultaneous leadership roles.
       try {
-        const cap = await checkLeadershipCap(user?.email ?? null, 'movement_creator');
+            const cap = await checkLeadershipCap(user?.email ?? null, 'movement_creator', { accessToken });
         if (cap && cap.can_create === false) {
           const msg = cap.message || 'You have reached the leadership role cap.';
           setSubmitBanner({ type: 'error', message: msg });
@@ -362,7 +366,7 @@ export default function CreateMovement() {
       try {
         const createdId = created?.id ?? created?._id;
         if (createdId && user?.email) {
-          await registerLeadershipRole(String(user.email), 'movement_creator', String(createdId));
+          await registerLeadershipRole(String(user.email), 'movement_creator', String(createdId), { accessToken });
         }
       } catch {
         // ignore
@@ -554,7 +558,7 @@ export default function CreateMovement() {
                           await acceptPlatformAcknowledgment({ accessToken, userEmail: user?.email ?? null });
                         } catch (err) {
                           setAckAccepted(false);
-                          toast.error(err?.message || 'Failed to record acknowledgment');
+                          toastFriendlyError(err, 'Failed to record acknowledgment');
                         }
                       }
                     }}
@@ -599,6 +603,57 @@ export default function CreateMovement() {
               {fieldErrors.description ? (
                 <div className="text-sm font-semibold text-rose-700">{fieldErrors.description}</div>
               ) : null}
+            </div>
+
+            {/* Privacy */}
+            <div className="space-y-2">
+              <label className="block text-sm font-bold text-slate-700">Privacy</label>
+              <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50 space-y-3">
+                <label className="flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="movement_visibility"
+                    value="public"
+                    checked={visibility === 'public'}
+                    onChange={() => setVisibility('public')}
+                    className="mt-1"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-sm font-black text-slate-900">Public</div>
+                    <div className="text-xs text-slate-600 font-semibold">Visible to everyone.</div>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="movement_visibility"
+                    value="community"
+                    checked={visibility === 'community'}
+                    onChange={() => setVisibility('community')}
+                    className="mt-1"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-sm font-black text-slate-900">Community</div>
+                    <div className="text-xs text-slate-600 font-semibold">Visible to followers.</div>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="movement_visibility"
+                    value="private"
+                    checked={visibility === 'private'}
+                    onChange={() => setVisibility('private')}
+                    className="mt-1"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-sm font-black text-slate-900">Private</div>
+                    <div className="text-xs text-slate-600 font-semibold">Visible only to you (draft).</div>
+                  </div>
+                </label>
+              </div>
             </div>
 
             {/* Location */}
@@ -882,7 +937,7 @@ export default function CreateMovement() {
                                   )
                                 );
                               } catch (err) {
-                                toast.error(err?.message || 'Failed to upload evidence');
+                                toastFriendlyError(err, 'Failed to upload evidence');
                               }
                             }}
                             className="text-sm font-semibold text-slate-700"

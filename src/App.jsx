@@ -10,7 +10,11 @@ import { BackNavProvider } from '@/components/shared/BackNavProvider';
 
 const Home = React.lazy(() => import('@/pages/Home'));
 const Login = React.lazy(() => import('@/pages/Login'));
+const ResetPassword = React.lazy(() => import('@/pages/ResetPassword'));
+const EmailVerified = React.lazy(() => import('@/pages/EmailVerified'));
+const Welcome = React.lazy(() => import('@/pages/Welcome'));
 const Profile = React.lazy(() => import('@/pages/Profile'));
+const Settings = React.lazy(() => import('@/pages/Settings'));
 const CreateMovement = React.lazy(() => import('@/pages/CreateMovement'));
 const MovementDetails = React.lazy(() => import('@/pages/MovementDetails'));
 const MessagesComingSoon = React.lazy(() => import('@/pages/MessagesComingSoon'));
@@ -101,6 +105,8 @@ export default function App() {
         <BackNavProvider>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/email-verified" element={<EmailVerified />} />
 
             <Route element={<Layout />}>
               {/* Public legal pages */}
@@ -126,7 +132,9 @@ export default function App() {
 
               {/* Protected app routes */}
               <Route element={<RequireAuth />}>
+                <Route path="/welcome" element={<Welcome />} />
                 <Route path="/profile" element={<Profile />} />
+                <Route path="/settings" element={<Settings />} />
                 <Route path="/create-movement" element={<CreateMovement />} />
                 <Route path="/createmovement" element={<CreateMovement />} />
                 <Route path="/CreateMovement" element={<CreateMovement />} />

@@ -4,6 +4,7 @@ import { Scale, Upload, X } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { entities } from '@/api/appClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { createIncident } from '@/api/incidentsClient';
@@ -72,7 +73,7 @@ export default function AppealForm({ moderationAction, onClose }) {
       onClose();
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to submit appeal'));
+      toastFriendlyError(e, 'Failed to submit appeal');
     },
   });
 

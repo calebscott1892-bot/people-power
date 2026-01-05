@@ -1,18 +1,96 @@
-import React, { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
+
 import { useAuth } from '@/auth/AuthProvider';
 import BackButton from '@/components/shared/BackButton';
+import { toastFriendlyError } from '@/utils/toastErrors';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signIn, signUp, isSupabaseConfigured, authErrorMessage } = useAuth();
-  const [mode, setMode] = useState('login'); // 'login' | 'signup'
+  const { signIn, signUp, resendConfirmationEmail, resetPasswordForEmail, isSupabaseConfigured, authErrorMessage } = useAuth();
+
+  // Current auth UX flow summary (frontend):
+  // - Signup calls Supabase signUp.
+  //   - If Supabase returns a session => user is signed in immediately.
+  //   - If Supabase requires email confirmation => no session is returned; we show a dedicated "Check your email" screen.
+  // - Login calls Supabase signInWithPassword.
+  // - Forgot password calls Supabase resetPasswordForEmail with redirect to /reset-password.
+  const [mode, setMode] = useState('login'); // 'login' | 'signup' | 'check_email' | 'forgot'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
+  const [pendingEmail, setPendingEmail] = useState('');
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [checkEmailReason, setCheckEmailReason] = useState('signup_sent'); // 'signup_sent' | 'login_needs_verify'
+
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
+
+  const redirectToEmailVerified = useMemo(() => {
+    return typeof window !== 'undefined' ? `${window.location.origin}/email-verified` : undefined;
+  }, []);
+
+  const redirectToResetPassword = useMemo(() => {
+    return typeof window !== 'undefined' ? `${window.location.origin}/reset-password` : undefined;
+  }, []);
+
+  useEffect(() => {
+    const reason = location.state?.reason;
+    const message = location.state?.message;
+    if (reason === 'session_expired') {
+      setStatus(String(message || 'Your session has expired. Please sign in again.'));
+    }
+
+    if (reason === 'password_reset') {
+      const text = String(message || 'Password updated. Please sign in.');
+      toast.success(text);
+    }
+  }, [location.state]);
+
+  useEffect(() => {
+    if (mode !== 'forgot') return;
+    setForgotEmail((prev) => prev || email);
+  }, [email, mode]);
+
+  const toFromRoute = () => {
+    const rawFrom = location.state?.from;
+    const to =
+      typeof rawFrom === 'string'
+        ? rawFrom
+        : rawFrom?.pathname
+          ? `${rawFrom.pathname}${rawFrom.search ?? ''}${rawFrom.hash ?? ''}`
+          : '/';
+    return to || '/';
+  };
+
+  const submitForgotPassword = async (e) => {
+    e.preventDefault();
+    setStatus('');
+    if (!isSupabaseConfigured) return;
+
+    const toEmail = String(forgotEmail || '').trim();
+    if (!toEmail) {
+      toast.error('Enter your email address');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await resetPasswordForEmail(toEmail, redirectToResetPassword ? { redirectTo: redirectToResetPassword } : undefined);
+      toast.success("If an account exists for this email, we've sent password reset instructions.");
+      setMode('login');
+    } catch (err) {
+      toastFriendlyError(err, "Couldn't send reset email");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -21,98 +99,218 @@ export default function Login() {
 
     try {
       if (mode === 'signup') {
-        await signUp(email, password);
-        setStatus('Signup complete. If email confirmation is enabled, check your inbox.');
+        const result = await signUp(
+          String(email || '').trim(),
+          String(password || ''),
+          redirectToEmailVerified ? { emailRedirectTo: redirectToEmailVerified } : undefined
+        );
+
+        if (result?.status === 'signed_in') {
+          navigate('/welcome', { replace: true, state: { signedInJustNow: true } });
+          return;
+        }
+
+        // Confirmation required: show a dedicated screen.
+        const emailValue = String(email || '').trim();
+        setPendingEmail(emailValue);
+        setCheckEmailReason('signup_sent');
+        setMode('check_email');
+        return;
       } else {
-        await signIn(email, password);
-        const rawFrom = location.state?.from;
-        const to =
-          typeof rawFrom === 'string'
-            ? rawFrom
-            : rawFrom?.pathname
-              ? `${rawFrom.pathname}${rawFrom.search ?? ''}${rawFrom.hash ?? ''}`
-              : '/';
-        navigate(to, { replace: true });
+        await signIn(String(email || '').trim(), String(password || ''));
+        // Clear success state: take them into the app, then let them continue.
+        navigate('/welcome', { replace: true, state: { from: toFromRoute(), signedInJustNow: true } });
       }
     } catch (err) {
+      // Special case: Supabase sometimes blocks sign-in until email is confirmed.
+      // Route users into the same "check your email" UX with a resend option.
+      if (err?.code === 'EMAIL_NOT_CONFIRMED') {
+        const emailValue = String(email || '').trim();
+        setPendingEmail(emailValue);
+        setCheckEmailReason('login_needs_verify');
+        setMode('check_email');
+        setStatus('');
+        return;
+      }
+
       setStatus(err?.message ?? 'Auth error');
     } finally {
       setLoading(false);
     }
   };
 
+  const submitResend = async () => {
+    if (!isSupabaseConfigured) return;
+    const toEmail = String(pendingEmail || email || '').trim();
+    if (!toEmail) {
+      toast.error('Enter your email address');
+      return;
+    }
+
+    setResendLoading(true);
+    try {
+      await resendConfirmationEmail(toEmail, redirectToEmailVerified ? { emailRedirectTo: redirectToEmailVerified } : undefined);
+      toast.success("If an account exists for this email, we've re-sent the verification link.");
+    } catch (err) {
+      toastFriendlyError(err, "Couldn't resend verification email");
+    } finally {
+      setResendLoading(false);
+    }
+  };
+
+  const headerTitle = mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Forgot password' : 'Sign in';
+  const headerDesc =
+    mode === 'signup'
+      ? 'When you create an account, we’ll also email you to verify your address.'
+      : mode === 'forgot'
+        ? 'We’ll email you a password reset link.'
+        : 'Sign in to continue.';
+
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
-      <div style={{ width: '100%', maxWidth: 420, border: '2px solid #e2e8f0', borderRadius: 18, padding: 20 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 8 }}>
-          {mode === 'signup' ? 'Create account' : 'Login'}
-        </h1>
-        <p style={{ marginBottom: 16, color: '#64748b', fontWeight: 600 }}>
-          Supabase Auth (email + password)
-        </p>
+    <div className="min-h-[100vh] grid place-items-center px-4 py-10 bg-slate-50">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle className="text-2xl font-black">{headerTitle}</CardTitle>
+          <CardDescription>{headerDesc}</CardDescription>
+        </CardHeader>
 
-        <form onSubmit={submit} style={{ display: 'grid', gap: 12 }}>
-          <label style={{ display: 'grid', gap: 6, fontWeight: 800 }}>
-            Email
-            <input
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              type="email"
-              required
-              style={{ padding: 12, borderRadius: 12, border: '2px solid #cbd5e1' }}
-            />
-          </label>
-
-          <label style={{ display: 'grid', gap: 6, fontWeight: 800 }}>
-            Password
-            <input
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              type="password"
-              required
-              minLength={6}
-              style={{ padding: 12, borderRadius: 12, border: '2px solid #cbd5e1' }}
-            />
-          </label>
-
-          <button
-            disabled={loading || !isSupabaseConfigured}
-            style={{
-              padding: 12,
-              borderRadius: 12,
-              border: '0',
-              background: '#3A3DFF',
-              color: 'white',
-              fontWeight: 900,
-              cursor: 'pointer',
-              opacity: loading || !isSupabaseConfigured ? 0.7 : 1
-            }}
-          >
-            {loading ? 'Working…' : mode === 'signup' ? 'Sign up' : 'Login'}
-          </button>
-
+        <CardContent className="space-y-4">
           {!isSupabaseConfigured ? (
-            <div style={{ color: '#b91c1c', fontWeight: 800 }}>
+            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
               {authErrorMessage || 'Sign-in is temporarily unavailable.'}
             </div>
           ) : null}
 
-          {status ? <div style={{ color: '#b91c1c', fontWeight: 800 }}>{status}</div> : null}
+          {status ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+              {status}
+            </div>
+          ) : null}
 
-          <button
-            type="button"
-            onClick={() => setMode(mode === 'signup' ? 'login' : 'signup')}
-            style={{ background: 'transparent', border: 0, color: '#3A3DFF', fontWeight: 900, cursor: 'pointer' }}
-          >
-            {mode === 'signup' ? 'Already have an account? Login' : 'New here? Create an account'}
-          </button>
+          {mode === 'check_email' ? (
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                {checkEmailReason === 'signup_sent' ? (
+                  <>
+                    <div className="text-sm font-semibold text-slate-800">
+                      We’ve sent a verification link to <span className="font-black">{pendingEmail || email || 'your email'}</span>.
+                    </div>
+                    <div className="text-xs text-slate-600 font-semibold mt-2">
+                      Check your inbox (and spam folder), click the link to verify your account, then sign in.
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-sm font-semibold text-slate-800">Please verify your email address to continue.</div>
+                    <div className="text-xs text-slate-600 font-semibold mt-2">
+                      If you don’t see the email for <span className="font-black">{pendingEmail || email || 'your email'}</span>, you can resend it.
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Button type="button" onClick={() => setMode('login')} disabled={loading || resendLoading}>
+                  Go to login
+                </Button>
+                <Button type="button" variant="outline" onClick={submitResend} disabled={loading || resendLoading}>
+                  {resendLoading ? 'Resending…' : 'Resend confirmation email'}
+                </Button>
+              </div>
+
+              <div className="text-xs text-slate-500 font-semibold">
+                If you already verified, you can just <Link className="underline" to="/login">sign in</Link>.
+              </div>
+            </div>
+          ) : mode === 'forgot' ? (
+            <form onSubmit={submitForgotPassword} className="space-y-3">
+              <div className="space-y-1">
+                <div className="text-sm font-bold text-slate-800">Email</div>
+                <Input
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  type="email"
+                  required
+                  placeholder="you@example.com"
+                  disabled={loading || !isSupabaseConfigured}
+                />
+              </div>
+
+              <Button type="submit" className="w-full" disabled={loading || !isSupabaseConfigured}>
+                {loading ? 'Sending…' : 'Send reset link'}
+              </Button>
+
+              <Button type="button" variant="outline" className="w-full" onClick={() => setMode('login')} disabled={loading}>
+                Back to sign in
+              </Button>
+            </form>
+          ) : (
+            <form onSubmit={submit} className="space-y-3">
+              <div className="space-y-1">
+                <div className="text-sm font-bold text-slate-800">Email</div>
+                <Input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  type="email"
+                  required
+                  placeholder="you@example.com"
+                  disabled={loading || !isSupabaseConfigured}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="text-sm font-bold text-slate-800">Password</div>
+                <Input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="••••••••"
+                  disabled={loading || !isSupabaseConfigured}
+                />
+              </div>
+
+              {mode === 'login' ? (
+                <button
+                  type="button"
+                  onClick={() => setMode('forgot')}
+                  disabled={loading || !isSupabaseConfigured}
+                  className="text-left text-sm font-bold underline underline-offset-2 text-slate-700 hover:text-slate-900 disabled:opacity-70"
+                >
+                  Forgot password?
+                </button>
+              ) : (
+                <div className="text-xs text-slate-600 font-semibold">
+                  You may need to click the verification link in your email before you can log in.
+                </div>
+              )}
+
+              <Button type="submit" className="w-full" disabled={loading || !isSupabaseConfigured}>
+                {loading ? 'Working…' : mode === 'signup' ? 'Create account' : 'Sign in'}
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={() => {
+                  setStatus('');
+                  setMode(mode === 'signup' ? 'login' : 'signup');
+                }}
+                disabled={loading}
+              >
+                {mode === 'signup' ? 'Already have an account? Sign in' : 'New here? Create an account'}
+              </Button>
+            </form>
+          )}
 
           <BackButton
             className="inline-flex items-center justify-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-700"
             iconClassName="w-4 h-4"
           />
-        </form>
-      </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

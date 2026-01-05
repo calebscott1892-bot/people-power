@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
 import { Zap } from 'lucide-react';
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import ChallengeFilters from '@/components/challenges/ChallengeFilters';
 import ChallengeCard from '@/components/challenges/ChallengeCard';
@@ -387,7 +388,7 @@ export default function DailyChallenges() {
               await queryClient.invalidateQueries({ queryKey: ['userChallengeStats'] });
               toast.success('Challenge completed');
             } catch (e) {
-              toast.error(String(e?.message || 'Failed to complete'));
+              toastFriendlyError(e, 'Failed to complete');
             } finally {
               setSelectedChallenge(null);
             }

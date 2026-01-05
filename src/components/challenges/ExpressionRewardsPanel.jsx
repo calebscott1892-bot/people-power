@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Sparkles, Lock, Check } from 'lucide-react';
 import { cn } from "@/lib/utils";
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
 
 const REWARDS = [
   { id: 'border_blue', name: 'Blue Glow Border', points: 50, type: 'accent' },
@@ -42,7 +43,7 @@ export default function ExpressionRewardsPanel({ userStats, onUnlock }) {
       await onUnlock(reward);
       toast.success('Unlocked!');
     } catch (e) {
-      toast.error(String(e?.message || 'Failed to unlock'));
+      toastFriendlyError(e, 'Failed to unlock');
     } finally {
       setUnlockingId(null);
     }

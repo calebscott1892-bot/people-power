@@ -28,6 +28,22 @@ import {
 import ReportButton from '@/components/safety/ReportButton';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { createIncident } from '@/api/incidentsClient';
+import { getInteractionErrorMessage } from '@/utils/interactionErrors';
+import { upsertNotification } from '@/api/notificationsClient';
+
+function getMovementOwnerEmail(movement) {
+  const candidates = [
+    movement?.author_email,
+    movement?.creator_email,
+    movement?.created_by_email,
+    movement?.owner_email,
+  ];
+  for (const c of candidates) {
+    const s = c ? String(c).trim().toLowerCase() : '';
+    if (s) return s;
+  }
+  return null;
+}
 
 function looksHighIntensity(text) {
   const t = String(text || '');
@@ -100,7 +116,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       await queryClient.invalidateQueries({ queryKey: ['commentSettings', safeMovementId] });
       toast.success('Comment settings updated');
     },
-    onError: (e) => toast.error(String(e?.message || 'Failed to update settings')),
+    onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to update settings')),
   });
 
   const {
@@ -200,13 +216,43 @@ export default function CommentSection({ movementId, movement, canModerate = fal
 
       return createMovementComment(safeMovementId, cleanText, { accessToken });
     },
-    onSuccess: async () => {
+    onSuccess: async (_created) => {
       setDraft('');
       await queryClient.invalidateQueries({ queryKey: ['comments', safeMovementId] });
+      queryClient.setQueryData(['movementCommentsCount', safeMovementId], (old) => {
+        const prev = typeof old === 'number' ? old : null;
+        return prev == null ? old : prev + 1;
+      });
       toast.success('Comment posted');
+
+      // Best-effort public activity notification.
+      try {
+        const actorEmail = user?.email ? String(user.email).trim().toLowerCase() : null;
+        const recipient = getMovementOwnerEmail(movement);
+        const title = String(movement?.title || movement?.name || '').trim() || null;
+        if (actorEmail && recipient && actorEmail !== recipient) {
+          const rawName =
+            (user?.user_metadata && (user.user_metadata.full_name || user.user_metadata.name)) || '';
+          const actorName = rawName && !String(rawName).includes('@') ? String(rawName).trim() : null;
+          upsertNotification({
+            recipient_email: recipient,
+            type: 'comment',
+            actor_name: actorName,
+            actor_email: actorEmail,
+            content_id: safeMovementId,
+            content_ref: null,
+            content_title: title,
+            created_date: new Date().toISOString(),
+            is_read: false,
+            metadata: null,
+          }, { accessToken }).catch(() => {});
+        }
+      } catch {
+        // best-effort
+      }
     },
     onError: (e) => {
-      toast.error(String(e?.message || "Couldn't post comment"));
+      toast.error(getInteractionErrorMessage(e, "Couldn't post comment"));
     },
   });
 

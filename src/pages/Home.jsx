@@ -2,10 +2,12 @@ import React, { useState, useEffect, Suspense, useMemo } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { entities } from '@/api/appClient';
 import { useAuth } from '@/auth/AuthProvider';
+import { fetchLeadershipCounts } from '@/api/leadershipClient';
+import { listNotificationsForUserPage } from '@/api/notificationsClient';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { fetchMovementsPage } from '@/api/movementsClient';
+import { fetchMyProfile, upsertMyProfile } from '@/api/userProfileClient';
 import { Plus, Zap, Loader2, Sparkles } from 'lucide-react';
 import { motion, useReducedMotion } from 'framer-motion';
 import FilterTabs from '../components/shared/FilterTabs';
@@ -20,6 +22,7 @@ import AgeVerification from '../components/safety/AgeVerification';
 import { getAgeFromBirthdate, shouldRestrictContent, getContentRiskLevel } from '../components/safety/ContentAgeFilter';
 import { applyDecentralizationBoost } from '@/components/governance/PowerConcentrationLimiter';
 import NextBestActionPanel from '../components/home/NextBestActionPanel';
+import { getPageCache, setPageCache } from '@/utils/pageCache';
 import {
   getMovementCoordinates,
   haversineDistanceKm,
@@ -27,6 +30,32 @@ import {
   sanitizePublicLocation,
   writePrivateUserCoordinates,
 } from '@/utils/locationPrivacy';
+
+function safeLsGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLsSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeLsRemove(key) {
+  try {
+    localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const AISearch = React.lazy(() => import('../components/home/AISearch'));
 const PersonalizedRecommendations = React.lazy(() => import('../components/home/PersonalizedRecommendations'));
@@ -67,6 +96,8 @@ export default function Home() {
   const [offlineMovements, setOfflineMovements] = useState(null);
   const [showOfflineLabel, setShowOfflineLabel] = useState(false);
 
+  const movementsCacheKey = 'pp_home_movements_v1';
+
   // Listen for backend status changes
   useEffect(() => {
     const unsub = subscribeBackendStatus(setBackendStatus);
@@ -88,6 +119,8 @@ export default function Home() {
   const [userProfile, setUserProfile] = useState(null);
   const [showAgeVerification, setShowAgeVerification] = useState(false);
   const [userAge, setUserAge] = useState(null);
+
+  const didLogIntroRef = React.useRef(false);
 
   const readGateReady = () => {
     try {
@@ -114,9 +147,9 @@ export default function Home() {
   }, [user, userProfile]);
 
   useEffect(() => {
-    const hasSeenIntro = localStorage.getItem('peoplepower_intro_seen');
-    const hasAcceptedSafety = localStorage.getItem('peoplepower_safety_accepted');
-    const hasAcceptedTerms = localStorage.getItem('peoplepower_terms_accepted');
+    const hasSeenIntro = safeLsGet('peoplepower_intro_seen');
+    const hasAcceptedSafety = safeLsGet('peoplepower_safety_accepted');
+    const hasAcceptedTerms = safeLsGet('peoplepower_terms_accepted');
     setGateReady(readGateReady());
     
     if (!hasSeenIntro) {
@@ -125,16 +158,40 @@ export default function Home() {
       setShowSafetyModal(true);
     }
 
-    loadUser(authUser);
+    loadUser(authUser, accessToken);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // If a user is already authenticated, never allow the intro overlay to trap them.
+  // Also reset any stale onboarding-in-progress state.
+  useEffect(() => {
+    if (authLoading) return;
+    if (!authUser) return;
+
+    // Mark intro as completed for authed users so they don't get stuck behind it.
+    safeLsSet('peoplepower_intro_seen', 'true');
+    safeLsRemove('peoplepower_onboarding_in_progress');
+
+    if (showIntro) {
+      setShowIntro(false);
+      setIsExiting(false);
+    }
+  }, [authUser, authLoading, showIntro]);
+
+  // Dev-only diagnostic: helps catch any future "stuck intro" issues.
+  useEffect(() => {
+    if (!import.meta?.env?.DEV) return;
+    if (didLogIntroRef.current) return;
+    didLogIntroRef.current = true;
+    console.log('[PeoplePower] Intro state:', { showIntro, isAuthenticated: !!authUser });
+  }, [authUser, showIntro]);
 
   useEffect(() => {
     try {
       if (showOnboarding) {
-        localStorage.setItem('peoplepower_onboarding_in_progress', 'true');
+        safeLsSet('peoplepower_onboarding_in_progress', 'true');
       } else {
-        localStorage.removeItem('peoplepower_onboarding_in_progress');
+        safeLsRemove('peoplepower_onboarding_in_progress');
       }
       setGateReady(readGateReady());
     } catch {
@@ -144,39 +201,38 @@ export default function Home() {
 
   useEffect(() => {
     if (authLoading) return;
-    loadUser(authUser);
-  }, [authUser, authLoading]);
+    loadUser(authUser, accessToken);
+  }, [authUser, authLoading, accessToken]);
 
-  const { data: onboarding } = useQuery({
-    queryKey: ['onboarding', user?.email],
-    queryFn: async () => {
-      if (!user) return null;
-      const records = await entities.UserOnboarding.filter({ user_email: user.email });
-      if (records.length > 0) return records[0];
-
-      // Create a stub onboarding record so completion can persist locally.
-      return entities.UserOnboarding.create({
-        user_email: user.email,
-        completed: false,
-        current_step: 0,
-        interests: [],
-        completed_tutorials: [],
-      });
-    },
-    enabled: !!user
-  });
+  const onboarding = useMemo(() => {
+    if (!userProfile) return null;
+    return {
+      completed: !!userProfile?.onboarding_completed,
+      current_step: Number.isFinite(Number(userProfile?.onboarding_current_step))
+        ? Number(userProfile.onboarding_current_step)
+        : 0,
+      interests: Array.isArray(userProfile?.onboarding_interests) ? userProfile.onboarding_interests : [],
+      completed_tutorials: Array.isArray(userProfile?.onboarding_completed_tutorials)
+        ? userProfile.onboarding_completed_tutorials
+        : [],
+    };
+  }, [userProfile]);
 
   useEffect(() => {
-    if (user && onboarding === null && !showIntro && !showSafetyModal) {
+    if (!user || !accessToken) return;
+    if (!userProfile) return;
+
+    if (!onboarding?.completed && !showIntro && !showSafetyModal) {
       setShowOnboarding(true);
-    } else if (onboarding && !onboarding.completed && !showIntro && !showSafetyModal) {
-      setShowOnboarding(true);
-    } else if (onboarding && onboarding.completed && !onboarding.completed_tutorials?.includes('search')) {
+      return;
+    }
+
+    if (onboarding?.completed && !onboarding?.completed_tutorials?.includes('search')) {
       setTimeout(() => setShowSearchTooltip(true), 1000);
     }
-  }, [user, onboarding, showIntro, showSafetyModal]);
+  }, [user, accessToken, userProfile, onboarding?.completed, onboarding?.completed_tutorials, showIntro, showSafetyModal]);
 
-  const loadUser = async (currentUser) => {
+  const loadUser = async (currentUser, token) => {
     if (!currentUser) {
       setUser(null);
       setUserProfile(null);
@@ -185,9 +241,18 @@ export default function Home() {
 
     setUser(currentUser);
 
-    const profiles = await entities.UserProfile.filter({ user_email: currentUser.email });
-    if (profiles.length > 0) {
-      const p = profiles[0];
+    const accessTokenValue = token ? String(token) : null;
+    if (!accessTokenValue) {
+      setUserProfile(null);
+      return;
+    }
+
+    try {
+      const p = await fetchMyProfile({ accessToken: accessTokenValue });
+      if (!p) {
+        setUserProfile(null);
+        return;
+      }
 
       // Privacy hardening: migrate any stored coordinates out of the profile.
       const legacy = p?.location?.coordinates;
@@ -199,56 +264,60 @@ export default function Home() {
         writePrivateUserCoordinates(currentUser.email, { lat: legacyLat, lng: legacyLng });
         const sanitized = sanitizePublicLocation(p?.location);
         try {
-          await entities.UserProfile.update(p.id, {
-            location: sanitized,
-          });
-          const updated = await entities.UserProfile.filter({ user_email: currentUser.email });
-          setUserProfile(updated.length > 0 ? updated[0] : { ...p, location: sanitized });
+          await upsertMyProfile({ location: sanitized }, { accessToken: accessTokenValue });
         } catch {
-          setUserProfile({ ...p, location: sanitizePublicLocation(p?.location) });
+          // ignore: best-effort cleanup
         }
-      } else {
-        setUserProfile({ ...p, location: sanitizePublicLocation(p?.location) });
       }
-      
+
+      const nextProfile = { ...p, location: sanitizePublicLocation(p?.location) };
+      setUserProfile(nextProfile);
+
       // Check age verification
-      if (!p.age_verified || !p.birthdate) {
+      if (!nextProfile?.age_verified || !nextProfile?.birthdate) {
         setShowAgeVerification(true);
       } else {
-        const age = getAgeFromBirthdate(p.birthdate);
+        const age = getAgeFromBirthdate(nextProfile.birthdate);
         setUserAge(age);
       }
+    } catch {
+      setUserProfile(null);
     }
   };
 
   const handleAgeVerification = async ({ birthdate, age }) => {
-    if (userProfile) {
-      await entities.UserProfile.update(userProfile.id, {
-        birthdate,
-        age_verified: true,
-        safety_settings: {
-          content_warnings_enabled: age < 18,
-          restrict_sensitive_content: age < 18
-        }
-      });
+    const accessTokenValue = accessToken ? String(accessToken) : null;
+    if (!user || !accessTokenValue) return;
+
+    try {
+      await upsertMyProfile(
+        {
+          birthdate: String(birthdate || '').trim() || null,
+          age_verified: true,
+        },
+        { accessToken: accessTokenValue }
+      );
       setUserAge(age);
       setShowAgeVerification(false);
-      
-      const updated = await entities.UserProfile.filter({ user_email: user.email });
-      if (updated.length > 0) {
-        setUserProfile(updated[0]);
-      }
+
+      const updated = await fetchMyProfile({ accessToken: accessTokenValue });
+      if (updated) setUserProfile({ ...updated, location: sanitizePublicLocation(updated?.location) });
+    } catch {
+      // If persistence fails, still let the user continue locally.
+      setUserAge(age);
+      setShowAgeVerification(false);
     }
   };
 
   const handleContinue = () => {
     setIsExiting(true);
-    localStorage.setItem('peoplepower_intro_seen', 'true');
+    // Never block the UI on localStorage (some browsers/extensions can throw here).
+    safeLsSet('peoplepower_intro_seen', 'true');
     setTimeout(() => {
       setShowIntro(false);
       // Show safety modal after intro
-      const hasAcceptedSafety = localStorage.getItem('peoplepower_safety_accepted');
-      const hasAcceptedTerms = localStorage.getItem('peoplepower_terms_accepted');
+      const hasAcceptedSafety = safeLsGet('peoplepower_safety_accepted');
+      const hasAcceptedTerms = safeLsGet('peoplepower_terms_accepted');
       if (!hasAcceptedSafety || !hasAcceptedTerms) {
         setShowSafetyModal(true);
       }
@@ -257,8 +326,8 @@ export default function Home() {
   };
 
   const handleSafetyAccept = () => {
-    localStorage.setItem('peoplepower_safety_accepted', 'true');
-    localStorage.setItem('peoplepower_terms_accepted', 'true');
+    safeLsSet('peoplepower_safety_accepted', 'true');
+    safeLsSet('peoplepower_terms_accepted', 'true');
     setShowSafetyModal(false);
     setGateReady(true);
   };
@@ -285,6 +354,7 @@ export default function Home() {
     'location_lon',
     'momentum_score',
     'upvotes',
+    'boosts_count',
     'downvotes',
     'score',
     'verified_participants',
@@ -365,7 +435,7 @@ export default function Home() {
             updated_at
           })
         );
-        localStorage.setItem('peoplepower_movements_cache', JSON.stringify({ ts: Date.now(), data: compact.slice(0, 50) }));
+        setPageCache(movementsCacheKey, compact.slice(0, 50));
       } catch {
         // Ignore cache write failures (storage disabled or full).
       }
@@ -374,19 +444,20 @@ export default function Home() {
 
   // Load from cache if offline or fetch error
   useEffect(() => {
-    if (backendStatus === 'offline' || isMovementsError) {
+    if (backendStatus === 'offline' || backendStatus === 'degraded' || isMovementsError) {
       try {
-        const raw = localStorage.getItem('peoplepower_movements_cache');
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed && Array.isArray(parsed.data)) {
-            setOfflineMovements(parsed.data);
-            setShowOfflineLabel(true);
-          }
+        const cached = getPageCache(movementsCacheKey);
+        if (cached && Array.isArray(cached)) {
+          setOfflineMovements(cached);
+          setShowOfflineLabel(true);
+          return;
         }
       } catch {
         // Ignore cache read failures; fall back to live data.
       }
+
+      setOfflineMovements(null);
+      setShowOfflineLabel(false);
     } else {
       setOfflineMovements(null);
       setShowOfflineLabel(false);
@@ -404,15 +475,9 @@ export default function Home() {
     staleTime: 5 * 60 * 1000,
     retry: 0,
     queryFn: async () => {
+      if (!accessToken) return {};
       try {
-        const roles = await entities.LeadershipRole.filter({ role_type: 'movement_creator', is_active: true });
-        const map = {};
-        (Array.isArray(roles) ? roles : []).forEach((r) => {
-          const email = r?.user_email ? String(r.user_email).trim().toLowerCase() : '';
-          if (!email) return;
-          map[email] = (map[email] || 0) + 1;
-        });
-        return map;
+        return await fetchLeadershipCounts('movement_creator', { accessToken });
       } catch {
         return {};
       }
@@ -445,17 +510,18 @@ export default function Home() {
   }, [user]);
 
   const { data: myNotifications = [] } = useQuery({
-    queryKey: ['notifications:stub', userEmail],
-    enabled: !!userEmail,
+    queryKey: ['notifications:server', userEmail],
+    enabled: !!userEmail && !!accessToken,
     staleTime: 30 * 1000,
     retry: 0,
     queryFn: async () => {
       if (!userEmail) return [];
       try {
-        return await entities.Notification.filter({ recipient_email: userEmail, is_read: false }, '-created_date', {
-          limit: 200,
-          fields: 'id,is_read',
-        });
+        return await listNotificationsForUserPage(
+          userEmail,
+          { limit: 200, offset: 0, unreadOnly: true },
+          { accessToken }
+        );
       } catch {
         return [];
       }
@@ -464,7 +530,10 @@ export default function Home() {
 
   const unreadNotificationsCount = useMemo(() => {
     const list = Array.isArray(myNotifications) ? myNotifications : [];
-    return list.length;
+    return list.filter((n) => {
+      const t = String(n?.type || '');
+      return t === 'follow' || t === 'movement_boost' || t === 'comment';
+    }).length;
   }, [myNotifications]);
 
   const createdMovements = useMemo(() => {
@@ -481,7 +550,11 @@ export default function Home() {
     }
 
     if (activeFilter === 'impact') {
-      return list.sort((a, b) => toNumber(b?.upvotes ?? b?.boosts) - toNumber(a?.upvotes ?? a?.boosts));
+      return list.sort(
+        (a, b) =>
+          toNumber(b?.boosts_count ?? b?.upvotes ?? b?.boosts) -
+          toNumber(a?.boosts_count ?? a?.upvotes ?? a?.boosts)
+      );
     }
 
     if (activeFilter === 'local') {
@@ -524,17 +597,43 @@ export default function Home() {
 
   const handleOnboardingComplete = async () => {
     setShowOnboarding(false);
-    localStorage.setItem('peoplepower_onboarding_completed', 'true');
-    localStorage.removeItem('peoplepower_onboarding_in_progress');
+    try {
+      safeLsSet('peoplepower_onboarding_completed', 'true');
+      safeLsRemove('peoplepower_onboarding_in_progress');
+    } catch {
+      // ignore
+    }
+
+    if (accessToken) {
+      try {
+        await upsertMyProfile(
+          {
+            onboarding_completed: true,
+            onboarding_current_step: 999,
+            onboarding_interests: onboarding?.interests ?? [],
+            onboarding_completed_tutorials: onboarding?.completed_tutorials ?? [],
+          },
+          { accessToken }
+        );
+        setUserProfile((prev) => (prev ? { ...prev, onboarding_completed: true } : prev));
+      } catch {
+        // ignore: best-effort
+      }
+    }
     setTimeout(() => setShowSearchTooltip(true), 500);
   };
 
   const handleSearchTooltipDismiss = async () => {
     setShowSearchTooltip(false);
-    if (onboarding) {
-      await entities.UserOnboarding.update(onboarding.id, {
-        completed_tutorials: [...(onboarding.completed_tutorials || []), 'search']
-      });
+    if (accessToken) {
+      const completed = new Set([...(onboarding?.completed_tutorials || []), 'search']);
+      const next = Array.from(completed);
+      try {
+        await upsertMyProfile({ onboarding_completed_tutorials: next }, { accessToken });
+        setUserProfile((prev) => (prev ? { ...prev, onboarding_completed_tutorials: next } : prev));
+      } catch {
+        // ignore
+      }
     }
     if (aiOptIn) {
       setTimeout(() => setShowCreateTooltip(true), 500);
@@ -543,10 +642,15 @@ export default function Home() {
 
   const handleCreateTooltipDismiss = async () => {
     setShowCreateTooltip(false);
-    if (onboarding) {
-      await entities.UserOnboarding.update(onboarding.id, {
-        completed_tutorials: [...(onboarding.completed_tutorials || []), 'search', 'create']
-      });
+    if (accessToken) {
+      const completed = new Set([...(onboarding?.completed_tutorials || []), 'search', 'create']);
+      const next = Array.from(completed);
+      try {
+        await upsertMyProfile({ onboarding_completed_tutorials: next }, { accessToken });
+        setUserProfile((prev) => (prev ? { ...prev, onboarding_completed_tutorials: next } : prev));
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -685,7 +789,7 @@ export default function Home() {
       <div className="space-y-4 sm:space-y-5">
         {showOfflineLabel && offlineMovements ? (
           <div className="text-center py-2 mb-2 text-xs font-bold text-yellow-900 bg-yellow-100 rounded-xl">
-            Showing last saved version (offline). Data may be outdated.
+            Showing last saved version — reconnecting. Data may be outdated.
           </div>
         ) : null}
         {isLoading && !offlineMovements ? (

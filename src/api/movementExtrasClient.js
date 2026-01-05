@@ -28,6 +28,16 @@ async function safeReadJson(res) {
   }
 }
 
+function toApiError(res, body, fallbackMessage) {
+  const message = (body && (body.error || body.message))
+    ? String(body.error || body.message)
+    : String(fallbackMessage || `Request failed: ${res.status}`);
+  const err = new Error(message);
+  if (body && typeof body === 'object' && body.code) err.code = String(body.code);
+  err.status = res.status;
+  return err;
+}
+
 async function authedFetch(url, { accessToken, method = 'GET', body } = {}) {
   const headers = {
     Accept: 'application/json',
@@ -49,8 +59,7 @@ async function authedFetch(url, { accessToken, method = 'GET', body } = {}) {
 
   const data = await safeReadJson(res);
   if (!res.ok) {
-    const msg = (data && (data.error || data.message)) ? String(data.error || data.message) : `Request failed: ${res.status}`;
-    throw new Error(msg);
+    throw toApiError(res, data, `Request failed: ${res.status}`);
   }
 
   return data;

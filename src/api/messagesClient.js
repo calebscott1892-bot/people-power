@@ -120,6 +120,18 @@ function authHeaders(accessToken) {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+function toApiError(res, body, fallbackMessage) {
+  const messageFromBody =
+    (body && typeof body === 'object' && (body.error || body.message)) || null;
+  const message = messageFromBody
+    ? String(messageFromBody)
+    : String(fallbackMessage || `Request failed: ${res.status}`);
+  const err = new Error(message);
+  if (body && typeof body === 'object' && body.code) err.code = String(body.code);
+  err.status = res.status;
+  return err;
+}
+
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -468,12 +480,7 @@ export async function createConversation(recipientEmail, options) {
     const body = await safeReadJson(res);
 
     if (!res.ok) {
-      const messageFromBody =
-        (body && typeof body === 'object' && (body.error || body.message)) || null;
-      const message = messageFromBody
-        ? String(messageFromBody)
-        : `Failed to create conversation: ${res.status}`;
-      throw new Error(message);
+      throw toApiError(res, body, `Failed to create conversation: ${res.status}`);
     }
 
     return body;
@@ -499,12 +506,7 @@ export async function createGroupConversation(payload, options) {
 
   const body = await safeReadJson(res);
   if (!res.ok) {
-    const messageFromBody =
-      (body && typeof body === 'object' && (body.error || body.message)) || null;
-    const message = messageFromBody
-      ? String(messageFromBody)
-      : `Failed to create group chat: ${res.status}`;
-    throw new Error(message);
+    throw toApiError(res, body, `Failed to create group chat: ${res.status}`);
   }
 
   return body;
@@ -533,12 +535,7 @@ export async function createMovementGroupConversation(movementId, participantEma
 
   const body = await safeReadJson(res);
   if (!res.ok) {
-    const messageFromBody =
-      (body && typeof body === 'object' && (body.error || body.message)) || null;
-    const message = messageFromBody
-      ? String(messageFromBody)
-      : `Failed to create group chat: ${res.status}`;
-    throw new Error(message);
+    throw toApiError(res, body, `Failed to create group chat: ${res.status}`);
   }
 
   return body;
@@ -563,12 +560,7 @@ export async function updateGroupSettings(conversationId, payload, options) {
 
   const body = await safeReadJson(res);
   if (!res.ok) {
-    const messageFromBody =
-      (body && typeof body === 'object' && (body.error || body.message)) || null;
-    const message = messageFromBody
-      ? String(messageFromBody)
-      : `Failed to update group: ${res.status}`;
-    throw new Error(message);
+    throw toApiError(res, body, `Failed to update group: ${res.status}`);
   }
 
   return body;
@@ -593,12 +585,7 @@ export async function updateGroupParticipants(conversationId, payload, options) 
 
   const body = await safeReadJson(res);
   if (!res.ok) {
-    const messageFromBody =
-      (body && typeof body === 'object' && (body.error || body.message)) || null;
-    const message = messageFromBody
-      ? String(messageFromBody)
-      : `Failed to update participants: ${res.status}`;
-    throw new Error(message);
+    throw toApiError(res, body, `Failed to update participants: ${res.status}`);
   }
 
   return body;
@@ -701,12 +688,7 @@ export async function sendMessage(conversationId, bodyText, options) {
     const body = await safeReadJson(res);
 
     if (!res.ok) {
-      const messageFromBody =
-        (body && typeof body === 'object' && (body.error || body.message)) || null;
-      const message = messageFromBody
-        ? String(messageFromBody)
-        : `Failed to send message: ${res.status}`;
-      throw new Error(message);
+      throw toApiError(res, body, `Failed to send message: ${res.status}`);
     }
 
     return body;

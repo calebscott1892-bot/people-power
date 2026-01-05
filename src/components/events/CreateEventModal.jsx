@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { useAuth } from '@/auth/AuthProvider';
 import { entities } from '@/api/appClient';
 import { acceptPlatformAcknowledgment, fetchMyPlatformAcknowledgment } from '@/api/platformAckClient';
@@ -76,7 +77,7 @@ export default function CreateEventModal({ open, onOpenChange, movementId, onCre
 
     // Anti-mob governance: cap event organizer roles.
     try {
-      const cap = await checkLeadershipCap(myEmail, 'event_organizer');
+      const cap = await checkLeadershipCap(myEmail, 'event_organizer', { accessToken });
       if (cap && cap.can_create === false) {
         toast.error(cap.message || 'You have reached the event organizer cap.');
         return;
@@ -99,7 +100,7 @@ export default function CreateEventModal({ open, onOpenChange, movementId, onCre
 
         try {
           // Best-effort tracking; associate to movement context.
-          await registerLeadershipRole(myEmail, 'event_organizer', safeMovementId);
+          await registerLeadershipRole(myEmail, 'event_organizer', safeMovementId, { accessToken });
         } catch {
           // ignore
         }
@@ -162,7 +163,7 @@ export default function CreateEventModal({ open, onOpenChange, movementId, onCre
                       await acceptPlatformAcknowledgment({ accessToken, userEmail: myEmail });
                     } catch (err) {
                       setAckAccepted(false);
-                      toast.error(err?.message || 'Failed to record acknowledgment');
+                      toastFriendlyError(err, 'Failed to record acknowledgment');
                     }
                   }
                 }}

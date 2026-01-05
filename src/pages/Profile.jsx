@@ -1,10 +1,10 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Button } from "@/components/ui/button";
 import { 
-  User, Calendar, Zap, LogOut, 
+  User, Calendar, Zap, LogOut, MessageCircle,
   Plus, ChevronRight, Loader2, TrendingUp, Trophy, Flame, Shield
 } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -15,14 +15,16 @@ import { fetchMovementsPage, fetchMyFollowedMovements } from '@/api/movementsCli
 import EditProfileModal from '../components/profile/EditProfileModal';
 import ShareButton from '@/components/shared/ShareButton';
 import { entities } from '@/api/appClient';
-import { fetchMyFollowers, fetchMyFollowingUsers } from '@/api/userFollowsClient';
+import { fetchMyFollowers, fetchMyFollowingUsers, fetchUserFollow } from '@/api/userFollowsClient';
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
 import { sanitizePublicLocation } from '@/utils/locationPrivacy';
 import { logError } from '@/utils/logError';
 import { fetchMyProfile } from '@/api/userProfileClient';
-import { fetchMyBlocks, unblockUser } from '@/api/blocksClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { toast } from 'sonner';
+import FollowListDialog from '@/components/profile/FollowListDialog';
+import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
+import FeedbackBugDialog from '@/components/shared/FeedbackBugDialog';
 
 function getMovementAuthorLabel(movement) {
   const displayName = String(
@@ -41,19 +43,17 @@ function getMovementAuthorLabel(movement) {
   return displayName || (username ? `@${username}` : (safeFallback || 'Member'));
 }
 
-function getPublicProfilePath(user) {
-  const raw = String(user?.username || '').trim().replace(/^@/, '');
-  return raw ? `/u/${encodeURIComponent(raw)}` : null;
-}
-
 export default function Profile() {
   const { user: authUser, session, loading: authLoading, logout, isAdmin } = useAuth();
   const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [followListOpen, setFollowListOpen] = useState(false);
+  const [followListMode, setFollowListMode] = useState('followers');
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const accessToken = session?.access_token || null;
+  const profileLoadErrorToastedRef = useRef(false);
 
   useEffect(() => {
     if (authLoading) return;
@@ -78,6 +78,7 @@ export default function Profile() {
           'created_at',
           'created_date',
           'momentum_score',
+          'boosts_count',
           'tags',
         ].join(','),
         accessToken,
@@ -87,7 +88,17 @@ export default function Profile() {
     enabled: !!user?.email && !!accessToken
   });
 
-  const { data: userProfile } = useQuery({
+  const softTrustMarkers = useMemo(() => {
+    const movementsPosted = Array.isArray(myMovements) ? myMovements.length : 0;
+    const boostsEarned = computeBoostsEarned(myMovements);
+    const joinedAt = user?.created_date || userProfile?.created_at || null;
+    return getSoftTrustMarkers({ movementsPosted, boostsEarned, joinedAt });
+  }, [myMovements, user?.created_date, userProfile?.created_at]);
+
+  const {
+    data: userProfile,
+    isError: userProfileIsError,
+  } = useQuery({
     queryKey: ['userProfile', user?.email],
     queryFn: async () => {
       if (!user?.email) return null;
@@ -97,8 +108,9 @@ export default function Profile() {
           const profile = await fetchMyProfile({ accessToken: token });
           if (profile) return { ...profile, location: sanitizePublicLocation(profile?.location) };
         }
-      } catch {
-        // fall back to migration-mode cache
+      } catch (e) {
+        // In production, never silently fall back to local/stale data.
+        if (!allowLocalProfileFallback) throw e;
       }
       if (!allowLocalProfileFallback) return null;
       try {
@@ -113,14 +125,30 @@ export default function Profile() {
           username: String(user.email).split('@')[0],
           bio: '',
           followers_count: 0,
-          following_count: 0
+          following_count: 0,
+          is_private: false,
+          last_seen_update_version: null,
+          has_seen_tutorial_v2: false,
         });
       } catch {
         return null;
       }
     },
-    enabled: !!user?.email
+    enabled: !!user?.email && (!!accessToken || allowLocalProfileFallback)
   });
+
+  useEffect(() => {
+    if (!userProfileIsError) return;
+    if (profileLoadErrorToastedRef.current) return;
+    profileLoadErrorToastedRef.current = true;
+    toast.error('Failed to load your profile. Please try again.');
+  }, [userProfileIsError]);
+
+  useEffect(() => {
+    if (!import.meta?.env?.DEV) return;
+    if (!userProfile) return;
+    console.log('[PeoplePower] myProfile', userProfile);
+  }, [userProfile]);
 
   const resolvedProfile = useMemo(() => {
     const base = userProfile && typeof userProfile === 'object' ? userProfile : {};
@@ -147,18 +175,6 @@ export default function Profile() {
     return trimmed || '';
   }, [resolvedProfile]);
 
-  const formatPublicUserLabel = (u) => {
-    const display = u?.display_name || u?.username || u?.name;
-    if (display) return String(display);
-    const email = String(u?.email || '').trim();
-    if (!email) return 'Member';
-    let hash = 0;
-    for (let i = 0; i < email.length; i += 1) {
-      hash = (hash * 31 + email.charCodeAt(i)) % 10000;
-    }
-    return `Member #${String(hash).padStart(4, '0')}`;
-  };
-
   const { data: followedMovements = [] } = useQuery({
     queryKey: ['followedMovements', user?.email],
     queryFn: async () => fetchMyFollowedMovements({ accessToken }),
@@ -174,34 +190,33 @@ export default function Profile() {
     enabled: !!user?.email
   });
 
-  const { data: myFollowingUsers = [] } = useQuery({
+  const { data: myFollowingUsers = [], isLoading: myFollowingUsersLoading } = useQuery({
     queryKey: ['myFollowingUsers', user?.email],
     queryFn: async () => fetchMyFollowingUsers({ accessToken }),
     enabled: !!user?.email && !!accessToken,
   });
 
-  const { data: myFollowers = [] } = useQuery({
+  const { data: myFollowers = [], isLoading: myFollowersLoading } = useQuery({
     queryKey: ['myFollowers', user?.email],
     queryFn: async () => fetchMyFollowers({ accessToken }),
     enabled: !!user?.email && !!accessToken,
   });
 
-  const { data: myBlocks } = useQuery({
-    queryKey: ['myBlocks', user?.email],
-    queryFn: async () => fetchMyBlocks({ accessToken }),
-    enabled: !!user?.email && !!accessToken,
-  });
+  useEffect(() => {
+    if (!import.meta?.env?.DEV) return;
+    const followersCount = Array.isArray(myFollowers) ? myFollowers.length : 0;
+    const followingCount = Array.isArray(myFollowingUsers) ? myFollowingUsers.length : 0;
+    console.log('[PeoplePower] followers count', followersCount, 'following count', followingCount);
+  }, [myFollowers, myFollowingUsers]);
 
-  const unblockMutation = useMutation({
-    mutationFn: async (email) => {
-      if (!email) throw new Error('Missing user');
-      return unblockUser(email, { accessToken });
+  const { data: followState } = useQuery({
+    queryKey: ['userFollow', user?.email, user?.email],
+    queryFn: async () => {
+      if (!user?.email) return null;
+      return fetchUserFollow(user.email, { accessToken });
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['myBlocks', user?.email] });
-      toast.success('User unblocked');
-    },
-    onError: (e) => toast.error(e?.message || 'Failed to unblock user'),
+    enabled: !!accessToken && !!user?.email,
+    staleTime: 30 * 1000,
   });
 
   const handleLogout = async () => {
@@ -242,14 +257,37 @@ export default function Profile() {
     );
   }
 
-  const totalMomentum = myMovements.reduce((sum, m) => sum + (m?.momentum_score || 0), 0);
+
+  const followersCount = Number.isFinite(followState?.followers_count)
+    ? Number(followState.followers_count)
+    : myFollowers.length;
+  const followingCount = Number.isFinite(followState?.following_count)
+    ? Number(followState.following_count)
+    : myFollowingUsers.length;
 
   const safeDate = (d) => {
     try { return format(new Date(d), 'MMM d, yyyy'); } catch { return ''; }
   };
 
+  // Banner rendering:
+  // - URL is stored on user_profiles.banner_url via EditProfileModal -> POST /me/profile
+  // - Vertical framing is stored on user_profiles.banner_offset_y (range -1..1)
+  const bannerPositionY = (() => {
+    const raw = resolvedProfile?.banner_offset_y;
+    const offset = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(-1, Math.min(1, raw)) : 0;
+    return Math.max(0, Math.min(100, 50 + offset * 50));
+  })();
+
   return (
     <div className="max-w-4xl mx-auto space-y-8">
+      <FollowListDialog
+        open={followListOpen}
+        onOpenChange={setFollowListOpen}
+        title={followListMode === 'following' ? 'Following' : 'Followers'}
+        users={followListMode === 'following' ? myFollowingUsers : myFollowers}
+        loading={followListMode === 'following' ? myFollowingUsersLoading : myFollowersLoading}
+        blockedMessage={null}
+      />
       {/* Profile Card */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -258,7 +296,13 @@ export default function Profile() {
       >
         {/* Header Banner */}
         {resolvedProfile?.banner_url ? (
-          <div className="h-24 sm:h-32 bg-cover bg-center" style={{ backgroundImage: `url(${resolvedProfile.banner_url})` }} />
+          <div
+            className="h-24 sm:h-32 bg-cover"
+            style={{
+              backgroundImage: `url(${resolvedProfile.banner_url})`,
+              backgroundPosition: `center ${bannerPositionY}%`,
+            }}
+          />
         ) : (
           <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
@@ -285,11 +329,38 @@ export default function Profile() {
                 <p className="text-sm text-slate-500 font-semibold">
                   @{safeHandle || 'member'}
                 </p>
+                {resolvedProfile?.is_private ? (
+                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-slate-100 text-slate-700 text-[10px] font-black uppercase">
+                    Private
+                  </span>
+                ) : null}
                 {isAdmin ? (
                   <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
                     Admin
                   </span>
                 ) : null}
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFollowListMode('followers');
+                      setFollowListOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-xl border-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-black text-sm"
+                  >
+                    Followers {followersCount}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFollowListMode('following');
+                      setFollowListOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-xl border-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-black text-sm"
+                  >
+                    Following {followingCount}
+                  </button>
+                </div>
                 {resolvedProfile?.bio ? (
                   <p className="mt-2 text-sm sm:text-base text-slate-700 whitespace-pre-line">
                     {resolvedProfile.bio}
@@ -305,6 +376,13 @@ export default function Profile() {
                 className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
               >
                 Edit
+              </Button>
+              <Button
+                asChild
+                variant="outline"
+                className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
+              >
+                <Link to={createPageUrl('Settings')}>Settings</Link>
               </Button>
               <ShareButton profile={resolvedProfile} label="Share profile" variant="outline" />
             </div>
@@ -332,7 +410,7 @@ export default function Profile() {
                 {followedMovements.length}
               </div>
               <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                Following
+                Movements Followed
               </div>
             </motion.div>
             
@@ -341,10 +419,10 @@ export default function Profile() {
               className="bg-gradient-to-br from-slate-50 to-white p-5 rounded-2xl border-2 border-slate-200 text-center"
             >
               <div className="text-3xl font-black text-slate-900 mb-1">
-                {totalMomentum > 0 ? `+${totalMomentum}` : totalMomentum}
+                {followersCount}
               </div>
               <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                Momentum
+                Followers
               </div>
             </motion.div>
 
@@ -427,6 +505,19 @@ export default function Profile() {
                 <Calendar className="w-5 h-5 text-slate-400" />
                 <span className="font-bold">Joined {format(new Date(user.created_date), 'MMMM yyyy')}</span>
               </div>
+
+              {softTrustMarkers.length ? (
+                <div className="pt-2">
+                  <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-2">
+                    Trust markers (not official verification)
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {softTrustMarkers.map((label) => (
+                      <TagBadge key={label} tag={label} />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
 
@@ -446,53 +537,16 @@ export default function Profile() {
             </Link>
           )}
 
-          {/* Blocked users */}
-          <div className="mb-6 rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-sm font-black text-slate-900 uppercase tracking-wider">
-                Blocked users
-              </div>
-            </div>
-            <p className="text-xs text-slate-600 font-semibold mb-3">
-              Blocking hides your profile, movements, and messages from each other. They won’t be notified.
-            </p>
-            {Array.isArray(myBlocks?.blocked) && myBlocks.blocked.length > 0 ? (
-              <div className="space-y-2">
-                {myBlocks.blocked.map((entry) => {
-                  const label =
-                    entry?.display_name ||
-                    (entry?.username ? `@${entry.username}` : 'Blocked user');
-                  return (
-                    <div
-                      key={String(entry?.email || entry?.username || label)}
-                      className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-sm font-bold text-slate-800 truncate">
-                          {label}
-                        </div>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-9 rounded-lg border-slate-200 text-xs font-bold"
-                        disabled={unblockMutation.isPending}
-                        onClick={() => unblockMutation.mutate(String(entry?.email || '').trim())}
-                      >
-                        Unblock
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="text-xs text-slate-500 font-semibold">
-                You haven’t blocked anyone yet.
-              </div>
-            )}
-          </div>
-
           {/* Logout Button */}
+          <Button
+            onClick={() => setFeedbackOpen(true)}
+            variant="outline"
+            className="w-full h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide mb-3"
+          >
+            <MessageCircle className="w-4 h-4 mr-2" />
+            Feedback / Report Bug
+          </Button>
+
           <Button
             onClick={handleLogout}
             variant="outline"
@@ -503,6 +557,8 @@ export default function Profile() {
           </Button>
         </div>
       </motion.div>
+
+      <FeedbackBugDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
 
       <EditProfileModal
         open={showEditModal}
@@ -615,95 +671,6 @@ export default function Profile() {
         </motion.div>
       )}
 
-      {/* Following People */}
-      {myFollowingUsers.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.25 }}
-          className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
-        >
-          <div className="p-6 border-b-2 border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-            <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Following People</h2>
-          </div>
-          <div className="divide-y-2 divide-slate-100">
-            {myFollowingUsers.map((u) => {
-              const email = String(u?.email || '').trim();
-              if (!email) return null;
-              const label = formatPublicUserLabel(u);
-              const profilePath = getPublicProfilePath(u);
-              const content = (
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors truncate">
-                      {label}
-                    </div>
-                  </div>
-                  <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
-                </div>
-              );
-              return profilePath ? (
-                <Link
-                  key={email}
-                  to={profilePath}
-                  className="block p-6 hover:bg-slate-50 transition-colors group"
-                >
-                  {content}
-                </Link>
-              ) : (
-                <div key={email} className="block p-6 bg-white">
-                  {content}
-                </div>
-              );
-            })}
-          </div>
-        </motion.div>
-      )}
-
-      {/* Followers */}
-      {myFollowers.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-          className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
-        >
-          <div className="p-6 border-b-2 border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-            <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Followers</h2>
-          </div>
-          <div className="divide-y-2 divide-slate-100">
-            {myFollowers.map((u) => {
-              const email = String(u?.email || '').trim();
-              if (!email) return null;
-              const label = formatPublicUserLabel(u);
-              const profilePath = getPublicProfilePath(u);
-              const content = (
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors truncate">
-                      {label}
-                    </div>
-                  </div>
-                  <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
-                </div>
-              );
-              return profilePath ? (
-                <Link
-                  key={email}
-                  to={profilePath}
-                  className="block p-6 hover:bg-slate-50 transition-colors group"
-                >
-                  {content}
-                </Link>
-              ) : (
-                <div key={email} className="block p-6 bg-white">
-                  {content}
-                </div>
-              );
-            })}
-          </div>
-        </motion.div>
-      )}
     </div>
   );
 }

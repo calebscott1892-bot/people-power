@@ -40,6 +40,7 @@ import {
 } from '@/lib/e2eeCrypto';
 import { isEncryptedBody, packEncryptedPayload, unpackEncryptedPayload } from '@/lib/e2eeFormat';
 import { toast } from 'sonner';
+import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { uploadFile } from '@/api/uploadsClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
@@ -637,7 +638,7 @@ export default function Messages() {
         await upsertMyPublicKey(kp.publicKey, { accessToken });
       } catch (e) {
         if (!cancelled) {
-          toast.error(e?.message || 'Failed to initialize encrypted messaging');
+          toast.error(getInteractionErrorMessage(e, 'Failed to initialize encrypted messaging'));
         }
       }
     }
@@ -1253,7 +1254,7 @@ export default function Messages() {
         setPendingMessages((prev) => prev.filter((m) => String(m?.id || '') !== String(context.clientId)));
       }
       logError(e, 'Failed to send message', { conversationId: selectedId });
-      toast.error(e?.message || 'Failed to send');
+      toast.error(getInteractionErrorMessage(e, 'Failed to send'));
     },
   });
 
@@ -1270,7 +1271,7 @@ export default function Messages() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['messages', selectedId, myEmailNormalized] });
     },
-    onError: (e) => toast.error(e?.message || 'Failed to react'),
+    onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to react')),
   });
 
   const updateCustomReaction = (messageId, value) => {
@@ -1359,7 +1360,7 @@ export default function Messages() {
       });
     } catch (e) {
       logError(e, 'Failed to send media message', { conversationId: selectedId });
-      toast.error(e?.message || 'Failed to send media');
+      toast.error(getInteractionErrorMessage(e, 'Failed to send media'));
     } finally {
       setSendingMedia(false);
     }
@@ -1377,7 +1378,7 @@ export default function Messages() {
       }
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to update request');
+      toast.error(getInteractionErrorMessage(e, 'Failed to update request'));
     },
   });
 
@@ -1391,7 +1392,7 @@ export default function Messages() {
       toast.success('Collaboration invite accepted');
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to accept invite');
+      toast.error(getInteractionErrorMessage(e, 'Failed to accept invite'));
     },
   });
 
@@ -1405,7 +1406,7 @@ export default function Messages() {
       toast.success('Collaboration invite declined');
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to decline invite');
+      toast.error(getInteractionErrorMessage(e, 'Failed to decline invite'));
     },
   });
 
@@ -1449,7 +1450,7 @@ export default function Messages() {
       toast.success('Group settings updated');
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to update group');
+      toast.error(getInteractionErrorMessage(e, 'Failed to update group'));
     },
   });
 
@@ -1466,7 +1467,7 @@ export default function Messages() {
       toast.success('Group participants updated');
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to update participants');
+      toast.error(getInteractionErrorMessage(e, 'Failed to update participants'));
     },
   });
 
@@ -2522,7 +2523,7 @@ export default function Messages() {
                               const emails = results.filter(Boolean);
                               updateGroupParticipantsMutation.mutate({ add: emails });
                             } catch (e) {
-                              toast.error(String(e?.message || 'Failed to resolve username'));
+                              toast.error(getInteractionErrorMessage(e, 'Failed to resolve username'));
                             }
                           }}
                           disabled={!groupAddUsername.trim() || updateGroupParticipantsMutation.isPending}

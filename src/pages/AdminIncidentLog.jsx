@@ -3,6 +3,7 @@ import AdminBackButton from '@/components/admin/AdminBackButton';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchAdminIncidents } from '@/api/incidentsClient';
+import ErrorState from '@/components/shared/ErrorState';
 
 const PAGE_SIZE = 50;
 
@@ -112,10 +113,13 @@ export default function AdminIncidentLog() {
           {isLoading ? (
             <div className="text-slate-600 font-semibold">Loading incidents…</div>
           ) : isError ? (
-            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
-              <div className="font-black text-slate-900">Could not load incidents</div>
-              <div className="text-sm font-semibold mt-1">{String(error?.message || 'Unknown error')}</div>
-            </div>
+            <ErrorState
+              compact
+              error={error}
+              onRetry={() => refetch()}
+              onReload={() => window.location.reload()}
+              className="border-slate-200"
+            />
           ) : items.length === 0 ? (
             <div className="text-slate-600 font-semibold">No incidents found.</div>
           ) : (

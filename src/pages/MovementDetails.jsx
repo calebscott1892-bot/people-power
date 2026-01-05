@@ -4,7 +4,7 @@ import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
-import { BadgeCheck, Check, MapPin, User as UserIcon, Users, X } from 'lucide-react';
+import { BadgeCheck, Check, Heart, MapPin, MessageSquare, User as UserIcon, UserPlus, Users, X } from 'lucide-react';
 
 import {
   AlertDialog,
@@ -30,10 +30,11 @@ import { fetchMovementById, deleteMovement, updateMovement } from '@/api/movemen
 import { useAuth } from '@/auth/AuthProvider';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { fetchMyMovementFollow, setMyMovementFollow } from '@/api/movementFollowsClient';
+import { fetchMovementFollowersCount, fetchMyMovementFollow, setMyMovementFollow } from '@/api/movementFollowsClient';
 import { listMovementCollaborators } from '@/api/collaboratorsClient';
 import { lookupUsers } from '@/api/usersClient';
 import { createMovementGroupConversation } from '@/api/messagesClient';
+import { fetchMovementCommentsCount } from '@/api/commentsClient';
 
 import CommentSection from '@/components/details/CommentSection';
 import BoostButtons from '@/components/shared/BoostButtons';
@@ -80,7 +81,10 @@ import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
+import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { useFeatureFlag } from '@/utils/featureFlags';
+import { getPageCache, setPageCache } from '@/utils/pageCache';
 import {
   ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
   ALLOWED_UPLOAD_MIME_TYPES,
@@ -109,6 +113,16 @@ function maskEmail(email) {
   const [name, domain] = raw.split('@');
   const prefix = name ? `${name.slice(0, 2)}***` : '***';
   return domain ? `${prefix}@${domain}` : prefix;
+}
+
+function formatShortWhen(iso) {
+  try {
+    const d = iso ? new Date(String(iso)) : null;
+    if (!d || Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return '';
+  }
 }
 
 function guessPreviewType(resource) {
@@ -165,11 +179,14 @@ function EventRsvpControls({ event, movementId, accessToken, myEmail, backendSta
 
       if (myEmail && safeStatus === 'going') {
         try {
-          const existing = await filterNotifications({
-            recipient_email: myEmail,
-            type: 'event_reminder',
-            content_ref: String(event.id),
-          });
+          const existing = await filterNotifications(
+            {
+              recipient_email: myEmail,
+              type: 'event_reminder',
+              content_ref: String(event.id),
+            },
+            { accessToken }
+          );
           if (!Array.isArray(existing) || existing.length === 0) {
             await upsertNotification({
               recipient_email: myEmail,
@@ -182,7 +199,7 @@ function EventRsvpControls({ event, movementId, accessToken, myEmail, backendSta
               created_date: new Date().toISOString(),
               is_read: false,
               starts_at: event?.starts_at ? String(event.starts_at) : null,
-            });
+            }, { accessToken });
           }
         } catch (e) {
           logError(e, 'Event RSVP reminder notification failed', { movementId });
@@ -329,7 +346,7 @@ function PetitionSignControls({ petition, accessToken, myEmail, backendStatus = 
       await queryClient.invalidateQueries({ queryKey: ['petitionSignatures', String(petition?.id || ''), myEmail] });
     },
     onError: (e) => {
-      window.alert(String(e?.message || 'Failed to sign petition'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to sign petition'));
     },
   });
 
@@ -342,7 +359,7 @@ function PetitionSignControls({ petition, accessToken, myEmail, backendStatus = 
       await queryClient.invalidateQueries({ queryKey: ['petitionSignatures', String(petition?.id || ''), myEmail] });
     },
     onError: (e) => {
-      window.alert(String(e?.message || 'Failed to withdraw signature'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to withdraw signature'));
     },
   });
 
@@ -513,6 +530,11 @@ export default function MovementDetails() {
   const [offlineMovement, setOfflineMovement] = useState(null);
   const [showOfflineLabel, setShowOfflineLabel] = useState(false);
 
+  const movementCacheKey = useMemo(
+    () => (movementId ? `pp_movement_details_v1:${encodeURIComponent(String(movementId))}` : null),
+    [movementId]
+  );
+
   // Listen for backend status changes
   useEffect(() => {
     const unsub = subscribeBackendStatus(setBackendStatus);
@@ -555,7 +577,7 @@ export default function MovementDetails() {
       if (!movementId) return null;
       const m = await fetchMovementById(movementId, { accessToken });
       // Cache compact movement details on success
-      if (m && backendStatus === 'healthy') {
+      if (m && movementCacheKey) {
         try {
           const compact = {
             id: m.id,
@@ -575,7 +597,7 @@ export default function MovementDetails() {
             created_at: m.created_at,
             updated_at: m.updated_at,
           };
-          localStorage.setItem(`peoplepower_movement_${m.id}_cache`, JSON.stringify({ ts: Date.now(), data: compact }));
+          setPageCache(movementCacheKey, compact);
         } catch {
           // Ignore cache write failures (storage disabled or full).
         }
@@ -586,24 +608,25 @@ export default function MovementDetails() {
 
   // Load from cache if offline or fetch error
   useEffect(() => {
-    if ((backendStatus === 'offline' || isMovementError) && movementId) {
+    if ((backendStatus === 'offline' || backendStatus === 'degraded' || isMovementError) && movementCacheKey) {
       try {
-        const raw = localStorage.getItem(`peoplepower_movement_${movementId}_cache`);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed && parsed.data) {
-            setOfflineMovement(parsed.data);
-            setShowOfflineLabel(true);
-          }
+        const cached = getPageCache(movementCacheKey);
+        if (cached) {
+          setOfflineMovement(cached);
+          setShowOfflineLabel(true);
+          return;
         }
       } catch {
         // Ignore cache read failures; fall back to live data.
       }
+
+      setOfflineMovement(null);
+      setShowOfflineLabel(false);
     } else {
       setOfflineMovement(null);
       setShowOfflineLabel(false);
     }
-  }, [backendStatus, isMovementError, movementId]);
+  }, [backendStatus, isMovementError, movementCacheKey]);
 
   // Prefer last-known-good data when offline.
   const movement = offlineMovement || movementData;
@@ -758,7 +781,7 @@ export default function MovementDetails() {
       toast.success('Movement updated.');
     } catch (err) {
       logError(err, 'Failed to update movement');
-      toast.error(err?.message ? String(err.message) : 'Failed to update movement');
+      toastFriendlyError(err, 'Failed to update movement');
     } finally {
       setEditMovementSaving(false);
     }
@@ -822,16 +845,116 @@ export default function MovementDetails() {
 
       return setMyMovementFollow(movementId, !!nextFollowing, { accessToken });
     },
-    onSuccess: (next) => {
+    onSuccess: (next, nextFollowing) => {
       queryClient.setQueryData(['movementFollow', movementId], next);
+
+      if (next && typeof next.followers_count === 'number') {
+        queryClient.setQueryData(['movementFollowersCount', movementId], next.followers_count);
+
+        queryClient.setQueryData(['movement', movementId], (old) => {
+          if (!old || typeof old !== 'object') return old;
+          return { ...old, followers_count: next.followers_count };
+        });
+
+        queryClient.setQueriesData({ queryKey: ['movements'] }, (old) => {
+          const patchMovement = (m) => {
+            if (!m || typeof m !== 'object') return m;
+            const mid = String(m?.id ?? m?._id ?? '').trim();
+            if (!mid || mid !== String(movementId)) return m;
+            return { ...m, followers_count: next.followers_count };
+          };
+
+          if (old && typeof old === 'object' && Array.isArray(old.pages)) {
+            return {
+              ...old,
+              pages: old.pages.map((page) => (Array.isArray(page) ? page.map(patchMovement) : page)),
+            };
+          }
+
+          if (Array.isArray(old)) return old.map(patchMovement);
+          return old;
+        });
+      }
+
+      // Best-effort activity item (for creators/admins) when someone follows this movement.
+      try {
+        const justFollowed = !!nextFollowing && !following;
+        if (justFollowed && ownerEmail && myEmail && movementId && myEmail !== String(ownerEmail).toLowerCase()) {
+          const rawName =
+            (user?.user_metadata && (user.user_metadata.full_name || user.user_metadata.name)) || '';
+          const actorName = rawName && !String(rawName).includes('@') ? String(rawName).trim() : null;
+          upsertNotification({
+            recipient_email: String(ownerEmail).trim().toLowerCase(),
+            type: 'movement_follow',
+            actor_name: actorName,
+            actor_email: String(myEmail).trim().toLowerCase(),
+            content_id: String(movementId),
+            content_ref: null,
+            content_title: String(movement?.title || movement?.name || '').trim() || null,
+            created_date: new Date().toISOString(),
+            is_read: false,
+            metadata: null,
+          }).catch(() => {});
+        }
+      } catch {
+        // best-effort
+      }
     },
     onError: (e) => {
-      window.alert(String(e?.message || 'Failed to update follow'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to update follow'));
     },
   });
 
   const following = !!followState?.following;
   const followersCount = typeof followState?.followers_count === 'number' ? followState.followers_count : null;
+
+  const { data: followersCountPublic } = useQuery({
+    queryKey: ['movementFollowersCount', movementId],
+    enabled: !!movementId,
+    retry: 1,
+    staleTime: 30 * 1000,
+    queryFn: async () => fetchMovementFollowersCount(movementId),
+  });
+
+  const { data: commentsCount } = useQuery({
+    queryKey: ['movementCommentsCount', movementId],
+    enabled: !!movementId,
+    retry: 1,
+    staleTime: 30 * 1000,
+    queryFn: async () => fetchMovementCommentsCount(movementId),
+  });
+
+  const boostsCount = useMemo(() => {
+    const v = movement?.boosts_count ?? movement?.upvotes ?? movement?.boosts;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }, [movement]);
+
+  const displayedFollowersCount = typeof followersCount === 'number'
+    ? followersCount
+    : (typeof followersCountPublic === 'number' ? followersCountPublic : 0);
+
+  const { data: recentActivity = [] } = useQuery({
+    queryKey: ['movementEngagementActivity', movementId, ownerEmail],
+    enabled: !!movementId && !!ownerEmail && (isOwner || isAdmin),
+    retry: 0,
+    staleTime: 10 * 1000,
+    queryFn: async () => {
+      if (!accessToken) return [];
+      const list = await filterNotifications(
+        {
+          recipient_email: String(ownerEmail).trim().toLowerCase(),
+          content_id: String(movementId),
+        },
+        { accessToken }
+      );
+      const allowed = new Set(['movement_boost', 'comment', 'movement_follow']);
+      return (Array.isArray(list) ? list : [])
+        .filter((n) => allowed.has(String(n?.type || '')))
+        .sort((a, b) => String(b?.created_date || '').localeCompare(String(a?.created_date || '')))
+        .slice(0, 25);
+    },
+  });
 
   const safeHtml = sanitizeRichText(description);
   const shouldRenderHtml = /<[^>]+>/.test(String(description || ''));
@@ -1348,7 +1471,12 @@ export default function MovementDetails() {
 
     return {
       momentum: typeof movement?.momentum_score === 'number' ? movement.momentum_score : 0,
-      boosts: typeof movement?.boosts === 'number' ? movement.boosts : 0,
+      boosts:
+        typeof movement?.boosts_count === 'number'
+          ? movement.boosts_count
+          : (typeof movement?.upvotes === 'number'
+              ? movement.upvotes
+              : (typeof movement?.boosts === 'number' ? movement.boosts : 0)),
       supporters: typeof movement?.supporters === 'number' ? movement.supporters : (supporters ?? 0),
       participants: totalParticipants,
       events: Array.isArray(events) ? events.length : 0,
@@ -1557,7 +1685,7 @@ export default function MovementDetails() {
       await queryClient.invalidateQueries({ queryKey: ['movement', movementId] });
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to submit evidence'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to submit evidence'));
     },
   });
 
@@ -1572,7 +1700,7 @@ export default function MovementDetails() {
       await queryClient.invalidateQueries({ queryKey: ['movement', movementId] });
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to verify evidence'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to verify evidence'));
     },
   });
 
@@ -1610,7 +1738,7 @@ export default function MovementDetails() {
       }
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to create group chat'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to create group chat'));
     },
   });
 
@@ -1663,7 +1791,7 @@ export default function MovementDetails() {
       await queryClient.invalidateQueries({ queryKey: ['events', movementId] });
     },
     onError: (e) => {
-      window.alert(String(e?.message || 'Failed to create event'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to create event'));
     },
   });
 
@@ -1704,7 +1832,7 @@ export default function MovementDetails() {
       await queryClient.invalidateQueries({ queryKey: ['petitions', movementId] });
     },
     onError: (e) => {
-      window.alert(String(e?.message || 'Failed to add petition'));
+      toast.error(getInteractionErrorMessage(e, 'Failed to add petition'));
     },
   });
 
@@ -1841,7 +1969,7 @@ export default function MovementDetails() {
       <BackButton />
       {showOfflineLabel && offlineMovement ? (
         <div className="p-3 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-sm font-bold">
-          Showing last saved version (offline). Data may be outdated.
+          Showing last saved version — reconnecting. Data may be outdated.
         </div>
       ) : null}
 
@@ -1849,6 +1977,23 @@ export default function MovementDetails() {
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <h1 className="text-2xl sm:text-3xl font-black text-slate-900">{title}</h1>
+            {(() => {
+              const v = String(movement?.visibility || '').trim().toLowerCase();
+              if (!v || v === 'public') return null;
+              const label = v === 'private' ? 'Private draft' : 'Community';
+              const cls =
+                v === 'private'
+                  ? 'border-amber-200 bg-amber-50 text-amber-900'
+                  : 'border-slate-200 bg-slate-50 text-slate-700';
+              return (
+                <span
+                  className={`ml-2 px-2 py-1 rounded-full border text-xs font-black ${cls}`}
+                  title={v === 'private' ? 'Visible only to you' : 'Visible to followers'}
+                >
+                  {label}
+                </span>
+              );
+            })()}
             {isTitleLocked && (
               <span className="ml-2 px-2 py-1 rounded bg-yellow-100 text-yellow-800 text-xs font-bold" title="Locked by owner">Locked</span>
             )}
@@ -1918,7 +2063,7 @@ export default function MovementDetails() {
           <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50">
             <div className="text-xs font-black text-slate-600">Following</div>
             <div className="mt-1 flex items-center justify-between gap-2">
-              <div className="text-sm font-black text-slate-900">{followersCount != null ? followersCount : '—'}</div>
+              <div className="text-sm font-black text-slate-900">{displayedFollowersCount}</div>
               <button
                 type="button"
                 disabled={!accessToken || followMutation.isPending}
@@ -2061,6 +2206,80 @@ export default function MovementDetails() {
       </div>
 
       <div className="grid grid-cols-1 gap-6">
+        <div id="engagement">
+          <SectionCard title="Engagement">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="p-4 rounded-xl border border-slate-200 bg-white">
+                <div className="inline-flex items-center gap-2 text-xs font-black text-slate-600">
+                  <Heart className="w-4 h-4" /> Boosts
+                </div>
+                <div className="mt-1 text-2xl font-black text-slate-900">{boostsCount}</div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-slate-200 bg-white">
+                <div className="inline-flex items-center gap-2 text-xs font-black text-slate-600">
+                  <MessageSquare className="w-4 h-4" /> Comments
+                </div>
+                <div className="mt-1 text-2xl font-black text-slate-900">
+                  {typeof commentsCount === 'number' ? commentsCount : 0}
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-slate-200 bg-white">
+                <div className="inline-flex items-center gap-2 text-xs font-black text-slate-600">
+                  <Users className="w-4 h-4" /> Followers
+                </div>
+                <div className="mt-1 text-2xl font-black text-slate-900">{displayedFollowersCount}</div>
+              </div>
+            </div>
+
+            {(isOwner || isAdmin) ? (
+              <div className="mt-5">
+                <div className="text-sm font-black text-slate-900">Recent activity</div>
+                <div className="mt-2 space-y-2">
+                  {recentActivity.length === 0 ? (
+                    <div className="text-sm text-slate-600 font-semibold">No recent activity yet.</div>
+                  ) : (
+                    recentActivity.map((n) => {
+                      const type = String(n?.type || '');
+                      const actorLabel =
+                        (n?.actor_name ? String(n.actor_name).trim() : '') ||
+                        (n?.actor_email ? maskEmail(n.actor_email) : '') ||
+                        'Someone';
+
+                      const Icon =
+                        type === 'movement_boost'
+                          ? Heart
+                          : (type === 'comment' ? MessageSquare : UserPlus);
+
+                      const actionLabel =
+                        type === 'movement_boost'
+                          ? 'boosted'
+                          : (type === 'comment' ? 'commented' : 'followed');
+
+                      return (
+                        <div
+                          key={String(n?.id || `${type}-${n?.created_date || ''}-${n?.actor_email || ''}`)}
+                          className="p-3 rounded-xl border border-slate-200 bg-slate-50 flex items-start justify-between gap-3"
+                        >
+                          <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+                            <Icon className="w-4 h-4 text-slate-600" />
+                            <span className="font-black">{actorLabel}</span>
+                            <span className="text-slate-700">{actionLabel}</span>
+                          </div>
+                          <div className="text-xs font-bold text-slate-500 whitespace-nowrap">
+                            {formatShortWhen(n?.created_date)}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </SectionCard>
+        </div>
+
         <div id="events">
         <SectionCard title="Events">
           <div className="space-y-3">
@@ -2767,7 +2986,7 @@ export default function MovementDetails() {
                           onClick={() => {
                             const next = String(donationLinkDraft || '').trim();
                             if (!next) {
-                              alert('Please enter a donation URL');
+                              toast.error('Please enter a donation URL');
                               return;
                             }
                             try {
@@ -2921,7 +3140,11 @@ export default function MovementDetails() {
                         {isClaimsLocked ? 'Unlock' : 'Lock'}
                       </button>
                     </div>
-                    {locksError && <div className="text-xs text-red-500 font-bold">{String(locksError.message || locksError)}</div>}
+                    {locksError ? (
+                      <div className="text-xs text-red-500 font-bold">
+                        {getInteractionErrorMessage(locksError, 'Could not update field locks. Please try again.')}
+                      </div>
+                    ) : null}
                   </div>
                 </SectionCard>
               )}
@@ -3536,7 +3759,7 @@ export default function MovementDetails() {
                   setDeleteMovementOpen(false);
                   navigate('/');
                 } catch (err) {
-                  alert(String(err?.message || err || 'Failed to delete'));
+                  toast.error(getInteractionErrorMessage(err, 'Failed to delete'));
                 } finally {
                   setDeletingMovement(false);
                 }

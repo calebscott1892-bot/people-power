@@ -1,0 +1,214 @@
+import { SERVER_BASE } from '@/api/serverBase';
+import { getSupabaseClient } from '@/api/supabaseClient';
+
+const AUTH_EXPIRED_EVENT = 'pp:auth-expired';
+
+let installed = false;
+let originalFetch = null;
+
+let getAccessToken = () => null;
+let getSession = () => null;
+let onAuthExpired = () => {};
+let refreshSession = async () => null;
+
+function isBackendUrl(url) {
+  const raw = String(url || '');
+
+  // Same-origin relative requests should only be treated as backend if they
+  // look like API calls. Avoid attaching auth headers to asset/document fetches.
+  if (raw.startsWith('/')) {
+    return raw.startsWith('/me/') || raw.startsWith('/api/');
+  }
+
+  // Absolute requests to the configured backend base.
+  return raw.startsWith(String(SERVER_BASE || ''));
+}
+
+function shouldTreatForbiddenAsAuthFailure(responseText) {
+  const text = String(responseText || '').toLowerCase();
+  return (
+    text.includes('invalid session') ||
+    text.includes('unauthorized session') ||
+    text.includes('auth session missing') ||
+    text.includes('jwt expired') ||
+    text.includes('no authorization')
+  );
+}
+
+async function readResponseTextSafe(res) {
+  try {
+    return await res.clone().text();
+  } catch {
+    return '';
+  }
+}
+
+function dispatchAuthExpired(message) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent(AUTH_EXPIRED_EVENT, {
+        detail: {
+          message,
+          at: Date.now(),
+        },
+      })
+    );
+  } catch {
+    // ignore
+  }
+}
+
+function normalizeFetchArgs(input, init) {
+  // Normalize into { url, requestInit } so we can safely retry.
+  if (input instanceof Request) {
+    const req = input;
+    return {
+      url: req.url,
+      requestInit: {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        mode: req.mode,
+        credentials: req.credentials,
+        cache: req.cache,
+        redirect: req.redirect,
+        referrer: req.referrer,
+        referrerPolicy: req.referrerPolicy,
+        integrity: req.integrity,
+        keepalive: req.keepalive,
+        signal: req.signal,
+        ...(init || {}),
+      },
+    };
+  }
+
+  return {
+    url: String(input),
+    requestInit: init || {},
+  };
+}
+
+function withAuthHeader(existingHeaders, token) {
+  const headers = new Headers(existingHeaders || {});
+  // If we have a current token, always prefer it. This prevents stale caller-provided
+  // tokens from causing "invalid session" loops after refresh (common on mobile).
+  if (token) headers.set('Authorization', `Bearer ${String(token)}`);
+  return headers;
+}
+
+function isSessionNearExpiry(session, withinSeconds = 60) {
+  const expiresAt = session?.expires_at;
+  if (!expiresAt) return false;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  return Number(expiresAt) - nowSeconds <= withinSeconds;
+}
+
+export function configureAuthFetch(options) {
+  getAccessToken = options?.getAccessToken || getAccessToken;
+  getSession = options?.getSession || getSession;
+  onAuthExpired = options?.onAuthExpired || onAuthExpired;
+  refreshSession = options?.refreshSession || refreshSession;
+}
+
+export function installAuthFetch() {
+  if (typeof window === 'undefined') return;
+  if (installed) return;
+
+  installed = true;
+  originalFetch = window.fetch.bind(window);
+
+  let handlingAuthFailure = false;
+  let refreshInFlight = null;
+
+  const refreshOnce = async () => {
+    if (refreshInFlight) return refreshInFlight;
+    refreshInFlight = (async () => {
+      await refreshSession();
+      return true;
+    })();
+    try {
+      return await refreshInFlight;
+    } finally {
+      refreshInFlight = null;
+    }
+  };
+
+  window.fetch = async (input, init) => {
+    const { url, requestInit } = normalizeFetchArgs(input, init);
+
+    const isBackend = isBackendUrl(url);
+    const currentSession = isBackend ? getSession() : null;
+
+    // Proactively refresh if we're about to expire (mobile background/resume case).
+    if (isBackend && currentSession && isSessionNearExpiry(currentSession)) {
+      try {
+        await refreshOnce();
+      } catch {
+        // ignore; we'll fall through and handle errors from the API if needed
+      }
+    }
+
+    const attempt = async () => {
+      const tokenNow = isBackend ? getAccessToken() : null;
+      const headersNow = isBackend ? withAuthHeader(requestInit.headers, tokenNow) : requestInit.headers;
+      return originalFetch(input, {
+        ...requestInit,
+        headers: headersNow,
+      });
+    };
+
+    let res = await attempt();
+
+    // If we got a clear auth failure, try one refresh+retry before forcing logout.
+    if (isBackend && (res.status === 401 || res.status === 403)) {
+      const text = await readResponseTextSafe(res);
+      const isAuthFailure =
+        res.status === 401 ||
+        (res.status === 403 && shouldTreatForbiddenAsAuthFailure(text));
+
+      if (isAuthFailure) {
+        try {
+          await refreshOnce();
+          res = await attempt();
+        } catch {
+          // ignore
+        }
+      }
+
+      if (isAuthFailure && (res.status === 401 || res.status === 403)) {
+        if (!handlingAuthFailure) {
+          handlingAuthFailure = true;
+
+          const message = 'Your session has expired. Please sign in again.';
+          dispatchAuthExpired(message);
+
+          try {
+            const supabase = getSupabaseClient();
+            await supabase?.auth?.signOut?.();
+          } catch {
+            // ignore
+          }
+
+          try {
+            await onAuthExpired({ message });
+          } finally {
+            // allow future auth failures to be handled if user signs in again
+            setTimeout(() => {
+              handlingAuthFailure = false;
+            }, 1000);
+          }
+        }
+      }
+    }
+
+    return res;
+  };
+}
+
+export function onAuthExpiredEvent(listener) {
+  if (typeof window === 'undefined') return () => {};
+  const handler = (event) => listener?.(event?.detail);
+  window.addEventListener(AUTH_EXPIRED_EVENT, handler);
+  return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handler);
+}

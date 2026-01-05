@@ -15,15 +15,19 @@ import BackButton from '@/components/shared/BackButton';
 import ShareButton from '@/components/shared/ShareButton';
 import { entities } from '@/api/appClient';
 import { useAuth } from '@/auth/AuthProvider';
-import { fetchUserFollow, setUserFollow } from '@/api/userFollowsClient';
+import { fetchMyFollowers, fetchMyFollowingUsers, fetchUserFollow, fetchUserFollowers, fetchUserFollowingUsers, setUserFollow } from '@/api/userFollowsClient';
+import { upsertNotification } from '@/api/notificationsClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { createConversation } from '@/api/messagesClient';
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
 import { giftPoints } from '@/api/pointGiftsClient';
 import { fetchMovementsPage } from '@/api/movementsClient';
-import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
+import { fetchPublicProfileByEmail, fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import { fetchMyBlocks, blockUser, unblockUser } from '@/api/blocksClient';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
+import FollowListDialog from '@/components/profile/FollowListDialog';
+import { getInteractionErrorMessage } from '@/utils/interactionErrors';
+import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 
 function getMovementAuthorLabel(movement) {
   const displayName = String(
@@ -69,6 +73,8 @@ export default function UserProfile() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showGiftModal, setShowGiftModal] = useState(false);
+  const [followListOpen, setFollowListOpen] = useState(false);
+  const [followListMode, setFollowListMode] = useState('followers');
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -79,22 +85,14 @@ export default function UserProfile() {
     queryKey: ['userProfile', profileEmail, profileUsername],
     queryFn: async () => {
       if (profileEmail) {
-        const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
-        if (profiles.length > 0) return profiles[0];
-
-        // Create profile if doesn't exist
-        const users = await entities.User.filter({ email: profileEmail });
-        if (users.length === 0) return null;
-
-        const user = users[0];
-        return entities.UserProfile.create({
-          user_email: user.email,
-          display_name: user.full_name,
-          username: user.email.split('@')[0],
-          bio: '',
-          followers_count: 0,
-          following_count: 0
-        });
+        if (!accessToken) return null;
+        try {
+          return await fetchPublicProfileByEmail(profileEmail, { accessToken });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e || '');
+          if (msg.includes('404')) return null;
+          throw e;
+        }
       }
 
       if (profileUsername) {
@@ -119,6 +117,32 @@ export default function UserProfile() {
     queryKey: ['userFollow', resolvedProfileEmail, currentUser?.email],
     queryFn: async () => fetchUserFollow(resolvedProfileEmail, { accessToken }),
     enabled: !!accessToken && !!resolvedProfileEmail && !!currentUser?.email,
+  });
+
+  const { data: followerListState, isLoading: followerListLoading } = useQuery({
+    queryKey: ['userFollowers', resolvedProfileEmail, currentUser?.email],
+    queryFn: async () => {
+      if (!resolvedProfileEmail) return { allowed: true, users: [] };
+      if (isOwnProfile) {
+        const users = await fetchMyFollowers({ accessToken });
+        return { allowed: true, users };
+      }
+      return fetchUserFollowers(resolvedProfileEmail, { accessToken });
+    },
+    enabled: !!accessToken && !!resolvedProfileEmail && !!currentUser?.email && followListOpen && followListMode === 'followers',
+  });
+
+  const { data: followingListState, isLoading: followingListLoading } = useQuery({
+    queryKey: ['userFollowingUsers', resolvedProfileEmail, currentUser?.email],
+    queryFn: async () => {
+      if (!resolvedProfileEmail) return { allowed: true, users: [] };
+      if (isOwnProfile) {
+        const users = await fetchMyFollowingUsers({ accessToken });
+        return { allowed: true, users };
+      }
+      return fetchUserFollowingUsers(resolvedProfileEmail, { accessToken });
+    },
+    enabled: !!accessToken && !!resolvedProfileEmail && !!currentUser?.email && followListOpen && followListMode === 'following',
   });
 
   const { data: myBlocks } = useQuery({
@@ -162,6 +186,7 @@ export default function UserProfile() {
           'creator_username',
           'author_display_name',
           'author_username',
+          'boosts_count',
           'created_at',
           'created_date',
         ].join(','),
@@ -173,6 +198,13 @@ export default function UserProfile() {
     },
     enabled: !!resolvedProfileEmail
   });
+
+  const softTrustMarkers = useMemo(() => {
+    const movementsPosted = Array.isArray(userMovements) ? userMovements.length : 0;
+    const boostsEarned = computeBoostsEarned(userMovements);
+    const joinedAt = userProfile?.created_at || userProfile?.created_date || null;
+    return getSoftTrustMarkers({ movementsPosted, boostsEarned, joinedAt });
+  }, [userMovements, userProfile?.created_at, userProfile?.created_date]);
 
   const { data: participatedMovements = [] } = useQuery({
     queryKey: ['participatedMovements', resolvedProfileEmail],
@@ -255,11 +287,42 @@ export default function UserProfile() {
       return setUserFollow(resolvedProfileEmail, !isFollowing, { accessToken });
     },
     onSuccess: async (next) => {
+      const justFollowed = !!next?.following && !isFollowing;
       setIsFollowing(!!next?.following);
       await queryClient.invalidateQueries({ queryKey: ['userFollow', resolvedProfileEmail, currentUser?.email] });
+      await queryClient.invalidateQueries({ queryKey: ['userFollowers', resolvedProfileEmail, currentUser?.email] });
+      await queryClient.invalidateQueries({ queryKey: ['userFollowingUsers', resolvedProfileEmail, currentUser?.email] });
+      await queryClient.invalidateQueries({ queryKey: ['myFollowers', currentUser?.email] });
+      await queryClient.invalidateQueries({ queryKey: ['myFollowingUsers', currentUser?.email] });
+
+      if (justFollowed && currentUser?.email && resolvedProfileEmail) {
+        try {
+          const actorEmail = String(currentUser.email).trim().toLowerCase();
+          const recipient = String(resolvedProfileEmail).trim().toLowerCase();
+          if (actorEmail && recipient && actorEmail !== recipient) {
+            const rawName =
+              (currentUser?.user_metadata && (currentUser.user_metadata.full_name || currentUser.user_metadata.name)) || '';
+            const actorName = rawName && !String(rawName).includes('@') ? String(rawName).trim() : null;
+            upsertNotification({
+              recipient_email: recipient,
+              type: 'follow',
+              actor_name: actorName,
+              actor_email: actorEmail,
+              content_id: null,
+              content_ref: null,
+              content_title: null,
+              created_date: new Date().toISOString(),
+              is_read: false,
+              metadata: null,
+            }, { accessToken }).catch(() => {});
+          }
+        } catch {
+          // best-effort
+        }
+      }
       toast.success(next?.following ? 'Following!' : 'Unfollowed');
     },
-    onError: (e) => toast.error(e?.message || 'Failed to update follow'),
+    onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to update follow')),
   });
 
   const blockMutation = useMutation({
@@ -272,7 +335,7 @@ export default function UserProfile() {
       await queryClient.invalidateQueries({ queryKey: ['myBlocks', accessToken] });
       toast.success('User blocked');
     },
-    onError: (e) => toast.error(e?.message || 'Failed to block user'),
+    onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to block user')),
   });
 
   const unblockMutation = useMutation({
@@ -285,7 +348,7 @@ export default function UserProfile() {
       await queryClient.invalidateQueries({ queryKey: ['myBlocks', accessToken] });
       toast.success('User unblocked');
     },
-    onError: (e) => toast.error(e?.message || 'Failed to unblock user'),
+    onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to unblock user')),
   });
 
   const safeHandle = useMemo(() => {
@@ -332,8 +395,29 @@ export default function UserProfile() {
   const displayedFollowingCount = followState?.following_count ?? userProfile.following_count ?? 0;
   const blockPending = blockMutation.isPending || unblockMutation.isPending;
 
+  // Banner rendering:
+  // - URL is stored on user_profiles.banner_url
+  // - Vertical framing is stored on user_profiles.banner_offset_y (range -1..1)
+  const bannerPositionY = (() => {
+    const raw = userProfile?.banner_offset_y;
+    const offset = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(-1, Math.min(1, raw)) : 0;
+    return Math.max(0, Math.min(100, 50 + offset * 50));
+  })();
+
   return (
     <div className="max-w-4xl mx-auto space-y-8">
+      <FollowListDialog
+        open={followListOpen}
+        onOpenChange={setFollowListOpen}
+        title={followListMode === 'following' ? 'Following' : 'Followers'}
+        users={followListMode === 'following' ? (followingListState?.users || []) : (followerListState?.users || [])}
+        loading={followListMode === 'following' ? followingListLoading : followerListLoading}
+        blockedMessage={
+          followListMode === 'following'
+            ? (followingListState?.allowed === false ? (followingListState?.message || 'This list is private.') : null)
+            : (followerListState?.allowed === false ? (followerListState?.message || 'This list is private.') : null)
+        }
+      />
       <BackButton
         className="inline-flex items-center gap-2 text-slate-600 hover:text-slate-900 group font-bold"
         iconClassName="w-5 h-5 group-hover:-translate-x-1 transition-transform"
@@ -345,7 +429,13 @@ export default function UserProfile() {
         className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
       >
         {userProfile.banner_url ? (
-          <div className="h-24 sm:h-32 bg-cover bg-center" style={{ backgroundImage: `url(${userProfile.banner_url})` }} />
+          <div
+            className="h-24 sm:h-32 bg-cover"
+            style={{
+              backgroundImage: `url(${userProfile.banner_url})`,
+              backgroundPosition: `center ${bannerPositionY}%`,
+            }}
+          />
         ) : (
           <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
@@ -369,11 +459,51 @@ export default function UserProfile() {
                   {userProfile.display_name || 'Anonymous'}
                 </h1>
                 <p className="text-sm text-slate-500 font-semibold">@{safeHandle}</p>
+
+                {softTrustMarkers.length ? (
+                  <div className="mt-3">
+                    <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-2">
+                      Trust markers (not official verification)
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {softTrustMarkers.map((label) => (
+                        <TagBadge key={label} tag={label} />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {userProfile?.is_private ? (
+                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-slate-100 text-slate-700 text-[10px] font-black uppercase">
+                    Private
+                  </span>
+                ) : null}
                 {profileIsAdmin ? (
                   <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
                     Admin
                   </span>
                 ) : null}
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFollowListMode('followers');
+                      setFollowListOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-xl border-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-black text-sm"
+                  >
+                    Followers {displayedFollowersCount}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFollowListMode('following');
+                      setFollowListOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-xl border-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-black text-sm"
+                  >
+                    Following {displayedFollowingCount}
+                  </button>
+                </div>
               </div>
             </div>
             
@@ -457,7 +587,7 @@ export default function UserProfile() {
                           const id = convo?.id ? String(convo.id) : null;
                           navigate(id ? `/Messages?conversationId=${encodeURIComponent(id)}` : '/Messages');
                         } catch (e) {
-                          toast.error(e?.message || 'Failed to start conversation');
+                          toast.error(getInteractionErrorMessage(e, 'Failed to start conversation'));
                         }
                       }}
                       variant="outline"
@@ -487,7 +617,9 @@ export default function UserProfile() {
 
                     <Button
                       onClick={() => {
-                        const ok = window.confirm('Blocking hides this user’s profile, movements, and messages. Continue?');
+                        const ok = window.confirm(
+                          'Blocking this user will prevent them from following or interacting with you. You can unblock them later from Settings. Continue?'
+                        );
                         if (!ok) return;
                         blockMutation.mutate();
                       }}
@@ -523,25 +655,7 @@ export default function UserProfile() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-            <div className="bg-gradient-to-br from-indigo-50 to-white p-5 rounded-2xl border-2 border-indigo-200 text-center">
-              <div className="text-3xl font-black text-[#3A3DFF] mb-1">
-                {displayedFollowersCount}
-              </div>
-              <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                Followers
-              </div>
-            </div>
-            
-            <div className="bg-gradient-to-br from-yellow-50 to-white p-5 rounded-2xl border-2 border-yellow-200 text-center">
-              <div className="text-3xl font-black text-[#FFC947] mb-1">
-                {displayedFollowingCount}
-              </div>
-              <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                Following
-              </div>
-            </div>
-            
+          <div className="grid grid-cols-2 sm:grid-cols-2 gap-4 mb-6">
             <div className="bg-gradient-to-br from-slate-50 to-white p-5 rounded-2xl border-2 border-slate-200 text-center">
               <div className="text-3xl font-black text-slate-900 mb-1">
                 {userMovements.length}

@@ -5,6 +5,7 @@ import { MapPin, Loader2, Target } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
+import { toast } from 'sonner';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
@@ -67,7 +68,7 @@ export default function LocationPicker({
 
   const handleGetCurrentLocation = () => {
     if (!navigator.geolocation) {
-      alert('Geolocation is not supported by your browser');
+      toast.error('Geolocation is not supported by your browser');
       return;
     }
 
@@ -81,7 +82,7 @@ export default function LocationPicker({
         setLoading(false);
       },
       () => {
-        alert('Unable to retrieve your location');
+        toast.error('Unable to retrieve your location');
         setLoading(false);
       }
     );

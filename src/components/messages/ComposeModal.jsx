@@ -19,6 +19,7 @@ import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { uploadFile } from '@/api/uploadsClient';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
+import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 
 const MAX_RESULTS = 10;
 const SEARCH_DEBOUNCE_MS = 400;
@@ -295,7 +296,7 @@ export default function ComposeModal({ open, onClose, currentUser, onConversatio
       onClose();
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to start conversation');
+      toast.error(getInteractionErrorMessage(e, 'Failed to start conversation'));
     },
   });
 
@@ -348,7 +349,7 @@ export default function ComposeModal({ open, onClose, currentUser, onConversatio
       onClose();
     },
     onError: (e) => {
-      toast.error(e?.message || 'Failed to create group chat');
+      toast.error(getInteractionErrorMessage(e, 'Failed to create group chat'));
     },
   });
 

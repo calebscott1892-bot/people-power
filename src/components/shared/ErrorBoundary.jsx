@@ -1,5 +1,6 @@
 import React from 'react';
 import { logError } from '@/utils/logError';
+import ErrorState from '@/components/shared/ErrorState';
 
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -22,30 +23,12 @@ export default class ErrorBoundary extends React.Component {
   render() {
     if (!this.state.hasError) return this.props.children;
 
-    let showDetails = import.meta?.env?.DEV;
-    if (!showDetails) {
-      try {
-        const params = new URLSearchParams(window.location.search);
-        showDetails = params.get('debug') === '1' || localStorage.getItem('pp_debug') === '1';
-      } catch {
-        // ignore
-      }
-    }
-    const safeMessage = this.state.error?.message || this.state.error || 'Unknown error';
-
     return (
       <div className="max-w-2xl mx-auto p-6">
-        <div className="p-6 rounded-2xl border border-slate-200 bg-slate-50 text-slate-700">
-          <div className="font-black text-slate-900 text-lg mb-2">Something went wrong</div>
-          <div className="text-sm text-slate-600">
-            This page hit an error while we’re migrating off the old backend. Try refreshing.
-          </div>
-          {showDetails ? (
-            <pre className="mt-4 text-xs overflow-auto whitespace-pre-wrap text-slate-500">
-              {String(safeMessage)}
-            </pre>
-          ) : null}
-        </div>
+        <ErrorState
+          error={this.state.error}
+          onReload={() => window.location.reload()}
+        />
       </div>
     );
   }

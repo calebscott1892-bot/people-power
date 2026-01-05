@@ -1,19 +1,25 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { upsertMyPublicKey } from '@/api/keysClient';
 import { getOrCreateIdentityKeypair } from '@/lib/e2eeCrypto';
 import { logError } from '@/utils/logError';
 import { getStaffRole } from '@/utils/staff';
+import { configureAuthFetch, installAuthFetch } from '@/auth/authFetch';
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [serverStaffRole, setServerStaffRole] = useState(null);
   const lastKeyPublishRef = useRef({ accessToken: null, email: null });
+  const sessionRef = useRef(null);
   const authDisabledMessage = 'Sign-in is temporarily unavailable; configuration error. Please contact support.';
   const staffRole = useMemo(() => {
     const serverRole = String(serverStaffRole || '').trim().toLowerCase();
@@ -27,7 +33,30 @@ export function AuthProvider({ children }) {
   }, [user, serverStaffRole]);
   const isAdmin = staffRole === 'admin';
   const isStaff = staffRole === 'admin' || staffRole === 'moderator';
+  const emailConfirmedAt = user?.email_confirmed_at ?? null;
+  const isEmailVerified = !!emailConfirmedAt;
 
+  const isAuthReady = !loading;
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  const applySession = useCallback(
+    (nextSession) => {
+      setSession(nextSession ?? null);
+      setUser(nextSession?.user ?? null);
+      setLoading(false);
+    },
+    []
+  );
+
+  // Current auth/token flow summary:
+  // - We create the Supabase client in `src/api/supabaseClient.js` (persisted sessions + auto refresh enabled).
+  // - On startup we call `supabase.auth.getSession()` and keep the session/user in React state.
+  // - We subscribe to `supabase.auth.onAuthStateChange` to stay in sync (sign-in, refresh, sign-out).
+  // - API requests attach the access token via `Authorization: Bearer <token>`.
+  //   (We also install a global fetch wrapper to attach the latest token and handle session expiry consistently.)
   useEffect(() => {
     const supabase = getSupabaseClient();
     if (supabaseConfigError) {
@@ -49,15 +78,11 @@ export function AuthProvider({ children }) {
 
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
-      setSession(data?.session ?? null);
-      setUser(data?.session?.user ?? null);
-      setLoading(false);
+      applySession(data?.session ?? null);
     });
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession ?? null);
-      setUser(newSession?.user ?? null);
-      setLoading(false);
+      applySession(newSession ?? null);
     });
 
     return () => {
@@ -65,6 +90,47 @@ export function AuthProvider({ children }) {
       sub?.subscription?.unsubscribe?.();
     };
   }, []);
+
+  // Keep React Query caches in sync with auth state.
+  useEffect(() => {
+    const email = user?.email ? String(user.email).trim().toLowerCase() : null;
+    if (!isAuthReady) return;
+
+    // When auth changes, refresh user-bound queries.
+    queryClient.invalidateQueries({ queryKey: ['userProfile', email] }).catch(() => {});
+    queryClient.invalidateQueries({ queryKey: ['myBlocks', email] }).catch(() => {});
+  }, [queryClient, user?.email, isAuthReady]);
+
+  useEffect(() => {
+    configureAuthFetch({
+      getAccessToken: () => {
+        const s = sessionRef.current;
+        return s?.access_token ? String(s.access_token) : null;
+      },
+      getSession: () => sessionRef.current,
+      refreshSession: async () => {
+        const supabase = getSupabaseClient();
+        if (!supabase) return null;
+        const { data, error } = await supabase.auth.refreshSession();
+        if (error) throw error;
+        return data?.session ?? null;
+      },
+      onAuthExpired: async ({ message }) => {
+        // Clear local auth state so protected routes redirect predictably.
+        setSession(null);
+        setUser(null);
+        setServerStaffRole(null);
+
+        const from =
+          typeof window !== 'undefined'
+            ? `${window.location.pathname}${window.location.search ?? ''}${window.location.hash ?? ''}`
+            : '/';
+        navigate('/login', { replace: true, state: { from, reason: 'session_expired', message } });
+      },
+    });
+
+    installAuthFetch();
+  }, [navigate]);
 
   useEffect(() => {
     const accessToken = session?.access_token ? String(session.access_token) : null;
@@ -122,16 +188,83 @@ export function AuthProvider({ children }) {
     const supabase = getSupabaseClient();
     if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    return data;
+    if (error) {
+      const msg = String(error?.message || 'Sign-in failed');
+      if (msg.toLowerCase().includes('email not confirmed')) {
+        const e = new Error('Please verify your email address, then sign in.');
+        e.code = 'EMAIL_NOT_CONFIRMED';
+        throw e;
+      }
+      throw error;
+    }
+
+    // Ensure UI updates immediately even before onAuthStateChange fires.
+    if (data?.session) applySession(data.session);
+    return { status: 'signed_in', session: data?.session ?? null, user: data?.user ?? null };
   };
 
-  const signUp = async (email, password) => {
+  const signUp = async (email, password, options = {}) => {
     const supabase = getSupabaseClient();
     if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const emailRedirectTo = options?.emailRedirectTo ? String(options.emailRedirectTo) : null;
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      ...(emailRedirectTo ? { options: { emailRedirectTo } } : null),
+    });
     if (error) throw error;
-    return data;
+
+    // Supabase behavior depends on project settings:
+    // - If email confirmation is OFF, `data.session` is usually present => user is immediately signed in.
+    // - If email confirmation is REQUIRED, `data.session` is null but `data.user.confirmation_sent_at` is present.
+    if (data?.session) {
+      applySession(data.session);
+      return { status: 'signed_in', session: data.session, user: data.user ?? null };
+    }
+
+    const confirmationSentAt = data?.user?.confirmation_sent_at || null;
+    return {
+      status: 'confirmation_required',
+      session: null,
+      user: data?.user ?? null,
+      confirmationSentAt,
+    };
+  };
+
+  const resendConfirmationEmail = async (email, options = {}) => {
+    const supabase = getSupabaseClient();
+    if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
+    const toEmail = String(email || '').trim();
+    if (!toEmail) throw new Error('Email is required');
+
+    // Supabase v2: auth.resend({ type: 'signup', email, options?: { emailRedirectTo } })
+    const fn = supabase?.auth?.resend;
+    if (typeof fn !== 'function') {
+      throw new Error('Resend is not supported by this Supabase client version.');
+    }
+
+    const emailRedirectTo = options?.emailRedirectTo ? String(options.emailRedirectTo) : null;
+    const { error } = await fn({
+      type: 'signup',
+      email: toEmail,
+      ...(emailRedirectTo ? { options: { emailRedirectTo } } : null),
+    });
+    if (error) throw error;
+    return { ok: true };
+  };
+
+  const resetPasswordForEmail = async (email, options = {}) => {
+    const supabase = getSupabaseClient();
+    if (supabaseConfigError || !supabase) throw new Error(authDisabledMessage);
+    const toEmail = String(email || '').trim();
+    if (!toEmail) throw new Error('Email is required');
+    const redirectTo = options?.redirectTo ? String(options.redirectTo) : null;
+    const { error } = await supabase.auth.resetPasswordForEmail(
+      toEmail,
+      redirectTo ? { redirectTo } : undefined
+    );
+    if (error) throw error;
+    return { ok: true };
   };
 
   // Logout: calls Supabase signOut and clears local auth state.
@@ -143,24 +276,36 @@ export function AuthProvider({ children }) {
     setSession(null);
     setUser(null);
     setServerStaffRole(null);
+
+    try {
+      queryClient.clear();
+    } catch {
+      // ignore
+    }
   }, [authDisabledMessage]);
 
   const value = useMemo(
     () => ({
       session,
       user,
+      accessToken: session?.access_token ? String(session.access_token) : null,
       loading,
       signIn,
       signUp,
+      resendConfirmationEmail,
+      resetPasswordForEmail,
       signOut: logout,
       staffRole,
       isAdmin,
       isStaff,
+      emailConfirmedAt,
+      isEmailVerified,
+      isAuthReady,
       isSupabaseConfigured: !supabaseConfigError,
       authErrorMessage: supabaseConfigError ? authDisabledMessage : null,
       logout,
     }),
-    [session, user, loading, staffRole, isAdmin, isStaff, logout]
+    [session, user, loading, staffRole, isAdmin, isStaff, emailConfirmedAt, isEmailVerified, isAuthReady, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

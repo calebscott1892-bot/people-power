@@ -97,3 +97,31 @@ export async function fetchPublicProfileByUsername(username, options) {
   if (body && typeof body === 'object' && body.profile) return body.profile;
   return body;
 }
+
+export async function fetchPublicProfileByEmail(email, options) {
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  if (!accessToken) throw new Error('Authentication required');
+
+  const BASE_URL = SERVER_BASE;
+
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) throw new Error('Email is required');
+
+  const url = `${BASE_URL.replace(/\/$/, '')}/profiles/email/${encodeURIComponent(normalized)}`;
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const messageFromBody =
+      (body && typeof body === 'object' && (body.message || body.error)) || null;
+    throw new Error(messageFromBody ? String(messageFromBody) : `Failed to load profile: ${res.status}`);
+  }
+
+  if (body && typeof body === 'object' && body.profile) return body.profile;
+  return body;
+}

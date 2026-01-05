@@ -9,7 +9,7 @@ export default function ImpactSuggestions({ movement }) {
   const generateSuggestions = async () => {
     setGenerating(true);
     try {
-      const boosts = Number(movement?.boosts || 0) || 0;
+      const boosts = Number(movement?.boosts_count ?? movement?.upvotes ?? movement?.boosts ?? 0) || 0;
       const supporters = Number(movement?.supporters || 0) || 0;
       const participants = Number(movement?.verified_participants || 0) || 0;
 

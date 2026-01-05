@@ -10,6 +10,8 @@ import { motion } from 'framer-motion';
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { entities } from "@/api/appClient";
+import { useAuth } from '@/auth/AuthProvider';
+import { upsertNotification } from '@/api/notificationsClient';
 
 export default function EnhancedTaskManager({ movementId, currentUser, canEdit }) {
   const [showForm, setShowForm] = useState(false);
@@ -24,6 +26,8 @@ export default function EnhancedTaskManager({ movementId, currentUser, canEdit }
     depends_on: []
   });
   const queryClient = useQueryClient();
+  const { session } = useAuth();
+  const accessToken = session?.access_token || null;
 
   const { data: tasks = [] } = useQuery({
     queryKey: ['movementTasks', movementId],
@@ -74,14 +78,23 @@ export default function EnhancedTaskManager({ movementId, currentUser, canEdit }
       });
 
       if (newTask.assigned_to && newTask.assigned_to !== currentUser.email) {
-        await entities.Notification.create({
-          recipient_email: newTask.assigned_to,
-          type: 'movement_update',
-          actor_email: currentUser.email,
-          actor_name: currentUser.full_name || currentUser.email,
-          content_id: movementId,
-          content_title: `assigned you: ${newTask.title}`
-        });
+        try {
+          if (accessToken) {
+            await upsertNotification(
+              {
+                recipient_email: newTask.assigned_to,
+                type: 'movement_update',
+                actor_email: currentUser.email,
+                actor_name: currentUser.full_name || currentUser.email,
+                content_id: movementId,
+                content_title: `assigned you: ${newTask.title}`,
+              },
+              { accessToken }
+            );
+          }
+        } catch {
+          // ignore
+        }
       }
     },
     onSuccess: () => {

@@ -6,12 +6,14 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { UserPlus, Loader2, Sparkles } from 'lucide-react';
 import { toast } from "sonner";
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { useQuery } from '@tanstack/react-query';
 import { entities } from "@/api/appClient";
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { useAuth } from '@/auth/AuthProvider';
 import { inviteCollaborator } from '@/api/collaboratorsClient';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
+import { upsertNotification } from '@/api/notificationsClient';
 
 export default function InviteCollaboratorModal({ open, onClose, movementId, currentUser, movement }) {
   const [username, setUsername] = useState('');
@@ -104,16 +106,22 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
 
       await inviteCollaborator(movementId, { username: handle, role }, { accessToken });
 
-      // Best-effort local notification (legacy stub). Don't block invite if this fails.
+      // Best-effort notification. Don't block invite if this fails.
       try {
-        await entities.Notification.create({
-          recipient_email: profile.user_email,
-          type: 'movement_update',
-          actor_email: currentUser.email,
-          actor_name: currentUser.full_name || currentUser.display_name || (currentUser.username ? `@${currentUser.username}` : null),
-          content_id: movementId,
-          content_title: 'invited you to collaborate'
-        });
+        await upsertNotification(
+          {
+            recipient_email: profile.user_email,
+            type: 'movement_update',
+            actor_email: currentUser.email,
+            actor_name:
+              currentUser.full_name ||
+              currentUser.display_name ||
+              (currentUser.username ? `@${currentUser.username}` : null),
+            content_id: movementId,
+            content_title: 'invited you to collaborate',
+          },
+          { accessToken }
+        );
       } catch {
         // ignore
       }
@@ -125,7 +133,7 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
       onClose();
     },
     onError: (error) => {
-      toast.error(error.message || 'Failed to send invitation');
+      toastFriendlyError(error, 'Failed to send invitation');
     }
   });
 

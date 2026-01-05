@@ -16,8 +16,39 @@ async function safeReadJson(res) {
   }
 }
 
+function toApiError(res, body, fallbackMessage) {
+  const message = (body && (body.error || body.message))
+    ? String(body.error || body.message)
+    : String(fallbackMessage || `Request failed: ${res.status}`);
+  const err = new Error(message);
+  if (body && typeof body === 'object' && body.code) err.code = String(body.code);
+  err.status = res.status;
+  return err;
+}
+
 export async function fetchMovementComments(movementId, options) {
   return fetchMovementCommentsPage(movementId, { limit: 50, offset: 0, accessToken: options?.accessToken });
+}
+
+export async function fetchMovementCommentsCount(movementId, options) {
+  const id = normalizeId(movementId);
+  if (!id) throw new Error('Movement ID is required');
+
+  const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments/count`;
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      ...(options?.accessToken ? { Authorization: `Bearer ${String(options.accessToken)}` } : {}),
+    },
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    throw toApiError(res, body, `Failed to load comment count: ${res.status}`);
+  }
+
+  const count = body && typeof body === 'object' ? Number(body.count) : NaN;
+  return Number.isFinite(count) ? count : 0;
 }
 
 export async function fetchMovementCommentsPage(movementId, { limit = 20, offset = 0, fields, accessToken } = {}) {
@@ -39,8 +70,7 @@ export async function fetchMovementCommentsPage(movementId, { limit = 20, offset
   const body = await safeReadJson(res);
 
   if (!res.ok) {
-    const msg = (body && (body.error || body.message)) ? String(body.error || body.message) : `Failed to load comments: ${res.status}`;
-    throw new Error(msg);
+    throw toApiError(res, body, `Failed to load comments: ${res.status}`);
   }
 
   return Array.isArray(body?.comments) ? body.comments : Array.isArray(body) ? body : [];
@@ -55,8 +85,7 @@ export async function fetchMovementCommentSettings(movementId) {
   const body = await safeReadJson(res);
 
   if (!res.ok) {
-    const msg = (body && (body.error || body.message)) ? String(body.error || body.message) : `Failed to load comment settings: ${res.status}`;
-    throw new Error(msg);
+    throw toApiError(res, body, `Failed to load comment settings: ${res.status}`);
   }
 
   return body && typeof body === 'object' ? body : { locked: false, slow_mode_seconds: 0 };
@@ -82,8 +111,7 @@ export async function updateMovementCommentSettings(movementId, patch, options) 
 
   const body = await safeReadJson(res);
   if (!res.ok) {
-    const msg = (body && (body.error || body.message)) ? String(body.error || body.message) : `Failed to update comment settings: ${res.status}`;
-    throw new Error(msg);
+    throw toApiError(res, body, `Failed to update comment settings: ${res.status}`);
   }
 
   return body && typeof body === 'object' ? body : { ok: true };
@@ -112,8 +140,7 @@ export async function createMovementComment(movementId, content, options) {
 
   const body = await safeReadJson(res);
   if (!res.ok) {
-    const msg = (body && (body.error || body.message)) ? String(body.error || body.message) : `Failed to post comment: ${res.status}`;
-    throw new Error(msg);
+    throw toApiError(res, body, `Failed to post comment: ${res.status}`);
   }
 
   return body?.comment ?? body;

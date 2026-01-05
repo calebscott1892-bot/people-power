@@ -185,7 +185,7 @@ export default function MovementCard({ movement }) {
     setMapError(false);
   }, [coords?.lat, coords?.lon]);
 
-  const boosts = toNumber(movement?.upvotes ?? movement?.boosts);
+  const boosts = toNumber(movement?.boosts_count ?? movement?.upvotes ?? movement?.boosts);
   const downvotes = toNumber(movement?.downvotes);
   const score = toNumber(movement?.score ?? movement?.momentum_score);
   const isTrending = score >= 10;

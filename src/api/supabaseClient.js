@@ -15,7 +15,26 @@ if (supabaseConfigError && import.meta?.env?.DEV) {
   console.error('[supabaseClient]', supabaseConfigError);
 }
 
-const supabaseClient = supabaseConfigError ? null : createClient(supabaseUrl, supabaseAnonKey);
+const supabaseClient = supabaseConfigError
+  ? null
+  : createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        // Best-practice defaults for browser apps (mobile included):
+        // - persistSession: Supabase stores/loads session for us
+        // - autoRefreshToken: refreshes access tokens when possible
+        // - detectSessionInUrl: supports OAuth flows and magic links safely
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    });
+
+// NOTE: Supabase dashboard configuration required for email flows:
+// - Auth > URL Configuration: set a correct Site URL (e.g. https://peoplepower.app)
+// - Add Redirect URLs for (at least):
+//   - <site>/reset-password
+//   - <site>/email-verified
+// Without this, password reset + email verification links may not redirect correctly.
 
 export function getSupabaseClient() {
   return supabaseClient;

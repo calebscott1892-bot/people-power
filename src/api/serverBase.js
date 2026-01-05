@@ -23,6 +23,18 @@ export const SERVER_BASE = trimTrailingSlashes(
   envBase || (isLocalhost() ? DEV_BACKEND : PROD_BACKEND)
 );
 
+if (import.meta?.env?.DEV) {
+  try {
+    const key = '__PEOPLEPOWER_SERVER_BASE_LOGGED__';
+    if (!globalThis[key]) {
+      globalThis[key] = true;
+      console.log(`[PeoplePower] SERVER_BASE (frontend API) = ${SERVER_BASE}`);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 // Backwards-compatible helper (many clients historically imported a function).
 export function getServerBaseUrl() {
   return SERVER_BASE;

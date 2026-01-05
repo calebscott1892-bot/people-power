@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Bell, Loader2, Check, Heart, MessageCircle, Zap, UserPlus, MessageSquare, Calendar } from 'lucide-react';
+import { Bell, Loader2, Check, Heart, UserPlus, MessageSquare } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { format } from 'date-fns';
 import { Button } from "@/components/ui/button";
@@ -12,16 +12,9 @@ import {
   markNotificationsRead,
 } from '@/api/notificationsClient';
 import { useAuth } from '@/auth/AuthProvider';
-import { updateReport } from '@/api/reportsClient';
-import { uploadFile } from '@/api/uploadsClient';
-import { toast } from 'sonner';
 import { logError } from '@/utils/logError';
-import { ALLOWED_UPLOAD_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 
-
-function nowIso() {
-  return new Date().toISOString();
-}
+const ALLOWED_PUBLIC_TYPES = new Set(['follow', 'movement_boost', 'comment']);
 
 export default function Notifications() {
   const { session, user: supaUser, loading } = useAuth();
@@ -37,12 +30,6 @@ export default function Notifications() {
     return session?.access_token ? String(session.access_token) : null;
   }, [session]);
 
-  const [followupOpen, setFollowupOpen] = useState(false);
-  const [followupNotification, setFollowupNotification] = useState(null);
-  const [followupText, setFollowupText] = useState('');
-  const [followupEvidence, setFollowupEvidence] = useState(null);
-  const [sendingFollowup, setSendingFollowup] = useState(false);
-
   const {
     data: notificationsPages,
     isLoading,
@@ -54,27 +41,15 @@ export default function Notifications() {
     isFetchingNextPage,
   } = useInfiniteQuery({
     queryKey: ['notifications', userEmail],
-    enabled: !!userEmail,
+    enabled: !!userEmail && !!accessToken,
     initialPageParam: 0,
     queryFn: async ({ pageParam = 0 }) => {
       if (!userEmail) return [];
       return listNotificationsForUserPage(userEmail, {
         limit: 20,
         offset: pageParam,
-        fields: [
-          'id',
-          'recipient_email',
-          'type',
-          'actor_name',
-          'actor_email',
-          'content_id',
-          'content_ref',
-          'content_title',
-          'created_date',
-          'is_read',
-          'metadata',
-        ],
-      });
+        // Server returns safe full objects; no field projection needed.
+      }, { accessToken });
     },
     getNextPageParam: (lastPage, pages) => {
       const list = Array.isArray(lastPage) ? lastPage : [];
@@ -88,6 +63,42 @@ export default function Notifications() {
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
   }, [notificationsPages]);
 
+  const publicNotifications = useMemo(() => {
+    return (Array.isArray(notifications) ? notifications : []).filter((n) => ALLOWED_PUBLIC_TYPES.has(String(n?.type || '')));
+  }, [notifications]);
+
+  const autoMarkedIdsRef = useRef(new Set());
+  const autoMarkInFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (!userEmail) return;
+    if (isLoading || notificationsError) return;
+    if (!publicNotifications.length) return;
+    if (autoMarkInFlightRef.current) return;
+
+    const unreadIds = publicNotifications
+      .filter((n) => n && !n.is_read)
+      .map((n) => String(n.id || '').trim())
+      .filter(Boolean)
+      .filter((id) => !autoMarkedIdsRef.current.has(id));
+
+    if (unreadIds.length === 0) return;
+
+    unreadIds.forEach((id) => autoMarkedIdsRef.current.add(id));
+    autoMarkInFlightRef.current = true;
+
+    markNotificationsRead(unreadIds, { accessToken })
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['notifications', userEmail] });
+      })
+      .catch(() => {
+        // best-effort
+      })
+      .finally(() => {
+        autoMarkInFlightRef.current = false;
+      });
+  }, [publicNotifications, isLoading, notificationsError, userEmail, queryClient, accessToken]);
+
   useEffect(() => {
     if (notificationsError && notificationsErrorObj) {
       logError(notificationsErrorObj, 'Notifications load failed');
@@ -96,7 +107,8 @@ export default function Notifications() {
 
   const markAsReadMutation = useMutation({
     mutationFn: async (notificationId) => {
-      await markNotificationRead(notificationId);
+      if (!accessToken) return;
+      await markNotificationRead(notificationId, { accessToken });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications', userEmail] });
@@ -105,8 +117,9 @@ export default function Notifications() {
 
   const markAllReadMutation = useMutation({
     mutationFn: async () => {
-      const unread = notifications.filter(n => !n.is_read);
-      await markNotificationsRead(unread.map((n) => n?.id));
+      const unread = publicNotifications.filter((n) => !n.is_read);
+      if (!accessToken) return;
+      await markNotificationsRead(unread.map((n) => n?.id), { accessToken });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications', userEmail] });
@@ -142,66 +155,7 @@ export default function Notifications() {
     );
   }
 
-  const unreadCount = notifications.filter(n => !n.is_read).length;
-
-  const openFollowup = (notification) => {
-    setFollowupNotification(notification);
-    setFollowupText('');
-    setFollowupEvidence(null);
-    setFollowupOpen(true);
-  };
-
-  const submitFollowup = async () => {
-    if (!followupNotification) return;
-    if (!accessToken) {
-      toast.error('Log in to send follow-up');
-      return;
-    }
-    const reportId = followupNotification?.metadata?.report_id;
-    if (!reportId) {
-      toast.error('Missing report reference');
-      return;
-    }
-    if (!String(followupText || '').trim() && !followupEvidence) {
-      toast.error('Add a message or evidence');
-      return;
-    }
-
-    setSendingFollowup(true);
-    try {
-      let evidenceUrl = null;
-      if (followupEvidence) {
-        const res = await uploadFile(followupEvidence, {
-          accessToken,
-          maxBytes: MAX_UPLOAD_BYTES,
-          allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
-        });
-        evidenceUrl = res?.url ? String(res.url) : null;
-      }
-
-      await updateReport(
-        String(reportId),
-        {
-          status: 'pending',
-          reporter_followup_details: String(followupText || '').trim() || null,
-          reporter_followup_evidence_url: evidenceUrl || null,
-          reporter_followup_at: nowIso(),
-          updated_at: nowIso(),
-        },
-        { accessToken }
-      );
-
-      await markNotificationRead(followupNotification.id);
-      queryClient.invalidateQueries({ queryKey: ['notifications', userEmail] });
-      toast.success('Follow-up sent');
-      setFollowupOpen(false);
-    } catch (e) {
-      logError(e, 'Notification follow-up failed', { reportId: String(reportId) });
-      toast.error('Failed to send follow-up');
-    } finally {
-      setSendingFollowup(false);
-    }
-  };
+  const unreadCount = publicNotifications.filter((n) => !n.is_read).length;
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -259,22 +213,21 @@ export default function Notifications() {
                 Retry
               </button>
             </div>
-          ) : notifications.length === 0 ? (
+          ) : publicNotifications.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
               <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
                 <Bell className="w-8 h-8 text-slate-400" />
               </div>
-              <h3 className="font-black text-lg text-slate-900 mb-2">No notifications yet</h3>
-              <p className="text-slate-500 text-sm">You&apos;ll see updates here when people interact with you</p>
+              <h3 className="font-black text-lg text-slate-900 mb-2">No activity yet</h3>
+              <p className="text-slate-500 text-sm">You&apos;ll see follows, boosts, and comments here</p>
             </div>
           ) : (
             <>
-              {notifications.map((notification) => (
+              {publicNotifications.map((notification) => (
                 <NotificationItem
                   key={notification.id}
                   notification={notification}
                   onMarkRead={() => markAsReadMutation.mutate(notification.id)}
-                  onProvideMoreInfo={() => openFollowup(notification)}
                 />
               ))}
               {hasNextPage ? (
@@ -293,81 +246,11 @@ export default function Notifications() {
           )}
         </div>
       </motion.div>
-
-      {followupOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setFollowupOpen(false)} />
-          <div className="relative w-full max-w-md rounded-3xl bg-white border border-slate-200 shadow-lg overflow-hidden">
-            <div className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] px-5 py-4 text-slate-900">
-              <div className="font-black text-lg">Provide more info</div>
-              <div className="text-xs font-semibold text-slate-800 mt-1">
-                This goes to the moderation team reviewing your report.
-              </div>
-            </div>
-
-            <div className="p-5 space-y-3">
-              <label className="text-sm font-black text-slate-700">Message</label>
-              <textarea
-                value={followupText}
-                onChange={(e) => setFollowupText(e.target.value)}
-                className="w-full min-h-24 p-3 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
-                placeholder="Add any context, links, or clarifications…"
-              />
-
-              <div className="pt-1 space-y-2">
-                <label className="text-sm font-black text-slate-700">Evidence file (optional)</label>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,application/pdf"
-                  onChange={(e) => {
-                    const file = (e.target.files && e.target.files[0]) || null;
-                    e.target.value = '';
-                    if (!file) {
-                      setFollowupEvidence(null);
-                      return;
-                    }
-                    const validationError = validateFileUpload({
-                      file,
-                      maxBytes: MAX_UPLOAD_BYTES,
-                      allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
-                    });
-                    if (validationError) {
-                      toast.error(validationError);
-                      setFollowupEvidence(null);
-                      return;
-                    }
-                    setFollowupEvidence(file);
-                  }}
-                  className="block w-full text-sm"
-                />
-              </div>
-
-              <div className="flex gap-2 justify-end pt-2">
-                <button
-                  type="button"
-                  onClick={() => setFollowupOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 font-black hover:bg-slate-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={submitFollowup}
-                  disabled={sendingFollowup}
-                  className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
-                >
-                  {sendingFollowup ? 'Sending…' : 'Send'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
 
-function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
+function NotificationItem({ notification, onMarkRead }) {
   const safeActorName = useMemo(() => {
     const raw = String(notification?.actor_name || '').trim();
     if (raw && !raw.includes('@')) return raw;
@@ -377,12 +260,8 @@ function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
   const getIcon = () => {
     switch (notification.type) {
       case 'follow': return <UserPlus className="w-5 h-5 text-blue-500" />;
-      case 'message': return <MessageCircle className="w-5 h-5 text-green-500" />;
       case 'movement_boost': return <Heart className="w-5 h-5 text-red-500" />;
       case 'comment': return <MessageSquare className="w-5 h-5 text-purple-500" />;
-      case 'challenge_complete': return <Zap className="w-5 h-5 text-yellow-500" />;
-      case 'event_reminder': return <Calendar className="w-5 h-5 text-indigo-500" />;
-      case 'moderation_request_more_info': return <MessageSquare className="w-5 h-5 text-slate-700" />;
       default: return <Bell className="w-5 h-5 text-slate-500" />;
     }
   };
@@ -391,18 +270,10 @@ function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
     switch (notification.type) {
       case 'follow':
         return `${safeActorName} started following you`;
-      case 'message':
-        return `${safeActorName} sent you a message`;
       case 'movement_boost':
         return `${safeActorName} boosted "${notification.content_title}"`;
       case 'comment':
         return `${safeActorName} commented on "${notification.content_title}"`;
-      case 'challenge_complete':
-        return `${safeActorName} completed a challenge`;
-      case 'event_reminder':
-        return notification.content_title || 'Upcoming event reminder';
-      case 'moderation_request_more_info':
-        return 'A moderator requested more information about your report';
       default:
         return notification.content_title || 'New notification';
     }
@@ -412,15 +283,9 @@ function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
     switch (notification.type) {
       case 'follow':
         return createPageUrl(`UserProfile?email=${notification.actor_email}`);
-      case 'message':
-        return createPageUrl('Messages');
       case 'movement_boost':
       case 'comment':
         return notification.content_id ? `/movement/${encodeURIComponent(String(notification.content_id))}` : null;
-      case 'event_reminder':
-        return notification.content_id ? `/movement/${encodeURIComponent(String(notification.content_id))}` : null;
-      case 'moderation_request_more_info':
-        return null;
       default:
         return null;
     }
@@ -459,22 +324,6 @@ function NotificationItem({ notification, onMarkRead, onProvideMoreInfo }) {
           <div className="w-2 h-2 bg-[#3A3DFF] rounded-full flex-shrink-0 mt-2" />
         )}
       </div>
-
-      {notification.type === 'moderation_request_more_info' ? (
-        <div className="mt-3 flex justify-end">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onProvideMoreInfo?.();
-            }}
-            className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-          >
-            Provide more info
-          </button>
-        </div>
-      ) : null}
     </motion.div>
   );
 

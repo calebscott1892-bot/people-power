@@ -4,6 +4,7 @@ import { Loader2 } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
+import { toastFriendlyError } from '@/utils/toastErrors';
 import {
   Dialog,
   DialogContent,
@@ -21,6 +22,7 @@ import { entities } from "@/api/appClient";
 import { updateReport } from '@/api/reportsClient';
 import { getStaffRole, isAdmin as isAdminEmail } from '@/utils/staff';
 import { useAuth } from '@/auth/AuthProvider';
+import { upsertNotification } from '@/api/notificationsClient';
 
 function nowIso() {
   return new Date().toISOString();
@@ -293,17 +295,21 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       if (statusValue !== 'resolved') return;
       if (!action || action === 'none' || action === 'request_more_info') return;
 
-      await entities.Notification.create({
-        recipient_email: affectedEmail,
-        type: 'moderation_notice',
-        content: `A moderation action was taken for: ${genericReasonSummary(report.report_category)}.`,
-        created_at: nowIso(),
-        metadata: {
-          report_id: report.id,
-          action_taken: action,
-          reason_category: String(report.report_category || ''),
+      if (!accessToken) return;
+      await upsertNotification(
+        {
+          recipient_email: affectedEmail,
+          type: 'moderation_notice',
+          content: `A moderation action was taken for: ${genericReasonSummary(report.report_category)}.`,
+          created_at: nowIso(),
+          metadata: {
+            report_id: report.id,
+            action_taken: action,
+            reason_category: String(report.report_category || ''),
+          },
         },
-      });
+        { accessToken }
+      );
     } catch {
       // ignore
     }
@@ -315,13 +321,18 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       if (!reporterEmail) return;
 
       if (statusValue === 'needs_info') {
-        await entities.Notification.create({
-          recipient_email: reporterEmail,
-          type: 'moderation_request_more_info',
-          content: 'A moderator requested more information about your report. Please reply with any helpful context or evidence.',
-          created_at: nowIso(),
-          metadata: { report_id: report.id },
-        });
+        if (!accessToken) return;
+        await upsertNotification(
+          {
+            recipient_email: reporterEmail,
+            type: 'moderation_request_more_info',
+            content:
+              'A moderator requested more information about your report. Please reply with any helpful context or evidence.',
+            created_at: nowIso(),
+            metadata: { report_id: report.id },
+          },
+          { accessToken }
+        );
       }
     } catch {
       // ignore
@@ -456,7 +467,7 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       onActionComplete();
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to update report'));
+      toastFriendlyError(e, 'Failed to update report');
     }
   });
 
@@ -486,13 +497,18 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       try {
         const affectedEmail = await getAffectedUserEmail();
         if (affectedEmail) {
-          await entities.Notification.create({
-            recipient_email: affectedEmail,
-            type: 'moderation_notice',
-            content: 'A previous moderation action was reversed after review.',
-            created_at: nowIso(),
-            metadata: { report_id: report.id, reversed_action: action },
-          });
+          if (accessToken) {
+            await upsertNotification(
+              {
+                recipient_email: affectedEmail,
+                type: 'moderation_notice',
+                content: 'A previous moderation action was reversed after review.',
+                created_at: nowIso(),
+                metadata: { report_id: report.id, reversed_action: action },
+              },
+              { accessToken }
+            );
+          }
         }
       } catch {
         // ignore
@@ -503,7 +519,7 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       onActionComplete();
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to reverse action'));
+      toastFriendlyError(e, 'Failed to reverse action');
     },
   });
 
@@ -540,7 +556,7 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       onActionComplete();
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to approve'));
+      toastFriendlyError(e, 'Failed to approve');
     },
   });
 
@@ -576,7 +592,7 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       onActionComplete();
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to deny'));
+      toastFriendlyError(e, 'Failed to deny');
     },
   });
 
@@ -609,7 +625,7 @@ export default function ReportActions({ report, onClose, onActionComplete, moder
       onActionComplete();
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to cancel'));
+      toastFriendlyError(e, 'Failed to cancel');
     },
   });
 

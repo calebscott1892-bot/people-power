@@ -23,6 +23,17 @@
 
 import { SERVER_BASE } from './serverBase';
 
+function withCanonicalBoostsCount(movement) {
+  if (!movement || typeof movement !== 'object') return movement;
+  const boostsCount =
+    typeof movement.boosts_count === 'number'
+      ? movement.boosts_count
+      : (typeof movement.upvotes === 'number'
+          ? movement.upvotes
+          : (typeof movement.boosts === 'number' ? movement.boosts : 0));
+  return { ...movement, boosts_count: boostsCount };
+}
+
 function normalizeMovements(payload) {
   if (Array.isArray(payload)) return payload;
   if (payload && typeof payload === 'object') {
@@ -48,12 +59,31 @@ async function safeReadJson(res) {
   }
 }
 
-export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken, mine = false } = {}) {
+function toApiError(res, body, fallbackMessage) {
+  const messageFromBody =
+    (body && typeof body === 'object' && (body.error || body.message)) || null;
+  const message = messageFromBody
+    ? String(messageFromBody)
+    : String(fallbackMessage || `Request failed: ${res.status}`);
+  const err = new Error(message);
+  if (body && typeof body === 'object' && body.code) err.code = String(body.code);
+  err.status = res.status;
+  return err;
+}
+
+export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken, mine = false, fields } = {}) {
+  // This is the canonical engagement source for boosts.
   const base = SERVER_BASE.replace(/\/$/, '');
   const params = new URLSearchParams();
   if (limit != null) params.set('limit', String(limit));
   if (offset != null) params.set('offset', String(offset));
   if (mine) params.set('mine', '1');
+  if (fields) {
+    const list = Array.isArray(fields)
+      ? fields.map((f) => String(f).trim()).filter(Boolean)
+      : String(fields).split(',').map((f) => f.trim()).filter(Boolean);
+    if (list.length) params.set('fields', list.join(','));
+  }
 
   const url = `${base}/movements${params.toString() ? `?${params.toString()}` : ''}`;
   const res = await fetch(url, {
@@ -66,7 +96,7 @@ export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken, 
     throw new Error(`Failed to fetch movements: ${res.status}`);
   }
   const data = await res.json();
-  return normalizeMovements(data);
+  return normalizeMovements(data).map(withCanonicalBoostsCount);
 }
 
 export async function fetchMovements(options) {
@@ -96,7 +126,7 @@ export async function fetchMyFollowedMovements(options) {
     throw new Error(message);
   }
 
-  return normalizeMovements(body);
+  return normalizeMovements(body).map(withCanonicalBoostsCount);
 }
 
 export async function fetchMovementById(id, options) {
@@ -119,10 +149,10 @@ export async function fetchMovementById(id, options) {
       const body = await res.json();
       // body may be { movement }, { data }, or the movement object itself
       if (body && typeof body === 'object') {
-        if (body.movement && typeof body.movement === 'object') return body.movement;
-        if (body.data && typeof body.data === 'object') return body.data;
+        if (body.movement && typeof body.movement === 'object') return withCanonicalBoostsCount(body.movement);
+        if (body.data && typeof body.data === 'object') return withCanonicalBoostsCount(body.data);
       }
-      return body ?? null;
+      return withCanonicalBoostsCount(body ?? null);
     }
 
     // Only fall back on not-found; bubble up other errors.
@@ -140,7 +170,7 @@ export async function fetchMovementById(id, options) {
     all.find((m) => normalizeId(m?._id) === movementId) ||
     null;
 
-  return found;
+  return withCanonicalBoostsCount(found);
 }
 
 export async function createMovement(payload, options) {
@@ -280,12 +310,7 @@ export async function voteMovement(id, value, options) {
   const body = await safeReadJson(res);
 
   if (!res.ok) {
-    const messageFromBody =
-      (body && typeof body === 'object' && (body.error || body.message)) || null;
-    const message = messageFromBody
-      ? String(messageFromBody)
-      : `Failed to vote: ${res.status}`;
-    throw new Error(message);
+    throw toApiError(res, body, `Failed to vote: ${res.status}`);
   }
 
   return body ?? { upvotes: 0, downvotes: 0, score: 0, myVote: 0 };

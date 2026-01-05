@@ -4,13 +4,14 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { ArrowRight, ArrowLeft, Sparkles, Users, Zap, Target, CheckCircle, Shield, AlertTriangle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { useTranslation } from 'react-i18next';
 import { createPageUrl } from '@/utils';
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { entities } from '@/api/appClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { acceptPlatformAcknowledgment, fetchMyPlatformAcknowledgment } from '@/api/platformAckClient';
+import { fetchMyProfile, upsertMyProfile } from '@/api/userProfileClient';
 
 const interestOptions = [
   { id: 'environment', label: 'Environment', icon: '🌍', color: 'from-green-500 to-emerald-500' },
@@ -115,23 +116,26 @@ export default function OnboardingFlow({ user, onComplete }) {
     };
   }, []);
 
-  const { data: onboarding } = useQuery({
-    queryKey: ['onboarding', user?.email],
+  const { data: myProfile } = useQuery({
+    queryKey: ['myProfile', user?.email],
     queryFn: async () => {
-      const records = await entities.UserOnboarding.filter({ user_email: user.email });
-      if (records.length > 0) return records[0];
-      
-      // Create new onboarding record
-      return entities.UserOnboarding.create({
-        user_email: user.email,
-        completed: false,
-        current_step: 0,
-        interests: [],
-        completed_tutorials: []
-      });
+      if (!accessToken) return null;
+      return fetchMyProfile({ accessToken });
     },
-    enabled: !!user
+    enabled: !!user && !!accessToken,
   });
+
+  const onboarding = React.useMemo(() => {
+    if (!myProfile) return null;
+    return {
+      completed: !!myProfile?.onboarding_completed,
+      current_step: Number.isFinite(Number(myProfile?.onboarding_current_step)) ? Number(myProfile.onboarding_current_step) : 0,
+      interests: Array.isArray(myProfile?.onboarding_interests) ? myProfile.onboarding_interests : [],
+      completed_tutorials: Array.isArray(myProfile?.onboarding_completed_tutorials)
+        ? myProfile.onboarding_completed_tutorials
+        : [],
+    };
+  }, [myProfile]);
 
   useEffect(() => {
     if (!onboarding) return;
@@ -144,26 +148,24 @@ export default function OnboardingFlow({ user, onComplete }) {
 
   const updateOnboardingMutation = useMutation({
     mutationFn: async (updates) => {
-      if (!onboarding) return;
-      await entities.UserOnboarding.update(onboarding.id, updates);
+      if (!accessToken) return;
+      const payload = {};
+      if (updates && typeof updates === 'object') {
+        if ('completed' in updates) payload.onboarding_completed = !!updates.completed;
+        if ('current_step' in updates) payload.onboarding_current_step = Number(updates.current_step) || 0;
+        if ('interests' in updates) payload.onboarding_interests = Array.isArray(updates.interests) ? updates.interests : [];
+        if ('completed_tutorials' in updates) {
+          payload.onboarding_completed_tutorials = Array.isArray(updates.completed_tutorials) ? updates.completed_tutorials : [];
+        }
+      }
+      await upsertMyProfile(payload, { accessToken });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['onboarding'] });
+      queryClient.invalidateQueries({ queryKey: ['myProfile'] });
     }
   });
 
   const completeOnboarding = () => {
-    if (user?.email) {
-      queryClient.setQueryData(['onboarding', user.email], (prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          completed: true,
-          interests: selectedInterests,
-          current_step: steps.length,
-        };
-      });
-    }
     updateOnboardingMutation.mutate({
       completed: true,
       interests: selectedInterests,
@@ -643,7 +645,7 @@ function LegalAcknowledgmentStep({
                   await acceptPlatformAcknowledgment({ accessToken, userEmail });
                 } catch (err) {
                   setPlatformAckAccepted(false);
-                  toast.error(err?.message || 'Failed to record acknowledgment');
+                  toastFriendlyError(err, 'Failed to record acknowledgment');
                 }
               } else if (next && !canRecordAck) {
                 setPlatformAckAccepted(false);

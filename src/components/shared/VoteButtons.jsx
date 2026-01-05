@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchMovementVotes, voteMovement } from '@/api/movementsClient';
+import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 
 export default function VoteButtons({ movementId, movement, className = '' }) {
   const { session } = useAuth();
@@ -68,8 +69,7 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
       });
     },
     onError: (e) => {
-      const msg = String(e?.message || '').trim();
-      toast.error(msg || 'Could not vote right now');
+      toast.error(getInteractionErrorMessage(e, 'Could not vote right now'));
     },
   });
 

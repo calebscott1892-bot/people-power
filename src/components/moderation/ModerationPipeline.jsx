@@ -6,6 +6,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { entities } from '@/api/appClient';
+import { useAuth } from '@/auth/AuthProvider';
+import { upsertNotification } from '@/api/notificationsClient';
 
 const ruleCategories = {
   violence_physical_harm: 'Violence / Physical Harm',
@@ -26,6 +28,8 @@ export default function ModerationPipeline({ report, moderatorProfile }) {
     requires_second_approval: false
   });
   const queryClient = useQueryClient();
+  const { session } = useAuth();
+  const accessToken = session?.access_token || null;
 
   const takeModerationActionMutation = useMutation({
     mutationFn: async (actionData) => {
@@ -64,12 +68,21 @@ export default function ModerationPipeline({ report, moderatorProfile }) {
 
       // Notify affected user
       if (report.reported_user_email) {
-        await entities.Notification.create({
-          recipient_email: report.reported_user_email,
-          type: 'moderation_action',
-          content: `A moderation action has been taken on your content. Rule: ${ruleCategories[actionData.rule_category]}`,
-          metadata: { action_id: action.id, can_appeal: true }
-        });
+        try {
+          if (accessToken) {
+            await upsertNotification(
+              {
+                recipient_email: report.reported_user_email,
+                type: 'moderation_action',
+                content: `A moderation action has been taken on your content. Rule: ${ruleCategories[actionData.rule_category]}`,
+                metadata: { action_id: action.id, can_appeal: true },
+              },
+              { accessToken }
+            );
+          }
+        } catch {
+          // ignore
+        }
       }
 
       return action;

@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { entities } from "@/api/appClient";
 import { useAuth } from '@/auth/AuthProvider';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
@@ -62,7 +63,7 @@ export default function PlatformConfigPanel({ adminEmail }) {
       toast.success('Configuration updated');
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to update configuration'));
+      toastFriendlyError(e, 'Failed to update configuration');
     }
   });
 

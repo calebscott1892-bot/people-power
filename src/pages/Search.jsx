@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, MapPin, Search as SearchIcon } from 'lucide-react';
@@ -6,6 +6,22 @@ import { useAuth } from '@/auth/AuthProvider';
 import { searchMovements, searchUsers } from '@/api/searchClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { sanitizePublicLocation } from '@/utils/locationPrivacy';
+import ErrorState from '@/components/shared/ErrorState';
+import { getPageCache, setPageCache } from '@/utils/pageCache';
+
+const SEARCH_STATE_CACHE_KEY = 'pp_search_state_v1';
+
+function makeMovementsCacheKey({ q, city, country }) {
+  const qp = String(q || '').trim().slice(0, 80);
+  const c = String(city || '').trim().slice(0, 80);
+  const co = String(country || '').trim().slice(0, 80);
+  return `pp_search_movements_v1:${encodeURIComponent(qp)}:${encodeURIComponent(c)}:${encodeURIComponent(co)}`;
+}
+
+function makeUsersCacheKey({ q }) {
+  const qp = String(q || '').trim().slice(0, 80);
+  return `pp_search_users_v1:${encodeURIComponent(qp)}`;
+}
 
 function formatLocation(city, country) {
   const parts = [city, country].map((p) => String(p || '').trim()).filter(Boolean);
@@ -121,6 +137,25 @@ export default function Search() {
   const [country, setCountry] = useState('');
 
   useEffect(() => {
+    const cached = getPageCache(SEARCH_STATE_CACHE_KEY);
+    if (!cached || typeof cached !== 'object') return;
+    const q = typeof cached.query === 'string' ? cached.query : '';
+    const c = typeof cached.city === 'string' ? cached.city : '';
+    const co = typeof cached.country === 'string' ? cached.country : '';
+    if (q) setQuery(q);
+    if (c) setCity(c);
+    if (co) setCountry(co);
+  }, []);
+
+  useEffect(() => {
+    setPageCache(SEARCH_STATE_CACHE_KEY, {
+      query: String(query || '').slice(0, 120),
+      city: String(city || '').slice(0, 120),
+      country: String(country || '').slice(0, 120),
+    });
+  }, [query, city, country]);
+
+  useEffect(() => {
     const t = setTimeout(() => setDebounced(query), 400);
     return () => clearTimeout(t);
   }, [query]);
@@ -129,6 +164,12 @@ export default function Search() {
   const locationActive = Boolean(String(city || '').trim() || String(country || '').trim());
   const movementEnabled = Boolean(trimmed || locationActive);
   const userEnabled = Boolean(accessToken && trimmed.length >= 2);
+
+  const movementsCacheKey = useMemo(
+    () => makeMovementsCacheKey({ q: trimmed, city, country }),
+    [trimmed, city, country]
+  );
+  const usersCacheKey = useMemo(() => makeUsersCacheKey({ q: trimmed }), [trimmed]);
 
   const { data: myProfile } = useQuery({
     queryKey: ['myProfile', user?.email],
@@ -139,19 +180,62 @@ export default function Search() {
     },
   });
 
-  const { data: movementResults = [], isLoading: movementsLoading, isError: movementsError } = useQuery({
+  const {
+    data: movementResults = [],
+    isLoading: movementsLoading,
+    isError: movementsError,
+    error: movementsErrorObj,
+    refetch: refetchMovements,
+  } = useQuery({
     queryKey: ['searchMovements', trimmed, city, country],
     enabled: movementEnabled,
     queryFn: () => searchMovements({ q: trimmed, city, country, limit: 20, offset: 0, accessToken }),
     retry: 1,
   });
 
-  const { data: userResults = [], isLoading: usersLoading, isError: usersError } = useQuery({
+  const {
+    data: userResults = [],
+    isLoading: usersLoading,
+    isError: usersError,
+    error: usersErrorObj,
+    refetch: refetchUsers,
+  } = useQuery({
     queryKey: ['searchUsers', trimmed],
     enabled: userEnabled,
     queryFn: () => searchUsers({ q: trimmed, limit: 20, offset: 0, accessToken }),
     retry: 1,
   });
+
+  useEffect(() => {
+    if (!movementEnabled) return;
+    if (movementsLoading || movementsError) return;
+    if (!Array.isArray(movementResults)) return;
+    setPageCache(movementsCacheKey, movementResults.slice(0, 20));
+  }, [movementEnabled, movementsLoading, movementsError, movementResults, movementsCacheKey]);
+
+  useEffect(() => {
+    if (!userEnabled) return;
+    if (usersLoading || usersError) return;
+    if (!Array.isArray(userResults)) return;
+    setPageCache(usersCacheKey, userResults.slice(0, 20));
+  }, [userEnabled, usersLoading, usersError, userResults, usersCacheKey]);
+
+  const cachedMovementResults = useMemo(() => {
+    if (!movementEnabled) return null;
+    const cached = getPageCache(movementsCacheKey);
+    return Array.isArray(cached) ? cached : null;
+  }, [movementEnabled, movementsCacheKey]);
+
+  const cachedUserResults = useMemo(() => {
+    if (!userEnabled) return null;
+    const cached = getPageCache(usersCacheKey);
+    return Array.isArray(cached) ? cached : null;
+  }, [userEnabled, usersCacheKey]);
+
+  const showSavedMovements = Boolean(
+    movementsError && !movementsLoading && cachedMovementResults && cachedMovementResults.length > 0
+  );
+  const showSavedUsers = Boolean(usersError && !usersLoading && cachedUserResults && cachedUserResults.length > 0);
 
   const hasQuery = Boolean(trimmed || locationActive);
   const showEmptyPrompt = !hasQuery;
@@ -230,9 +314,19 @@ export default function Search() {
             </div>
 
             {movementsError ? (
-              <div className="p-4 rounded-2xl border border-slate-200 bg-white text-sm text-slate-600 font-semibold">
-                Unable to search movements right now.
-              </div>
+              showSavedMovements ? (
+                <div className="p-4 rounded-2xl border border-slate-200 bg-white text-sm text-slate-700 font-semibold">
+                  Showing saved results — reconnecting…
+                </div>
+              ) : (
+                <ErrorState
+                  compact
+                  error={movementsErrorObj}
+                  onRetry={() => refetchMovements()}
+                  onReload={() => window.location.reload()}
+                  className="border-slate-200"
+                />
+              )
             ) : null}
 
             {!movementsLoading && !movementsError && movementResults.length === 0 ? (
@@ -242,7 +336,7 @@ export default function Search() {
             ) : null}
 
             <div className="space-y-3">
-              {movementResults.map((movement) => (
+              {(showSavedMovements ? cachedMovementResults : movementResults).map((movement) => (
                 <MovementResult key={movement.id || movement._id} movement={movement} />
               ))}
             </div>
@@ -266,9 +360,19 @@ export default function Search() {
             ) : null}
 
             {usersError ? (
-              <div className="p-4 rounded-2xl border border-slate-200 bg-white text-sm text-slate-600 font-semibold">
-                Unable to search people right now.
-              </div>
+              showSavedUsers ? (
+                <div className="p-4 rounded-2xl border border-slate-200 bg-white text-sm text-slate-700 font-semibold">
+                  Showing saved results — reconnecting…
+                </div>
+              ) : (
+                <ErrorState
+                  compact
+                  error={usersErrorObj}
+                  onRetry={() => refetchUsers()}
+                  onReload={() => window.location.reload()}
+                  className="border-slate-200"
+                />
+              )
             ) : null}
 
             {!usersLoading && accessToken && !usersError && userResults.length === 0 ? (
@@ -278,7 +382,7 @@ export default function Search() {
             ) : null}
 
             <div className="space-y-3">
-              {userResults.map((u, idx) => (
+              {(showSavedUsers ? cachedUserResults : userResults).map((u, idx) => (
                 <UserResult
                   key={`${u?.username || u?.display_name || 'user'}-${idx}`}
                   user={u}

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, Flag, LogOut } from 'lucide-react';
+import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, Flag, LogOut, HelpCircle, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -11,12 +11,16 @@ import { useAuth } from '@/auth/AuthProvider';
 import ErrorBoundary from '@/components/shared/ErrorBoundary';
 import Footer from '@/components/layout/Footer';
 import { useFeatureFlag } from '@/utils/featureFlags';
-import { useQuery } from '@tanstack/react-query';
+import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import IntroScreen from '@/components/home/IntroScreen';
+import UpdateBanner from '@/components/updates/UpdateBanner';
+import TutorialModal from '@/components/tutorial/TutorialModal';
+import FeedbackBugDialog from '@/components/shared/FeedbackBugDialog';
 
 function EarlyAccessBanner() {
   const [hidden, setHidden] = useState(false);
@@ -66,11 +70,16 @@ function EarlyAccessBanner() {
 
 function LayoutContent({ children }) {
   const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
+  const isFetchingCount = useIsFetching();
   const { user: authUser, session, isAdmin, logout } = useAuth();
   const [showIntroAgain, setShowIntroAgain] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const { t } = useLanguage();
+  const queryClient = useQueryClient();
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [hideTutorialPromptThisSession, setHideTutorialPromptThisSession] = useState(false);
   const userId = authUser?.id || authUser?.email || null;
   const { enabled: multiLanguageEnabled } = useFeatureFlag('multi_language', userId);
   useFeatureFlag('daily_challenges', userId, {
@@ -80,7 +89,7 @@ function LayoutContent({ children }) {
   const profileEmail = authUser?.email ? String(authUser.email) : null;
   const accessToken = session?.access_token ? String(session.access_token) : null;
 
-  const { data: userProfile } = useQuery({
+  const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
     queryKey: ['userProfile', profileEmail],
     enabled: !!profileEmail && !!accessToken,
     queryFn: async () => {
@@ -104,6 +113,17 @@ function LayoutContent({ children }) {
   });
 
   const hideFooter = location.pathname === '/login';
+
+  const hasSeenTutorialV2 = !!userProfile?.has_seen_tutorial_v2;
+  const shouldShowTutorialPrompt =
+    !!authUser &&
+    !!accessToken &&
+    !!profileEmail &&
+    !!userProfile &&
+    !userProfileLoading &&
+    !userProfileFetching &&
+    !hasSeenTutorialV2 &&
+    !hideTutorialPromptThisSession;
 
   useEffect(() => {
     // Listen for backend status changes
@@ -146,7 +166,7 @@ function LayoutContent({ children }) {
       toast.success('Signed out');
       navigate('/');
     } catch (e) {
-      toast.error(String(e?.message || "Couldn't sign out, please try again"));
+      toastFriendlyError(e, "Couldn't sign out, please try again");
     }
   };
 
@@ -188,17 +208,45 @@ function LayoutContent({ children }) {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
-      {/* Backend status banner */}
-      {(backendStatus === 'offline' || backendStatus === 'degraded') && (
-        <div className={
-          'w-full text-center py-2 px-4 font-bold text-white ' +
-          (backendStatus === 'offline' ? 'bg-red-600' : 'bg-yellow-500')
-        }>
-          {backendStatus === 'offline'
-            ? 'Connection to People Power servers appears offline. Some actions may not work.'
-            : 'People Power is experiencing issues. Some data may be out of date.'}
+      {/* Connection / syncing banner (non-blocking, degraded-mode friendly) */}
+      {backendStatus === 'offline' ? (
+        <div className="w-full border-b border-slate-200 bg-slate-900 text-white px-4 sm:px-6 py-2">
+          <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>You're offline. Browsing may use saved data — reconnecting…</span>
+          </div>
         </div>
-      )}
+      ) : backendStatus === 'degraded' ? (
+        <div className="w-full border-b border-amber-200 bg-amber-50 text-amber-900 px-4 sm:px-6 py-2">
+          <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>Reconnecting to People Power — some data may be out of date.</span>
+          </div>
+        </div>
+      ) : isFetchingCount > 0 ? (
+        <div className="w-full border-b border-slate-200 bg-white text-slate-700 px-4 sm:px-6 py-2">
+          <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>Syncing…</span>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Update notice banner (under backend status banner) */}
+      {authUser && accessToken && profileEmail && userProfile && !userProfileLoading && !userProfileFetching ? (
+        <UpdateBanner
+          profile={userProfile}
+          profileEmail={profileEmail}
+          accessToken={accessToken}
+          onMarkedSeen={(latestVersion) => {
+            queryClient.setQueryData(['userProfile', profileEmail], (prev) => {
+              if (!prev || typeof prev !== 'object') return prev;
+              return { ...prev, last_seen_update_version: latestVersion };
+            });
+          }}
+        />
+      ) : null}
+
       {showIntroAgain ? (
         <IntroScreen onContinue={() => setShowIntroAgain(false)} isExiting={false} />
       ) : null}
@@ -240,6 +288,18 @@ function LayoutContent({ children }) {
               {/* Desktop - Language & Profile */}
               <div className="flex items-center gap-3">
                 {multiLanguageEnabled ? <LanguageSwitcher /> : null}
+                {authUser ? (
+                  <button
+                    type="button"
+                    onClick={() => setTutorialOpen(true)}
+                    className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
+                    aria-label="Help and tutorial"
+                    title="Help & tutorial"
+                  >
+                    <HelpCircle className="w-4 h-4" />
+                    <span className="hidden md:inline text-xs font-bold">Help</span>
+                  </button>
+                ) : null}
                 <Link
                   to={createPageUrl('ReportCenter')}
                   className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
@@ -248,6 +308,17 @@ function LayoutContent({ children }) {
                   <Flag className="w-4 h-4" />
                   <span className="hidden md:inline text-xs font-bold">Report</span>
                 </Link>
+                {authUser ? (
+                  <button
+                    type="button"
+                    onClick={() => setFeedbackOpen(true)}
+                    className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
+                    aria-label="Send feedback or report a bug"
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                    <span className="hidden md:inline text-xs font-bold">Feedback</span>
+                  </button>
+                ) : null}
                 {authUser ? (
                   <div className="flex items-center gap-3">
                     {isAdmin && (
@@ -300,13 +371,58 @@ function LayoutContent({ children }) {
           </div>
         </header>
 
+        <FeedbackBugDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
+
         <EarlyAccessBanner />
+
+        {shouldShowTutorialPrompt ? (
+          <div className="px-4 sm:px-6 mt-3">
+            <div className="max-w-7xl mx-auto rounded-2xl border border-slate-200 bg-white p-4 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-black text-slate-900">New to People Power? Start a quick tour.</div>
+                <div className="text-xs text-slate-600 font-semibold mt-1">
+                  A guided walkthrough of movements, boosting, following, and what’s coming soon.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setHideTutorialPromptThisSession(true)}
+                  className="text-xs font-bold text-slate-600 hover:text-slate-900"
+                >
+                  Maybe later
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTutorialOpen(true)}
+                  className="inline-flex items-center justify-center h-9 px-4 rounded-md bg-primary text-primary-foreground text-xs font-black"
+                >
+                  Start tour
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {/* Main Content */}
         <main className="flex-1 max-w-7xl mx-auto px-3 sm:px-6 py-4 sm:py-6 md:py-8">
           {children}
         </main>
       </div>
+
+      <TutorialModal
+        open={tutorialOpen}
+        onOpenChange={setTutorialOpen}
+        accessToken={accessToken}
+        profileEmail={profileEmail}
+        hasSeen={hasSeenTutorialV2}
+        onCompleted={() => {
+          queryClient.setQueryData(['userProfile', profileEmail], (prev) => {
+            if (!prev || typeof prev !== 'object') return prev;
+            return { ...prev, has_seen_tutorial_v2: true };
+          });
+        }}
+      />
 
       {/* ✅ Fixed bottom stack: NAV (top) + LEGAL FOOTER (bottom) */}
       {!hideBottomStack ? (

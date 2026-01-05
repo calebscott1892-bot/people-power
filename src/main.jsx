@@ -21,6 +21,19 @@ try {
 
 const queryClient = createPeoplePowerQueryClient();
 
+// Centralized auth-expiry handling: clear cached user data on 401/expired sessions.
+try {
+  window.addEventListener('pp:auth-expired', () => {
+    try {
+      queryClient.clear();
+    } catch {
+      // ignore
+    }
+  });
+} catch {
+  // ignore (non-browser)
+}
+
 console.log('[PeoplePower] SERVER_BASE:', SERVER_BASE);
 
 ReactDOM.createRoot(document.getElementById('root')).render(

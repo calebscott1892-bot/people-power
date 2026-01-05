@@ -2,6 +2,13 @@ import { SERVER_BASE } from './serverBase';
 
 const BASE_URL = SERVER_BASE;
 
+// Blocking behavior (server-enforced):
+// - Creates a record in `user_blocks (blocker_email, blocked_email)` via POST /me/blocks.
+// - Core interactions between two accounts are rejected when either user has blocked the other
+//   (e.g. follow/unfollow, commenting on the other user's movements, movement votes/follows, and DM creation).
+// - List + profile reads may also be hidden/filtered in some places for privacy.
+// Client note: error responses use a generic message so we don't reveal who blocked whom.
+
 async function safeReadJson(res) {
   try {
     return await res.json();

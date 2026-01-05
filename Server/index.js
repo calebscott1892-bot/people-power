@@ -158,6 +158,9 @@ async function getAuthedEmailFromAccessToken(token) {
       new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
     ]);
     if (error || !data?.user) return null;
+
+    // NOTE (future): if we decide to require verified emails for certain sensitive actions,
+    // we can enforce it here using `data.user.email_confirmed_at`.
     return normalizeEmail(data.user.email);
   } catch {
     return null;
@@ -1537,11 +1540,50 @@ const ALLOWED_CHALLENGE_CATEGORIES = new Set([
 const DATABASE_URL = process.env.DATABASE_URL;
 let storageMode = 'memory';
 let hasDatabaseUrl = !!DATABASE_URL;
-const pool = new Pool({ connectionString: DATABASE_URL });
+
+function safeParseDatabaseUrl(raw) {
+  try {
+    const s = String(raw || '').trim();
+    if (!s) return null;
+    // Supports postgres:// and postgresql:// URIs.
+    const url = new URL(s);
+    const dbName = url.pathname ? url.pathname.replace(/^\//, '') : '';
+    return {
+      host: url.hostname || null,
+      dbName: dbName || null,
+      sslmode: url.searchParams ? url.searchParams.get('sslmode') : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+// Render Postgres generally requires SSL. Also honor sslmode=require in DATABASE_URL.
+const parsedDbUrl = safeParseDatabaseUrl(DATABASE_URL);
+const sslMode = parsedDbUrl?.sslmode ? String(parsedDbUrl.sslmode).toLowerCase() : '';
+const dbHost = parsedDbUrl?.host ? String(parsedDbUrl.host).toLowerCase() : '';
+const hostLooksRemote = !!dbHost && dbHost !== 'localhost' && dbHost !== '127.0.0.1';
+const shouldUseSsl =
+  isProd ||
+  String(process.env.DATABASE_SSL || '').toLowerCase() === 'true' ||
+  sslMode === 'require' ||
+  sslMode === 'verify-ca' ||
+  sslMode === 'verify-full' ||
+  hostLooksRemote;
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ...(shouldUseSsl ? { ssl: { rejectUnauthorized: false } } : null),
+});
 
 async function checkDatabaseConnection() {
   if (!hasDatabaseUrl) {
+    if (isProd) {
+      console.error('[storage] FATAL: DATABASE_URL is missing; aborting startup.');
+      process.exit(1);
+    }
     storageMode = 'memory';
+    console.warn('[storage] DEV: DATABASE_URL missing; using memory storage fallback.');
     console.info('[storage] mode=memory');
     return;
   }
@@ -1549,17 +1591,38 @@ async function checkDatabaseConnection() {
     await pool.query('SELECT 1');
     storageMode = 'postgres';
     hasDatabaseUrl = true;
+    const parsed = safeParseDatabaseUrl(DATABASE_URL);
+    const host = parsed?.host ? String(parsed.host) : 'unknown';
+    const dbName = parsed?.dbName ? String(parsed.dbName) : 'unknown';
     console.info('[storage] Postgres connection ok');
+    console.info(`[storage] mode=postgres host=${host} db=${dbName}`);
     console.info('[storage] mode=postgres');
   } catch (err) {
     const message = err?.message ? String(err.message) : 'unknown error';
     const code = err?.code ? String(err.code) : 'unknown';
-    console.error(`[storage] Postgres connection failed, falling back to memory: ${code} ${message}`);
+    if (isProd) {
+      console.error(`[storage] FATAL: Postgres connection failed; aborting startup: ${code} ${message}`);
+      process.exit(1);
+    }
+
+    console.error(`[storage] DEV: Postgres connection failed, falling back to memory: ${code} ${message}`);
     storageMode = 'memory';
     hasDatabaseUrl = false;
     console.info('[storage] mode=memory');
   }
 }
+
+// Production safety net: never serve from memory when DB is unavailable.
+// (In production we already fail-fast on startup, but this prevents any accidental
+// runtime fallback paths from returning stale/local data.)
+fastify.addHook('onRequest', async (request, reply) => {
+  if (!isProd) return;
+  if (hasDatabaseUrl) return;
+  const url = String(request?.url || '');
+  if (url.startsWith('/health')) return;
+  fastify.log.error({ url }, '[storage] FATAL: memory fallback blocked in production');
+  reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+});
 
 const uploadsDir = path.join(__dirname, 'uploads');
 try {
@@ -1607,6 +1670,14 @@ const memoryUserProfiles = new Map();
 // User blocks (memory fallback)
 // Map<blockerEmail, Set<blockedEmail>>
 const memoryUserBlocks = new Map();
+
+// Notifications (memory fallback)
+// Map<recipientEmail, Array<notification>>
+const memoryNotificationsByRecipient = new Map();
+
+// Leadership roles (memory fallback)
+// Array<{id,user_email,role_type,movement_id,is_active,reached_cap,created_at,updated_at}>
+const memoryLeadershipRoles = [];
 
 // Movement follows (memory fallback)
 // Map<movementId, Set<followerEmail>>
@@ -2064,16 +2135,40 @@ async function ensureUserProfilesTable() {
       catchment_radius_km INT NULL,
       skills TEXT[] NULL,
       ai_features_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      birthdate DATE NULL,
+      age_verified BOOLEAN NOT NULL DEFAULT FALSE,
+      onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
+      onboarding_current_step INT NOT NULL DEFAULT 0,
+      onboarding_interests TEXT[] NOT NULL DEFAULT '{}',
+      onboarding_completed_tutorials TEXT[] NOT NULL DEFAULT '{}',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
   await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS user_id TEXT NULL');
+  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS banner_offset_y DOUBLE PRECISION NULL');
+  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS is_private BOOLEAN NOT NULL DEFAULT FALSE');
+  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS last_seen_update_version TEXT NULL');
+  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS has_seen_tutorial_v2 BOOLEAN NOT NULL DEFAULT FALSE');
   await pool.query(
     'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS movement_group_opt_out BOOLEAN NOT NULL DEFAULT FALSE'
   );
   await pool.query(
     'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS email_notifications_opt_in BOOLEAN NOT NULL DEFAULT FALSE'
+  );
+  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS birthdate DATE NULL');
+  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS age_verified BOOLEAN NOT NULL DEFAULT FALSE');
+  await pool.query(
+    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE'
+  );
+  await pool.query(
+    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_current_step INT NOT NULL DEFAULT 0'
+  );
+  await pool.query(
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_interests TEXT[] NOT NULL DEFAULT '{}'"
+  );
+  await pool.query(
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_completed_tutorials TEXT[] NOT NULL DEFAULT '{}'"
   );
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles (user_id)');
   try {
@@ -2092,6 +2187,48 @@ async function ensureUserProfilesTable() {
   } catch (e) {
     fastify.log.warn({ err: e }, 'Failed to ensure unique username index');
   }
+}
+
+async function ensureNotificationsTable() {
+  if (!hasDatabaseUrl) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      recipient_email TEXT NOT NULL,
+      type TEXT NOT NULL,
+      actor_name TEXT NULL,
+      actor_email TEXT NULL,
+      content_id TEXT NULL,
+      content_ref TEXT NULL,
+      content_title TEXT NULL,
+      metadata JSONB NULL,
+      is_read BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_notifications_recipient_created ON notifications (recipient_email, created_at DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_notifications_recipient_unread ON notifications (recipient_email, is_read)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_notifications_type ON notifications (type)');
+}
+
+async function ensureLeadershipRolesTable() {
+  if (!hasDatabaseUrl) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS leadership_roles (
+      id TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      role_type TEXT NOT NULL,
+      movement_id TEXT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      reached_cap BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (user_email, role_type, movement_id)
+    );
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_leadership_roles_user ON leadership_roles (user_email)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_leadership_roles_type_active ON leadership_roles (role_type, is_active)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_leadership_roles_movement ON leadership_roles (movement_id)');
 }
 
 async function ensureUserBlocksTable() {
@@ -2150,6 +2287,23 @@ function isBlockedByViewer(targetEmail, viewerBlocks) {
   const target = normalizeEmail(targetEmail);
   if (!target || !viewerBlocks) return false;
   return viewerBlocks.blocked.has(target);
+}
+
+function sendBlockedInteraction(reply) {
+  return reply.code(403).send({
+    error: "You can't interact with this account.",
+    code: 'USER_BLOCKED',
+  });
+}
+
+async function areUsersBlockedEitherDirection(emailA, emailB) {
+  const a = normalizeEmail(emailA);
+  const b = normalizeEmail(emailB);
+  if (!a || !b) return false;
+  if (a === b) return false;
+
+  const aBlocks = await getUserBlockSets(a);
+  return isBlockedForViewer(b, aBlocks);
 }
 
 async function doesUserFollow(followerEmail, followingEmail) {
@@ -2957,6 +3111,24 @@ function sanitizeUserProfileRecord(record) {
   return out;
 }
 
+function sanitizePublicUserProfileRecord(record) {
+  const out = sanitizeUserProfileRecord(record);
+  if (!out || typeof out !== 'object') return out;
+  // Keep user_email so authenticated clients can follow/message by email.
+  delete out.birthdate;
+  delete out.age_verified;
+  delete out.email_notifications_opt_in;
+  delete out.movement_group_opt_out;
+  delete out.ai_features_enabled;
+  delete out.last_seen_update_version;
+  delete out.has_seen_tutorial_v2;
+  delete out.onboarding_completed;
+  delete out.onboarding_current_step;
+  delete out.onboarding_interests;
+  delete out.onboarding_completed_tutorials;
+  return out;
+}
+
 async function getPublicProfilesByEmail(emails) {
   const list = Array.from(
     new Set(
@@ -3549,12 +3721,14 @@ function buildInsertForMovements(columns, payload) {
     : null;
 
   const claims = payload.claims != null ? payload.claims : null;
+  const visibility = normalizeMovementVisibility(payload.visibility);
 
   const candidates = {
     title,
     description,
     summary: description,
     description_html: descriptionHtml,
+    visibility,
     author_email: authorEmail,
     created_at: createdAt,
     tags: tagsArray,
@@ -3656,6 +3830,7 @@ function readMultipartField(fields, name) {
 async function ensureMovementExtrasColumns() {
   if (!hasDatabaseUrl) return;
   try {
+    await pool.query("ALTER TABLE movements ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'public'");
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS description_html TEXT');
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_city TEXT');
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_country TEXT');
@@ -3667,6 +3842,59 @@ async function ensureMovementExtrasColumns() {
     movementsColumnsCache = null;
   } catch (e) {
     fastify.log.warn({ err: e }, 'Failed to ensure movement extra columns');
+  }
+}
+
+function normalizeMovementVisibility(value) {
+  const raw = value == null ? '' : String(value).trim().toLowerCase();
+  if (raw === 'community' || raw === 'private' || raw === 'public') return raw;
+  return 'public';
+}
+
+function getMovementOwnerEmailFromRecord(movement) {
+  return normalizeEmail(movement?.author_email || movement?.creator_email || movement?.created_by_email || '');
+}
+
+function canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds }) {
+  const visibility = normalizeMovementVisibility(movement?.visibility);
+  if (visibility === 'public') return true;
+
+  const viewer = viewerEmail ? normalizeEmail(viewerEmail) : null;
+  if (!viewer) return false;
+
+  const owner = getMovementOwnerEmailFromRecord(movement);
+  if (owner && viewer && owner === viewer) return true;
+
+  if (visibility === 'private') return false;
+
+  const mid = String(movement?.id || '').trim();
+  return !!(mid && viewerFollowedMovementIds && viewerFollowedMovementIds.has(mid));
+}
+
+async function getViewerFollowedMovementIds(viewerEmail) {
+  const email = normalizeEmail(viewerEmail);
+  if (!email) return new Set();
+
+  if (!hasDatabaseUrl) {
+    const set = new Set();
+    for (const [movementId, followers] of memoryMovementFollows.entries()) {
+      if (followers && typeof followers.has === 'function' && followers.has(email)) {
+        set.add(String(movementId));
+      }
+    }
+    return set;
+  }
+
+  try {
+    await ensureMovementFollowsTable();
+    const res = await pool.query('SELECT movement_id FROM movement_follows WHERE follower_email = $1', [String(email)]);
+    const ids = new Set();
+    for (const r of res.rows || []) {
+      if (r?.movement_id) ids.add(String(r.movement_id));
+    }
+    return ids;
+  } catch {
+    return new Set();
   }
 }
 
@@ -3930,9 +4158,16 @@ fastify.get('/movements', async (request, reply) => {
       if (!mineEmail) return reply.code(400).send({ error: 'User email is required' });
     }
     const viewerEmail = await getOptionalAuthedEmail(request);
+    const viewerFollowedMovementIds = mineEmail ? new Set() : await getViewerFollowedMovementIds(viewerEmail);
     const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
 
     const canViewMovement = (movement) => {
+      // Visibility
+      if (!mineEmail) {
+        if (!canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds })) return false;
+      }
+
+      // Blocks
       if (!viewerBlocks) return true;
       const authorEmail = normalizeEmail(movement?.author_email || movement?.creator_email || '');
       return !isBlockedForViewer(authorEmail, viewerBlocks);
@@ -3951,6 +4186,7 @@ fastify.get('/movements', async (request, reply) => {
           return {
             ...m,
             upvotes: summary.upvotes,
+            boosts_count: summary.upvotes,
             downvotes: summary.downvotes,
             score: summary.score,
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
@@ -3983,6 +4219,7 @@ fastify.get('/movements', async (request, reply) => {
           text: `SELECT
            m.*,
            COALESCE(v.upvotes, 0)::int AS upvotes,
+           COALESCE(v.upvotes, 0)::int AS boosts_count,
            COALESCE(v.downvotes, 0)::int AS downvotes,
            (COALESCE(v.upvotes, 0) - COALESCE(v.downvotes, 0))::int AS score
          FROM movements m
@@ -4010,6 +4247,7 @@ fastify.get('/movements', async (request, reply) => {
           return {
             ...m,
             upvotes: summary.upvotes,
+            boosts_count: summary.upvotes,
             downvotes: summary.downvotes,
             score: summary.score,
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
@@ -4028,6 +4266,7 @@ fastify.get('/movements', async (request, reply) => {
           return {
             ...m,
             upvotes: summary.upvotes,
+            boosts_count: summary.upvotes,
             downvotes: summary.downvotes,
             score: summary.score,
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
@@ -4057,6 +4296,7 @@ fastify.get('/movements', async (request, reply) => {
           created_at: new Date().toISOString(),
           momentum_score: 0,
           upvotes: 0,
+            boosts_count: 0,
           downvotes: 0,
           score: 0,
         },
@@ -4070,6 +4310,7 @@ fastify.get('/movements/:id', async (request, reply) => {
   if (!id) return reply.code(400).send({ error: 'Movement id is required' });
 
   const viewerEmail = await getOptionalAuthedEmail(request);
+  const viewerFollowedMovementIds = await getViewerFollowedMovementIds(viewerEmail);
   const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
   const isHiddenForViewer = (movement) => {
     if (!viewerBlocks) return false;
@@ -4077,54 +4318,119 @@ fastify.get('/movements/:id', async (request, reply) => {
     return isBlockedForViewer(authorEmail, viewerBlocks);
   };
 
+  const isNotVisibleForViewer = (movement) => {
+    return !canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds });
+  };
+
   if (!hasDatabaseUrl) {
     const found = memoryMovements.find((m) => String(m.id) === id) || null;
     if (!found) return reply.code(404).send({ error: 'Movement not found' });
+    if (isNotVisibleForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
     if (isHiddenForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
+    const summary = getMemoryVoteSummary(found?.id, null);
     const enriched = (await attachCreatorProfilesToMovements([{
       ...found,
+      upvotes: summary.upvotes,
+      boosts_count: summary.upvotes,
+      downvotes: summary.downvotes,
+      score: summary.score,
       verified_participants: memoryCountApprovedEvidenceParticipants(found?.id),
     }]))[0];
     return enriched;
   }
 
   try {
-    const result = await pool.query('SELECT * FROM movements WHERE id = $1 LIMIT 1', [id]);
+    await ensureVotesTable();
+    const result = await pool.query(
+      {
+        text: `SELECT
+          m.*,
+          COALESCE(v.upvotes, 0)::int AS upvotes,
+          COALESCE(v.upvotes, 0)::int AS boosts_count,
+          COALESCE(v.downvotes, 0)::int AS downvotes,
+          (COALESCE(v.upvotes, 0) - COALESCE(v.downvotes, 0))::int AS score
+        FROM movements m
+        LEFT JOIN (
+          SELECT
+            movement_id,
+            COALESCE(SUM(CASE WHEN value = 1 THEN 1 ELSE 0 END), 0)::int AS upvotes,
+            COALESCE(SUM(CASE WHEN value = -1 THEN 1 ELSE 0 END), 0)::int AS downvotes
+          FROM movement_votes
+          GROUP BY movement_id
+        ) v ON v.movement_id = m.id
+        WHERE m.id = $1
+        LIMIT 1`,
+        values: [id],
+      }
+    );
     const row = result.rows?.[0] || null;
     if (!row) {
       // DB is reachable but the movement might have been created via the
       // in-memory fallback path.
       const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
       if (fromMemory) {
+        if (isNotVisibleForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
         if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+        const summary = getMemoryVoteSummary(fromMemory?.id, null);
         const enriched = (await attachCreatorProfilesToMovements([{
           ...fromMemory,
+          upvotes: summary.upvotes,
+          boosts_count: summary.upvotes,
+          downvotes: summary.downvotes,
+          score: summary.score,
           verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
         }]))[0];
         return enriched;
       }
       return reply.code(404).send({ error: 'Movement not found' });
     }
+    if (isNotVisibleForViewer(row)) return reply.code(404).send({ error: 'Movement not found' });
     if (isHiddenForViewer(row)) return reply.code(404).send({ error: 'Movement not found' });
     const enriched = (await attachCreatorProfilesToMovements([row]))[0];
     return enriched;
   } catch (e) {
     fastify.log.warn({ err: e }, 'DB query failed for GET /movements/:id; using list fallback');
     try {
-      const all = await pool.query('SELECT * FROM movements ORDER BY created_at DESC LIMIT 50');
+      await ensureVotesTable();
+      const all = await pool.query(
+        `SELECT
+          m.*,
+          COALESCE(v.upvotes, 0)::int AS upvotes,
+          COALESCE(v.upvotes, 0)::int AS boosts_count,
+          COALESCE(v.downvotes, 0)::int AS downvotes,
+          (COALESCE(v.upvotes, 0) - COALESCE(v.downvotes, 0))::int AS score
+        FROM movements m
+        LEFT JOIN (
+          SELECT
+            movement_id,
+            COALESCE(SUM(CASE WHEN value = 1 THEN 1 ELSE 0 END), 0)::int AS upvotes,
+            COALESCE(SUM(CASE WHEN value = -1 THEN 1 ELSE 0 END), 0)::int AS downvotes
+          FROM movement_votes
+          GROUP BY movement_id
+        ) v ON v.movement_id = m.id
+        ORDER BY m.created_at DESC
+        LIMIT 50`
+      );
       const found = all.rows.find((m) => String(m.id) === id) || null;
       if (!found) {
         const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
         if (fromMemory) {
+        if (isNotVisibleForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
         if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+        const summary = getMemoryVoteSummary(fromMemory?.id, null);
         const enriched = (await attachCreatorProfilesToMovements([{
           ...fromMemory,
+          upvotes: summary.upvotes,
+          boosts_count: summary.upvotes,
+          downvotes: summary.downvotes,
+          score: summary.score,
           verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
         }]))[0];
         return enriched;
         }
         return reply.code(404).send({ error: 'Movement not found' });
       }
+      if (isNotVisibleForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
       if (isHiddenForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
       const enriched = (await attachCreatorProfilesToMovements([found]))[0];
       return enriched;
@@ -4190,6 +4496,28 @@ fastify.get('/movements/:id/follow', async (request, reply) => {
   }
 });
 
+fastify.get('/movements/:id/follow/count', async (request, reply) => {
+  const id = request.params?.id ? String(request.params.id) : null;
+  if (!id) return reply.code(400).send({ error: 'Movement id is required' });
+
+  if (!hasDatabaseUrl) {
+    const set = memoryMovementFollows.get(String(id)) || new Set();
+    return reply.send({ count: set.size });
+  }
+
+  try {
+    await ensureMovementFollowsTable();
+    const countRes = await pool.query('SELECT COUNT(*)::int AS count FROM movement_follows WHERE movement_id = $1', [
+      String(id),
+    ]);
+    const count = countRes.rows?.[0]?.count ?? 0;
+    return reply.send({ count });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to count movement followers');
+    return reply.code(500).send({ error: 'Failed to count movement followers' });
+  }
+});
+
 fastify.post('/movements/:id/follow', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
@@ -4205,6 +4533,11 @@ fastify.post('/movements/:id/follow', async (request, reply) => {
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const ownerEmail = await getMovementOwnerEmail(id);
+  if (ownerEmail && (await areUsersBlockedEitherDirection(email, ownerEmail))) {
+    return sendBlockedInteraction(reply);
+  }
 
   const following = !!parsed.data.following;
 
@@ -4502,6 +4835,26 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
   }
 });
 
+fastify.get('/movements/:id/comments/count', async (request, reply) => {
+  const id = request.params?.id ? String(request.params.id) : null;
+  if (!id) return reply.code(400).send({ error: 'Movement id is required' });
+
+  if (!hasDatabaseUrl) {
+    const list = memoryCommentsByMovement.get(String(id)) || [];
+    return reply.send({ count: Array.isArray(list) ? list.length : 0 });
+  }
+
+  try {
+    await ensureMovementCommentsTables();
+    const res = await pool.query('SELECT COUNT(*)::int AS count FROM movement_comments WHERE movement_id = $1', [String(id)]);
+    const count = res.rows?.[0]?.count ?? 0;
+    return reply.send({ count });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to count comments');
+    return reply.code(500).send({ error: 'Failed to count comments' });
+  }
+});
+
 fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.commentCreate } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
@@ -4520,7 +4873,7 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
   const blockSets = await getUserBlockSets(email);
   const ownerEmail = await getMovementOwnerEmail(id);
   if (ownerEmail && isBlockedForViewer(ownerEmail, blockSets)) {
-    return reply.code(403).send({ error: 'Not allowed' });
+    return sendBlockedInteraction(reply);
   }
 
   const content = cleanText(parsed.data.content);
@@ -5105,6 +5458,9 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
 
   const ownerEmail = await getMovementOwnerEmail(id);
   const isOwner = !!(ownerEmail && email === ownerEmail);
+  if (ownerEmail && (await areUsersBlockedEitherDirection(email, ownerEmail))) {
+    return sendBlockedInteraction(reply);
+  }
   const now = nowIso();
 
   const row = {
@@ -5182,6 +5538,8 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
+  const verifierUserId = authedUser?.id ? String(authedUser.id) : null;
+
   const ownerEmail = await getMovementOwnerEmail(movementId);
   const isAdmin = !!(email && ADMIN_EMAILS.has(email));
   const collaboratorRole = await getMovementCollaboratorRole(movementId, email);
@@ -5199,6 +5557,9 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
     if (String(existing.movement_id) !== String(movementId)) {
       return reply.code(404).send({ error: 'Evidence not found' });
     }
+    if (!isAdmin && (await areUsersBlockedEitherDirection(email, existing?.submitter_email))) {
+      return sendBlockedInteraction(reply);
+    }
     const updated = memoryUpdateEvidenceById(evidenceId, {
       status,
       verified_by_email: email,
@@ -5206,11 +5567,23 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
       updated_at: now,
     });
     updateMemoryMovementVerifiedParticipants(movementId);
-    return reply.send({ evidence: updated || { id: evidenceId } });
+    const row = updated || { id: evidenceId };
+    return reply.send({ evidence: { ...row, verified_by_user_id: verifierUserId } });
   }
 
   try {
     await ensureMovementEvidenceTable();
+
+    const existingRes = await pool.query(
+      'SELECT submitter_email FROM movement_evidence WHERE id = $1 AND movement_id = $2 LIMIT 1',
+      [String(evidenceId), String(movementId)]
+    );
+    const submitterEmail = existingRes.rows?.[0]?.submitter_email ? normalizeEmail(existingRes.rows[0].submitter_email) : null;
+    if (!submitterEmail) return reply.code(404).send({ error: 'Evidence not found' });
+    if (!isAdmin && (await areUsersBlockedEitherDirection(email, submitterEmail))) {
+      return sendBlockedInteraction(reply);
+    }
+
     const updated = await pool.query(
       `UPDATE movement_evidence
        SET status = $2,
@@ -5224,7 +5597,7 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
     const row = updated.rows?.[0] || null;
     if (!row) return reply.code(404).send({ error: 'Evidence not found' });
     await updateMovementVerifiedParticipants(movementId);
-    return reply.send({ evidence: row });
+    return reply.send({ evidence: { ...row, verified_by_user_id: verifierUserId } });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to verify movement evidence');
     return reply.code(500).send({ error: 'Failed to verify evidence' });
@@ -6323,6 +6696,11 @@ fastify.post('/movements/:id/discussions', async (request, reply) => {
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
+  const ownerEmail = await getMovementOwnerEmail(id);
+  if (ownerEmail && (await areUsersBlockedEitherDirection(email, ownerEmail))) {
+    return sendBlockedInteraction(reply);
+  }
+
   const row = {
     id: randomUUID(),
     movement_id: String(id),
@@ -6372,6 +6750,11 @@ fastify.post('/movements/:id/vote', async (request, reply) => {
   const value = parsed.data.value;
   const voterEmail = authedUser.email ?? null;
   if (!voterEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  const ownerEmail = await getMovementOwnerEmail(id);
+  if (ownerEmail && (await areUsersBlockedEitherDirection(voterEmail, ownerEmail))) {
+    return sendBlockedInteraction(reply);
+  }
 
   if (!hasDatabaseUrl) {
     const movementId = String(id);
@@ -6435,6 +6818,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       description: z.string().min(1).max(MAX_TEXT_LENGTHS.movementDescription).optional(),
       description_html: z.string().min(1).max(MAX_TEXT_LENGTHS.movementDescriptionHtml).optional(),
       summary: z.string().min(1).max(MAX_TEXT_LENGTHS.movementSummary).optional(),
+      visibility: z.enum(['public', 'community', 'private']).optional(),
       tags: z
         .union([
           z.array(z.string().max(MAX_TEXT_LENGTHS.movementTag)),
@@ -6493,6 +6877,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     description: raw.description ? cleanText(raw.description, MAX_TEXT_LENGTHS.movementDescription) : undefined,
     summary: raw.summary ? cleanText(raw.summary, MAX_TEXT_LENGTHS.movementSummary) : undefined,
     description_html: raw.description_html ? String(raw.description_html).slice(0, MAX_TEXT_LENGTHS.movementDescriptionHtml) : undefined,
+    visibility: normalizeMovementVisibility(raw.visibility),
     tags: normalizeTags(raw.tags).filter((t) => ALLOWED_TAGS.has(t)),
     author_email: authedUser.email ?? null,
     location_city: raw.location_city ? cleanText(raw.location_city, MAX_TEXT_LENGTHS.locationLabel) : undefined,
@@ -6530,6 +6915,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       title: payload.title,
       description: payload.description || payload.summary,
       description_html: payload.description_html,
+      visibility: payload.visibility || 'public',
       tags: normalizeTags(payload.tags).filter((t) => ALLOWED_TAGS.has(t)),
       author_email: payload.author_email ?? null,
       location_city: payload.location_city,
@@ -6586,6 +6972,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       title: payload.title,
       description: payload.description || payload.summary,
       description_html: payload.description_html,
+      visibility: payload.visibility || 'public',
       tags: normalizeTags(payload.tags).filter((t) => ALLOWED_TAGS.has(t)),
       author_email: payload.author_email ?? null,
       location_city: payload.location_city,
@@ -6918,7 +7305,7 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
   if (!authedUser) return;
 
   const schema = z.object({
-    report_type: z.enum(['abuse', 'bug']).optional(),
+    report_type: z.enum(['abuse', 'bug', 'feedback']).optional(),
     report_title: z.string().max(MAX_TEXT_LENGTHS.reportTitle).optional().nullable(),
     reported_content_type: z.string().min(1).max(MAX_TEXT_LENGTHS.reportContentType),
     reported_content_id: z.string().min(1).max(MAX_TEXT_LENGTHS.reportContentId),
@@ -7622,9 +8009,8 @@ fastify.post('/conversations', async (request, reply) => {
   const recipient = normalizeEmail(parsed.data.recipient_email);
   if (!myEmail || !recipient) return reply.code(400).send({ error: 'Invalid emails' });
   if (myEmail === recipient) return reply.code(400).send({ error: 'Cannot message yourself' });
-  const viewerBlocks = await getUserBlockSets(myEmail);
-  if (isBlockedForViewer(recipient, viewerBlocks)) {
-    return reply.code(404).send({ error: 'User not found' });
+  if (await areUsersBlockedEitherDirection(myEmail, recipient)) {
+    return sendBlockedInteraction(reply);
   }
 
   // DM rules: you can DM people you follow; otherwise this becomes a message request.
@@ -8352,9 +8738,8 @@ fastify.get('/users/:email/follow', async (request, reply) => {
   const me = normalizeEmail(authedUser.email);
   if (!target) return reply.code(400).send({ error: 'Valid email is required' });
   if (!me) return reply.code(400).send({ error: 'User email is required' });
-  const viewerBlocks = await getUserBlockSets(me);
-  if (isBlockedForViewer(target, viewerBlocks)) {
-    return reply.code(404).send({ error: 'User not found' });
+  if (await areUsersBlockedEitherDirection(me, target)) {
+    return sendBlockedInteraction(reply);
   }
 
   const following = await doesUserFollow(me, target);
@@ -8391,6 +8776,178 @@ fastify.get('/users/:email/follow', async (request, reply) => {
   }
 });
 
+async function getUserIsPrivateByEmail(email) {
+  const target = normalizeEmail(email);
+  if (!target) return false;
+
+  if (!hasDatabaseUrl) {
+    const profile = memoryUserProfiles.get(target) || null;
+    return !!profile?.is_private;
+  }
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query('SELECT is_private FROM user_profiles WHERE user_email = $1 LIMIT 1', [target]);
+    return !!res.rows?.[0]?.is_private;
+  } catch {
+    return false;
+  }
+}
+
+async function canViewUserFollowLists({ viewerEmail, targetEmail }) {
+  const viewer = normalizeEmail(viewerEmail);
+  const target = normalizeEmail(targetEmail);
+  if (!viewer || !target) return false;
+  if (viewer === target) return true;
+
+  const isPrivate = await getUserIsPrivateByEmail(target);
+  if (!isPrivate) return true;
+
+  // Private list access rule (per spec): allow only if the target user follows the viewer.
+  return doesUserFollow(target, viewer);
+}
+
+fastify.get('/users/:email/following-users', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const target = normalizeEmail(request.params?.email);
+  const me = normalizeEmail(authedUser.email);
+  if (!target) return reply.code(400).send({ error: 'Valid email is required' });
+  if (!me) return reply.code(400).send({ error: 'User email is required' });
+
+  if (await areUsersBlockedEitherDirection(me, target)) {
+    return sendBlockedInteraction(reply);
+  }
+
+  const allowed = await canViewUserFollowLists({ viewerEmail: me, targetEmail: target });
+  if (!allowed) {
+    return reply.code(403).send({
+      error: 'Followers list is only visible to people you follow.',
+      code: 'FOLLOW_LIST_PRIVATE',
+    });
+  }
+
+  try {
+    if (!hasDatabaseUrl) {
+      const set = memoryUserFollows.get(target) || new Set();
+      const emails = Array.from(set).map((e) => normalizeEmail(e)).filter(Boolean);
+      const lookup = await getPublicProfilesByEmail(emails);
+      const users = emails.map((email) => {
+        const profile = lookup.get(email) || null;
+        return {
+          user_id: profile?.user_id ?? null,
+          email,
+          display_name: profile?.display_name ?? null,
+          username: profile?.username ?? null,
+          profile_photo_url: profile?.profile_photo_url ?? null,
+        };
+      });
+      return reply.send({ users });
+    }
+
+    await ensureUserFollowsTable();
+    const result = await pool.query(
+      `SELECT following_email AS email
+       FROM user_follows
+       WHERE follower_email = $1
+       ORDER BY created_at DESC
+       LIMIT 200`,
+      [target]
+    );
+    const emails = Array.isArray(result.rows)
+      ? result.rows.map((r) => normalizeEmail(r?.email)).filter(Boolean)
+      : [];
+    const lookup = await getPublicProfilesByEmail(emails);
+    const users = emails.map((email) => {
+      const profile = lookup.get(email) || null;
+      return {
+        user_id: profile?.user_id ?? null,
+        email,
+        display_name: profile?.display_name ?? null,
+        username: profile?.username ?? null,
+        profile_photo_url: profile?.profile_photo_url ?? null,
+      };
+    });
+    return reply.send({ users });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to load following users');
+    return reply.code(500).send({ error: 'Failed to load following users' });
+  }
+});
+
+fastify.get('/users/:email/followers', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const target = normalizeEmail(request.params?.email);
+  const me = normalizeEmail(authedUser.email);
+  if (!target) return reply.code(400).send({ error: 'Valid email is required' });
+  if (!me) return reply.code(400).send({ error: 'User email is required' });
+
+  if (await areUsersBlockedEitherDirection(me, target)) {
+    return sendBlockedInteraction(reply);
+  }
+
+  const allowed = await canViewUserFollowLists({ viewerEmail: me, targetEmail: target });
+  if (!allowed) {
+    return reply.code(403).send({
+      error: 'Followers list is only visible to people you follow.',
+      code: 'FOLLOW_LIST_PRIVATE',
+    });
+  }
+
+  try {
+    if (!hasDatabaseUrl) {
+      const followers = [];
+      for (const [follower, set] of memoryUserFollows.entries()) {
+        if (set && set.has(target)) followers.push(normalizeEmail(follower));
+      }
+      const emails = followers.filter(Boolean);
+      const lookup = await getPublicProfilesByEmail(emails);
+      const users = emails.map((email) => {
+        const profile = lookup.get(email) || null;
+        return {
+          user_id: profile?.user_id ?? null,
+          email,
+          display_name: profile?.display_name ?? null,
+          username: profile?.username ?? null,
+          profile_photo_url: profile?.profile_photo_url ?? null,
+        };
+      });
+      return reply.send({ users });
+    }
+
+    await ensureUserFollowsTable();
+    const result = await pool.query(
+      `SELECT follower_email AS email
+       FROM user_follows
+       WHERE following_email = $1
+       ORDER BY created_at DESC
+       LIMIT 200`,
+      [target]
+    );
+    const emails = Array.isArray(result.rows)
+      ? result.rows.map((r) => normalizeEmail(r?.email)).filter(Boolean)
+      : [];
+    const lookup = await getPublicProfilesByEmail(emails);
+    const users = emails.map((email) => {
+      const profile = lookup.get(email) || null;
+      return {
+        user_id: profile?.user_id ?? null,
+        email,
+        display_name: profile?.display_name ?? null,
+        username: profile?.username ?? null,
+        profile_photo_url: profile?.profile_photo_url ?? null,
+      };
+    });
+    return reply.send({ users });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to load followers');
+    return reply.code(500).send({ error: 'Failed to load followers' });
+  }
+});
+
 fastify.post('/users/:email/follow', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
@@ -8400,9 +8957,8 @@ fastify.post('/users/:email/follow', async (request, reply) => {
   if (!target) return reply.code(400).send({ error: 'Valid email is required' });
   if (!me) return reply.code(400).send({ error: 'User email is required' });
   if (target === me) return reply.code(400).send({ error: 'Cannot follow yourself' });
-  const viewerBlocks = await getUserBlockSets(me);
-  if (isBlockedForViewer(target, viewerBlocks)) {
-    return reply.code(404).send({ error: 'User not found' });
+  if (await areUsersBlockedEitherDirection(me, target)) {
+    return sendBlockedInteraction(reply);
   }
 
   const schema = z.object({ following: z.boolean() });
@@ -8916,12 +9472,22 @@ async function handleGetMyProfile(request, reply) {
       bio: null,
       profile_photo_url: null,
       banner_url: null,
+      banner_offset_y: 0,
+      is_private: false,
+      last_seen_update_version: null,
+      has_seen_tutorial_v2: false,
       location: null,
       catchment_radius_km: null,
       skills: null,
       ai_features_enabled: false,
       movement_group_opt_out: false,
       email_notifications_opt_in: false,
+      birthdate: null,
+      age_verified: false,
+      onboarding_completed: false,
+      onboarding_current_step: 0,
+      onboarding_interests: [],
+      onboarding_completed_tutorials: [],
       created_at: nowIso(),
       updated_at: nowIso(),
     };
@@ -8962,12 +9528,22 @@ async function handleGetMyProfile(request, reply) {
         bio: null,
         profile_photo_url: null,
         banner_url: null,
+        banner_offset_y: 0,
+        is_private: false,
+        last_seen_update_version: null,
+        has_seen_tutorial_v2: false,
         location: null,
         catchment_radius_km: null,
         skills: null,
         ai_features_enabled: false,
         movement_group_opt_out: false,
         email_notifications_opt_in: false,
+        birthdate: null,
+        age_verified: false,
+        onboarding_completed: false,
+        onboarding_current_step: 0,
+        onboarding_interests: [],
+        onboarding_completed_tutorials: [],
         created_at: now,
         updated_at: now,
       };
@@ -8996,12 +9572,22 @@ async function handlePostMyProfile(request, reply) {
     bio: z.string().max(MAX_TEXT_LENGTHS.profileBio).optional().nullable(),
     profile_photo_url: z.string().max(MAX_TEXT_LENGTHS.profilePhotoUrl).optional().nullable(),
     banner_url: z.string().max(MAX_TEXT_LENGTHS.profileBannerUrl).optional().nullable(),
+    banner_offset_y: z.number().min(-1).max(1).optional().nullable(),
+    is_private: z.boolean().optional(),
+    last_seen_update_version: z.string().max(64).optional().nullable(),
+    has_seen_tutorial_v2: z.boolean().optional(),
     location: z.record(z.string(), z.any()).optional().nullable(),
     catchment_radius_km: z.number().int().min(1).max(1000).optional().nullable(),
     skills: z.array(z.string().max(MAX_TEXT_LENGTHS.profileSkill)).max(50).optional().nullable(),
     ai_features_enabled: z.boolean().optional(),
     movement_group_opt_out: z.boolean().optional(),
     email_notifications_opt_in: z.boolean().optional(),
+    birthdate: z.string().max(32).optional().nullable(),
+    age_verified: z.boolean().optional(),
+    onboarding_completed: z.boolean().optional(),
+    onboarding_current_step: z.number().int().min(0).max(100).optional(),
+    onboarding_interests: z.array(z.string().max(64)).max(50).optional().nullable(),
+    onboarding_completed_tutorials: z.array(z.string().max(64)).max(100).optional().nullable(),
   });
 
   const parsed = schema.safeParse(request.body ?? {});
@@ -9014,18 +9600,62 @@ async function handlePostMyProfile(request, reply) {
     return reply.code(400).send({ error: 'Invalid username format' });
   }
 
+  const clampBannerOffsetY = (value, fallback = 0) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+    return Math.max(-1, Math.min(1, value));
+  };
+
+  const normalizeUpdateVersion = (value) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    // Light validation: keep it URL-safe + human-safe.
+    // Examples: 2026-01-SoftLaunch, v1.2.3, 2026_01
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(raw)) return null;
+    return raw;
+  };
+
   const buildNextProfile = (existing) => ({
     display_name: parsed.data.display_name != null ? cleanText(parsed.data.display_name, MAX_TEXT_LENGTHS.profileDisplayName) : existing?.display_name ?? null,
     username: normalizedUsername ?? existing?.username ?? null,
     bio: parsed.data.bio != null ? cleanText(parsed.data.bio, MAX_TEXT_LENGTHS.profileBio) : existing?.bio ?? null,
     profile_photo_url: parsed.data.profile_photo_url != null ? String(parsed.data.profile_photo_url).trim() || null : existing?.profile_photo_url ?? null,
     banner_url: parsed.data.banner_url != null ? String(parsed.data.banner_url).trim() || null : existing?.banner_url ?? null,
+    banner_offset_y:
+      parsed.data.banner_offset_y != null
+        ? clampBannerOffsetY(Number(parsed.data.banner_offset_y), existing?.banner_offset_y ?? 0)
+        : (existing?.banner_offset_y ?? 0),
+    is_private: parsed.data.is_private != null ? !!parsed.data.is_private : existing?.is_private ?? false,
+    last_seen_update_version:
+      parsed.data.last_seen_update_version !== undefined
+        ? (parsed.data.last_seen_update_version === null ? null : (normalizeUpdateVersion(parsed.data.last_seen_update_version) ?? (existing?.last_seen_update_version ?? null)))
+        : (existing?.last_seen_update_version ?? null),
+    has_seen_tutorial_v2:
+      parsed.data.has_seen_tutorial_v2 != null ? !!parsed.data.has_seen_tutorial_v2 : existing?.has_seen_tutorial_v2 ?? false,
     location: parsed.data.location != null ? sanitizeProfileLocation(parsed.data.location) : existing?.location ?? null,
     catchment_radius_km: parsed.data.catchment_radius_km != null ? Number(parsed.data.catchment_radius_km) : existing?.catchment_radius_km ?? null,
     skills: parsed.data.skills != null ? parsed.data.skills.map((s) => cleanText(s, MAX_TEXT_LENGTHS.profileSkill)).filter(Boolean) : existing?.skills ?? null,
     ai_features_enabled: parsed.data.ai_features_enabled != null ? !!parsed.data.ai_features_enabled : existing?.ai_features_enabled ?? false,
     movement_group_opt_out: parsed.data.movement_group_opt_out != null ? !!parsed.data.movement_group_opt_out : existing?.movement_group_opt_out ?? false,
     email_notifications_opt_in: parsed.data.email_notifications_opt_in != null ? !!parsed.data.email_notifications_opt_in : existing?.email_notifications_opt_in ?? false,
+    birthdate:
+      parsed.data.birthdate !== undefined
+        ? (String(parsed.data.birthdate || '').trim() || null)
+        : (existing?.birthdate ?? null),
+    age_verified: parsed.data.age_verified != null ? !!parsed.data.age_verified : existing?.age_verified ?? false,
+    onboarding_completed:
+      parsed.data.onboarding_completed != null ? !!parsed.data.onboarding_completed : existing?.onboarding_completed ?? false,
+    onboarding_current_step:
+      parsed.data.onboarding_current_step != null
+        ? Number(parsed.data.onboarding_current_step)
+        : (existing?.onboarding_current_step ?? 0),
+    onboarding_interests:
+      parsed.data.onboarding_interests !== undefined
+        ? (Array.isArray(parsed.data.onboarding_interests) ? parsed.data.onboarding_interests.filter(Boolean) : [])
+        : (existing?.onboarding_interests ?? []),
+    onboarding_completed_tutorials:
+      parsed.data.onboarding_completed_tutorials !== undefined
+        ? (Array.isArray(parsed.data.onboarding_completed_tutorials) ? parsed.data.onboarding_completed_tutorials.filter(Boolean) : [])
+        : (existing?.onboarding_completed_tutorials ?? []),
   });
 
   if (!hasDatabaseUrl) {
@@ -9047,6 +9677,16 @@ async function handlePostMyProfile(request, reply) {
       updated_at: now,
       movement_group_opt_out: false,
       email_notifications_opt_in: false,
+      banner_offset_y: 0,
+      is_private: false,
+      last_seen_update_version: null,
+      has_seen_tutorial_v2: false,
+      birthdate: null,
+      age_verified: false,
+      onboarding_completed: false,
+      onboarding_current_step: 0,
+      onboarding_interests: [],
+      onboarding_completed_tutorials: [],
     };
     const next = buildNextProfile(existing);
     const merged = {
@@ -9107,13 +9747,23 @@ async function handlePostMyProfile(request, reply) {
              bio = $6,
              profile_photo_url = $7,
              banner_url = $8,
-             location = $9,
-             catchment_radius_km = $10,
-             skills = $11,
-             ai_features_enabled = $12,
-             movement_group_opt_out = $13,
-             email_notifications_opt_in = $14,
-             updated_at = $15
+             banner_offset_y = $9,
+             is_private = $10,
+             last_seen_update_version = $11,
+             has_seen_tutorial_v2 = $12,
+             location = $13,
+             catchment_radius_km = $14,
+             skills = $15,
+             ai_features_enabled = $16,
+             movement_group_opt_out = $17,
+             email_notifications_opt_in = $18,
+             birthdate = $19,
+             age_verified = $20,
+             onboarding_completed = $21,
+             onboarding_current_step = $22,
+             onboarding_interests = $23,
+             onboarding_completed_tutorials = $24,
+             updated_at = $25
          WHERE id = $1`,
         [
           existing.id,
@@ -9124,12 +9774,22 @@ async function handlePostMyProfile(request, reply) {
           next.bio,
           next.profile_photo_url,
           next.banner_url,
+          next.banner_offset_y,
+          next.is_private,
+          next.last_seen_update_version,
+          next.has_seen_tutorial_v2,
           next.location,
           next.catchment_radius_km,
           next.skills,
           next.ai_features_enabled,
           next.movement_group_opt_out,
           next.email_notifications_opt_in,
+          next.birthdate,
+          next.age_verified,
+          next.onboarding_completed,
+          next.onboarding_current_step,
+          next.onboarding_interests,
+          next.onboarding_completed_tutorials,
           now,
         ]
       );
@@ -9137,8 +9797,8 @@ async function handlePostMyProfile(request, reply) {
       const id = randomUUID();
       await pool.query(
         `INSERT INTO user_profiles
-         (id, user_id, user_email, display_name, username, bio, profile_photo_url, banner_url, location, catchment_radius_km, skills, ai_features_enabled, movement_group_opt_out, email_notifications_opt_in, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)`,
+         (id, user_id, user_email, display_name, username, bio, profile_photo_url, banner_url, banner_offset_y, is_private, last_seen_update_version, has_seen_tutorial_v2, location, catchment_radius_km, skills, ai_features_enabled, movement_group_opt_out, email_notifications_opt_in, birthdate, age_verified, onboarding_completed, onboarding_current_step, onboarding_interests, onboarding_completed_tutorials, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25)`,
         [
           id,
           userId,
@@ -9148,12 +9808,22 @@ async function handlePostMyProfile(request, reply) {
           next.bio,
           next.profile_photo_url,
           next.banner_url,
+          next.banner_offset_y,
+          next.is_private,
+          next.last_seen_update_version,
+          next.has_seen_tutorial_v2,
           next.location,
           next.catchment_radius_km,
           next.skills,
           next.ai_features_enabled,
           next.movement_group_opt_out,
           next.email_notifications_opt_in,
+          next.birthdate,
+          next.age_verified,
+          next.onboarding_completed,
+          next.onboarding_current_step,
+          next.onboarding_interests,
+          next.onboarding_completed_tutorials,
           now,
         ]
       );
@@ -9174,6 +9844,550 @@ fastify.get('/me/profile', handleGetMyProfile);
 fastify.get('/api/me/profile', handleGetMyProfile);
 fastify.post('/me/profile', handlePostMyProfile);
 fastify.post('/api/me/profile', handlePostMyProfile);
+
+// Notifications (Postgres-backed; auth required)
+fastify.get('/me/notifications', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const recipientEmail = normalizeEmail(authedUser.email);
+  if (!recipientEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  const limitRaw = request.query?.limit;
+  const offsetRaw = request.query?.offset;
+  const unreadRaw = String(request.query?.unread || '').trim().toLowerCase();
+  const typesRaw = String(request.query?.types || '').trim();
+
+  const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.min(200, Number(limitRaw))) : 20;
+  const offset = Number.isFinite(Number(offsetRaw)) ? Math.max(0, Number(offsetRaw)) : 0;
+  const unreadOnly = unreadRaw === '1' || unreadRaw === 'true' || unreadRaw === 'yes';
+  const types = typesRaw
+    ? typesRaw
+        .split(',')
+        .map((t) => String(t).trim())
+        .filter(Boolean)
+        .slice(0, 50)
+    : [];
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: notifications memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    const list = memoryNotificationsByRecipient.get(recipientEmail) || [];
+    const filtered = list
+      .filter((n) => (unreadOnly ? !n?.is_read : true))
+      .filter((n) => (types.length ? types.includes(String(n?.type || '')) : true))
+      .sort((a, b) => String(b?.created_at || b?.created_date || '').localeCompare(String(a?.created_at || a?.created_date || '')));
+    const page = filtered.slice(offset, offset + limit).map((n) => ({
+      ...n,
+      created_date: n?.created_date ?? n?.created_at ?? null,
+    }));
+    return reply.send({ notifications: page });
+  }
+
+  try {
+    await ensureNotificationsTable();
+    const res = await pool.query(
+      `SELECT id, recipient_email, type, actor_name, actor_email, content_id, content_ref, content_title, metadata, is_read,
+              created_at
+       FROM notifications
+       WHERE recipient_email = $1
+         AND ($2::boolean = false OR is_read = false)
+         AND (COALESCE(array_length($3::text[], 1), 0) = 0 OR type = ANY($3))
+       ORDER BY created_at DESC
+       LIMIT $4 OFFSET $5`,
+      [recipientEmail, unreadOnly, types, limit, offset]
+    );
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const mapped = rows.map((r) => ({
+      id: r?.id ?? null,
+      recipient_email: r?.recipient_email ?? null,
+      type: r?.type ?? null,
+      actor_name: r?.actor_name ?? null,
+      actor_email: r?.actor_email ?? null,
+      content_id: r?.content_id ?? null,
+      content_ref: r?.content_ref ?? null,
+      content_title: r?.content_title ?? null,
+      created_date: r?.created_at ? new Date(r.created_at).toISOString() : null,
+      is_read: !!r?.is_read,
+      metadata: r?.metadata ?? null,
+    }));
+    return reply.send({ notifications: mapped });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to load notifications');
+    return reply.code(500).send({ error: 'Failed to load notifications' });
+  }
+});
+
+// Limited "search" for duplicates (auth required; recipient is always the authed user).
+fastify.get('/me/notifications/search', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const recipientEmail = normalizeEmail(authedUser.email);
+  if (!recipientEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  const type = request.query?.type ? String(request.query.type).trim() : null;
+  const contentRef = request.query?.content_ref ? String(request.query.content_ref).trim() : null;
+  const contentId = request.query?.content_id ? String(request.query.content_id).trim() : null;
+  const limitRaw = request.query?.limit;
+  const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.min(50, Number(limitRaw))) : 20;
+
+  if (!type && !contentRef && !contentId) return reply.send({ notifications: [] });
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: notifications search memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    const list = memoryNotificationsByRecipient.get(recipientEmail) || [];
+    const matches = list.filter((n) => {
+      if (type && String(n?.type || '') !== type) return false;
+      if (contentRef && String(n?.content_ref || '') !== contentRef) return false;
+      if (contentId && String(n?.content_id || '') !== contentId) return false;
+      return true;
+    });
+    return reply.send({ notifications: matches.slice(0, limit) });
+  }
+
+  try {
+    await ensureNotificationsTable();
+    const res = await pool.query(
+      `SELECT id, recipient_email, type, actor_name, actor_email, content_id, content_ref, content_title, metadata, is_read, created_at
+       FROM notifications
+       WHERE recipient_email = $1
+         AND ($2::text IS NULL OR type = $2)
+         AND ($3::text IS NULL OR content_ref = $3)
+         AND ($4::text IS NULL OR content_id = $4)
+       ORDER BY created_at DESC
+       LIMIT $5`,
+      [recipientEmail, type, contentRef, contentId, limit]
+    );
+    const rows = Array.isArray(res.rows) ? res.rows : [];
+    const mapped = rows.map((r) => ({
+      id: r?.id ?? null,
+      recipient_email: r?.recipient_email ?? null,
+      type: r?.type ?? null,
+      actor_name: r?.actor_name ?? null,
+      actor_email: r?.actor_email ?? null,
+      content_id: r?.content_id ?? null,
+      content_ref: r?.content_ref ?? null,
+      content_title: r?.content_title ?? null,
+      created_date: r?.created_at ? new Date(r.created_at).toISOString() : null,
+      is_read: !!r?.is_read,
+      metadata: r?.metadata ?? null,
+    }));
+    return reply.send({ notifications: mapped });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to search notifications');
+    return reply.code(500).send({ error: 'Failed to search notifications' });
+  }
+});
+
+fastify.post('/notifications', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const actorEmail = normalizeEmail(authedUser.email);
+  if (!actorEmail) return reply.code(400).send({ error: 'User email is required' });
+
+  const schema = z.object({
+    recipient_email: z.string().email(),
+    type: z.string().min(1).max(64),
+    actor_name: z.string().max(120).optional().nullable(),
+    actor_email: z.string().email().optional().nullable(),
+    content_id: z.string().max(128).optional().nullable(),
+    content_ref: z.string().max(128).optional().nullable(),
+    content_title: z.string().max(200).optional().nullable(),
+    created_date: z.string().max(64).optional().nullable(),
+    is_read: z.boolean().optional(),
+    metadata: z.record(z.string(), z.any()).optional().nullable(),
+    starts_at: z.string().max(64).optional().nullable(),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const recipientEmail = normalizeEmail(parsed.data.recipient_email);
+  if (!recipientEmail) return reply.code(400).send({ error: 'Invalid recipient' });
+
+  const isSelf = recipientEmail === actorEmail;
+  const actorName = parsed.data.actor_name != null ? String(parsed.data.actor_name).trim() || null : null;
+  const requestedActorEmail = parsed.data.actor_email != null ? normalizeEmail(parsed.data.actor_email) : null;
+  const storedActorEmail = isSelf && requestedActorEmail == null ? null : actorEmail;
+  const storedActorName = isSelf && storedActorEmail == null ? (actorName || 'People Power') : actorName;
+
+  const metadata = parsed.data.metadata && typeof parsed.data.metadata === 'object' ? parsed.data.metadata : null;
+  const metaMerged = parsed.data.starts_at ? { ...(metadata || {}), starts_at: String(parsed.data.starts_at) } : metadata;
+
+  const now = nowIso();
+  const id = randomUUID();
+  const record = {
+    id,
+    recipient_email: recipientEmail,
+    type: String(parsed.data.type).trim(),
+    actor_name: storedActorName,
+    actor_email: storedActorEmail,
+    content_id: parsed.data.content_id != null ? String(parsed.data.content_id).trim() || null : null,
+    content_ref: parsed.data.content_ref != null ? String(parsed.data.content_ref).trim() || null : null,
+    content_title: parsed.data.content_title != null ? String(parsed.data.content_title).trim() || null : null,
+    created_date: now,
+    is_read: parsed.data.is_read != null ? !!parsed.data.is_read : false,
+    metadata: metaMerged,
+  };
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: notifications create memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    const list = memoryNotificationsByRecipient.get(recipientEmail) || [];
+    list.unshift({ ...record, created_at: now });
+    memoryNotificationsByRecipient.set(recipientEmail, list.slice(0, 500));
+    return reply.code(201).send({ notification: record });
+  }
+
+  try {
+    await ensureNotificationsTable();
+    await pool.query(
+      `INSERT INTO notifications
+       (id, recipient_email, type, actor_name, actor_email, content_id, content_ref, content_title, metadata, is_read, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        id,
+        record.recipient_email,
+        record.type,
+        record.actor_name,
+        record.actor_email,
+        record.content_id,
+        record.content_ref,
+        record.content_title,
+        record.metadata,
+        record.is_read,
+        now,
+      ]
+    );
+    return reply.code(201).send({ notification: record });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to create notification');
+    return reply.code(500).send({ error: 'Failed to create notification' });
+  }
+});
+
+fastify.post('/me/notifications/:id/read', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const id = request.params?.id ? String(request.params.id).trim() : '';
+  if (!id) return reply.code(400).send({ error: 'Notification id is required' });
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: notifications read memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    const list = memoryNotificationsByRecipient.get(email) || [];
+    const next = list.map((n) => (String(n?.id || '') === id ? { ...n, is_read: true } : n));
+    memoryNotificationsByRecipient.set(email, next);
+    return reply.send({ ok: true });
+  }
+
+  try {
+    await ensureNotificationsTable();
+    await pool.query(
+      'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND recipient_email = $2',
+      [id, email]
+    );
+    return reply.send({ ok: true });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to mark notification read');
+    return reply.code(500).send({ error: 'Failed to mark read' });
+  }
+});
+
+fastify.post('/me/notifications/read', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const schema = z.object({ ids: z.array(z.string().min(1)).max(200) });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+  const ids = Array.from(new Set(parsed.data.ids.map((x) => String(x).trim()).filter(Boolean)));
+  if (!ids.length) return reply.send({ ok: true });
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: notifications bulk-read memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    const list = memoryNotificationsByRecipient.get(email) || [];
+    const set = new Set(ids);
+    const next = list.map((n) => (set.has(String(n?.id || '')) ? { ...n, is_read: true } : n));
+    memoryNotificationsByRecipient.set(email, next);
+    return reply.send({ ok: true });
+  }
+
+  try {
+    await ensureNotificationsTable();
+    await pool.query(
+      'UPDATE notifications SET is_read = TRUE WHERE recipient_email = $1 AND id = ANY($2)',
+      [email, ids]
+    );
+    return reply.send({ ok: true });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to mark notifications read');
+    return reply.code(500).send({ error: 'Failed to mark read' });
+  }
+});
+
+// Leadership roles (Postgres-backed; auth required)
+const DEFAULT_LEADERSHIP_CAPS = {
+  max_movements_created: 5,
+  max_collaborator_roles: 10,
+  max_events_organized: 8,
+  max_petitions_created: 5,
+};
+
+function capForRoleType(roleType) {
+  const rt = String(roleType || '').trim();
+  const caps = DEFAULT_LEADERSHIP_CAPS;
+  const roleCapMapping = {
+    movement_creator: caps.max_movements_created,
+    collaborator_admin: caps.max_collaborator_roles,
+    collaborator_editor: caps.max_collaborator_roles,
+    event_organizer: caps.max_events_organized,
+    petition_creator: caps.max_petitions_created,
+  };
+  return roleCapMapping[rt] || 5;
+}
+
+fastify.get('/me/leadership/cap', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  if (getStaffRoleForUser(authedUser) === 'admin') {
+    return reply.send({ can_create: true, current_count: 0, cap: Number.POSITIVE_INFINITY, message: null, bypassed: true });
+  }
+
+  const roleType = request.query?.role_type ? String(request.query.role_type).trim() : '';
+  if (!roleType) return reply.code(400).send({ error: 'role_type is required' });
+
+  const cap = capForRoleType(roleType);
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: leadership cap memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    const current = memoryLeadershipRoles.filter((r) => r?.is_active && normalizeEmail(r?.user_email) === email && String(r?.role_type || '') === roleType).length;
+    const hasReachedCap = current >= cap;
+    return reply.send({
+      can_create: !hasReachedCap,
+      current_count: current,
+      cap,
+      message: hasReachedCap ? `You've reached the limit of ${cap} active ${roleType.replace(/_/g, ' ')} roles.` : null,
+    });
+  }
+
+  try {
+    await ensureLeadershipRolesTable();
+    const res = await pool.query(
+      'SELECT COUNT(*)::int AS c FROM leadership_roles WHERE user_email = $1 AND role_type = $2 AND is_active = TRUE',
+      [email, roleType]
+    );
+    const current = Number(res.rows?.[0]?.c || 0);
+    const hasReachedCap = current >= cap;
+    return reply.send({
+      can_create: !hasReachedCap,
+      current_count: current,
+      cap,
+      message: hasReachedCap ? `You've reached the limit of ${cap} active ${roleType.replace(/_/g, ' ')} roles.` : null,
+    });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to check leadership cap');
+    return reply.code(500).send({ error: 'Failed to check cap' });
+  }
+});
+
+fastify.get('/leadership/counts', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const roleType = request.query?.role_type ? String(request.query.role_type).trim() : '';
+  if (!roleType) return reply.code(400).send({ error: 'role_type is required' });
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: leadership counts memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    const counts = {};
+    for (const r of memoryLeadershipRoles) {
+      if (!r?.is_active) continue;
+      if (String(r?.role_type || '') !== roleType) continue;
+      const email = normalizeEmail(r?.user_email);
+      if (!email) continue;
+      counts[email] = (counts[email] || 0) + 1;
+    }
+    return reply.send({ counts });
+  }
+
+  try {
+    await ensureLeadershipRolesTable();
+    const res = await pool.query(
+      'SELECT user_email, COUNT(*)::int AS c FROM leadership_roles WHERE role_type = $1 AND is_active = TRUE GROUP BY user_email',
+      [roleType]
+    );
+    const counts = {};
+    for (const row of Array.isArray(res.rows) ? res.rows : []) {
+      const email = normalizeEmail(row?.user_email);
+      if (!email) continue;
+      counts[email] = Number(row?.c || 0);
+    }
+    return reply.send({ counts });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to load leadership counts');
+    return reply.code(500).send({ error: 'Failed to load counts' });
+  }
+});
+
+fastify.post('/me/leadership/register', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const schema = z.object({
+    role_type: z.string().min(1).max(64),
+    movement_id: z.string().max(128).optional().nullable(),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const roleType = String(parsed.data.role_type).trim();
+  const movementId = parsed.data.movement_id != null ? String(parsed.data.movement_id).trim() || null : null;
+
+  // Cap enforcement.
+  if (getStaffRoleForUser(authedUser) !== 'admin') {
+    const cap = capForRoleType(roleType);
+    let current = 0;
+    if (!hasDatabaseUrl) {
+      if (isProd) {
+        fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: leadership register memory fallback blocked in production');
+        return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+      }
+      current = memoryLeadershipRoles.filter((r) => r?.is_active && normalizeEmail(r?.user_email) === email && String(r?.role_type || '') === roleType).length;
+    } else {
+      await ensureLeadershipRolesTable();
+      const res = await pool.query(
+        'SELECT COUNT(*)::int AS c FROM leadership_roles WHERE user_email = $1 AND role_type = $2 AND is_active = TRUE',
+        [email, roleType]
+      );
+      current = Number(res.rows?.[0]?.c || 0);
+    }
+    if (current >= cap) {
+      return reply.code(403).send({
+        error: 'CAP_REACHED',
+        message: `You've reached the limit of ${cap} active ${roleType.replace(/_/g, ' ')} roles.`,
+      });
+    }
+  }
+
+  const now = nowIso();
+  const id = randomUUID();
+  const role = {
+    id,
+    user_email: email,
+    role_type: roleType,
+    movement_id: movementId,
+    is_active: true,
+    reached_cap: false,
+    created_at: now,
+    updated_at: now,
+  };
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: leadership register memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    memoryLeadershipRoles.push(role);
+    return reply.code(201).send({ role });
+  }
+
+  try {
+    await ensureLeadershipRolesTable();
+    await pool.query(
+      `INSERT INTO leadership_roles (id, user_email, role_type, movement_id, is_active, reached_cap, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,TRUE,FALSE,$5,$5)
+       ON CONFLICT (user_email, role_type, movement_id)
+       DO UPDATE SET is_active = TRUE, updated_at = EXCLUDED.updated_at`,
+      [id, email, roleType, movementId, now]
+    );
+    return reply.code(201).send({ role });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to register leadership role');
+    return reply.code(500).send({ error: 'Failed to register role' });
+  }
+});
+
+fastify.post('/me/leadership/deactivate', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const email = normalizeEmail(authedUser.email);
+  if (!email) return reply.code(400).send({ error: 'User email is required' });
+
+  const schema = z.object({
+    role_type: z.string().min(1).max(64),
+    movement_id: z.string().max(128).optional().nullable(),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
+
+  const roleType = String(parsed.data.role_type).trim();
+  const movementId = parsed.data.movement_id != null ? String(parsed.data.movement_id).trim() || null : null;
+  const now = nowIso();
+
+  if (!hasDatabaseUrl) {
+    if (isProd) {
+      fastify.log.error({ path: request?.routerPath || request?.url }, '[storage] FATAL: leadership deactivate memory fallback blocked in production');
+      return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+    }
+    for (let i = 0; i < memoryLeadershipRoles.length; i++) {
+      const r = memoryLeadershipRoles[i];
+      if (!r) continue;
+      if (!r.is_active) continue;
+      if (normalizeEmail(r.user_email) !== email) continue;
+      if (String(r.role_type || '') !== roleType) continue;
+      if (String(r.movement_id || '') !== String(movementId || '')) continue;
+      memoryLeadershipRoles[i] = { ...r, is_active: false, updated_at: now };
+    }
+    return reply.send({ ok: true });
+  }
+
+  try {
+    await ensureLeadershipRolesTable();
+    await pool.query(
+      `UPDATE leadership_roles
+       SET is_active = FALSE, updated_at = $4
+       WHERE user_email = $1 AND role_type = $2 AND COALESCE(movement_id, '') = COALESCE($3, '')`,
+      [email, roleType, movementId, now]
+    );
+    return reply.send({ ok: true });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to deactivate leadership role');
+    return reply.code(500).send({ error: 'Failed to deactivate role' });
+  }
+});
 
 // User block list (privacy safety)
 fastify.get('/me/blocks', async (request, reply) => {
@@ -9281,7 +10495,7 @@ fastify.get('/profiles/username/:username', async (request, reply) => {
     if (viewerBlocks && isBlockedForViewer(entry?.user_email, viewerBlocks)) {
       return reply.code(404).send({ error: 'Profile not found' });
     }
-    return reply.send({ profile: sanitizeUserProfileRecord(entry) });
+    return reply.send({ profile: sanitizePublicUserProfileRecord(entry) });
   }
 
   try {
@@ -9290,7 +10504,7 @@ fastify.get('/profiles/username/:username', async (request, reply) => {
       'SELECT * FROM user_profiles WHERE LOWER(username) = LOWER($1) LIMIT 1',
       [username]
     );
-    const profile = sanitizeUserProfileRecord(res.rows?.[0] || null);
+    const profile = sanitizePublicUserProfileRecord(res.rows?.[0] || null);
     if (!profile) return reply.code(404).send({ error: 'Profile not found' });
     if (viewerBlocks && isBlockedForViewer(profile?.user_email, viewerBlocks)) {
       return reply.code(404).send({ error: 'Profile not found' });
@@ -9298,6 +10512,43 @@ fastify.get('/profiles/username/:username', async (request, reply) => {
     return reply.send({ profile });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load profile by username');
+    return reply.code(500).send({ error: 'Failed to load profile' });
+  }
+});
+
+// Public-ish profile lookup by email (auth required).
+// Used for internal navigation where we still have an email identifier.
+fastify.get('/profiles/email/:email', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+
+  const raw = request.params?.email ? String(request.params.email) : '';
+  const targetEmail = normalizeEmail(raw);
+  if (!targetEmail) return reply.code(400).send({ error: 'Valid email is required' });
+
+  const viewerEmail = normalizeEmail(authedUser.email);
+  const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
+
+  if (!hasDatabaseUrl) {
+    const entry = memoryUserProfiles.get(targetEmail) || null;
+    if (!entry) return reply.code(404).send({ error: 'Profile not found' });
+    if (viewerBlocks && isBlockedForViewer(entry?.user_email, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Profile not found' });
+    }
+    return reply.send({ profile: sanitizePublicUserProfileRecord(entry) });
+  }
+
+  try {
+    await ensureUserProfilesTable();
+    const res = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [targetEmail]);
+    const profile = sanitizePublicUserProfileRecord(res.rows?.[0] || null);
+    if (!profile) return reply.code(404).send({ error: 'Profile not found' });
+    if (viewerBlocks && isBlockedForViewer(profile?.user_email, viewerBlocks)) {
+      return reply.code(404).send({ error: 'Profile not found' });
+    }
+    return reply.send({ profile });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to fetch profile by email');
     return reply.code(500).send({ error: 'Failed to load profile' });
   }
 });

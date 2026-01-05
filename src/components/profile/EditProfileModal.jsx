@@ -7,6 +7,7 @@ import LocationPicker from './LocationPicker';
 import { Loader2, Upload, X, Plus } from 'lucide-react';
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
 import { entities } from '@/api/appClient';
 import { uploadFile } from '@/api/uploadsClient';
 import { upsertMyProfile } from '@/api/userProfileClient';
@@ -16,6 +17,7 @@ import { readPrivateUserCoordinates, writePrivateUserCoordinates, sanitizePublic
 import { exportMyData } from '@/api/userExportClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { logError } from '@/utils/logError';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import {
@@ -46,6 +48,9 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [uploadingBanner, setUploadingBanner] = useState(false);
   const [photoUrl, setPhotoUrl] = useState(profile?.profile_photo_url || '');
   const [bannerUrl, setBannerUrl] = useState(profile?.banner_url || '');
+  const [bannerOffsetY, setBannerOffsetY] = useState(
+    typeof profile?.banner_offset_y === 'number' ? profile.banner_offset_y : 0
+  );
   const [initialPhotoUrl, setInitialPhotoUrl] = useState(profile?.profile_photo_url || '');
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState('');
   const [pendingPhotoFile, setPendingPhotoFile] = useState(null);
@@ -63,6 +68,12 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [movementGroupOptOut, setMovementGroupOptOut] = useState(() => {
     if (profile && typeof profile === 'object' && 'movement_group_opt_out' in profile) {
       return !!profile.movement_group_opt_out;
+    }
+    return false;
+  });
+  const [isPrivate, setIsPrivate] = useState(() => {
+    if (profile && typeof profile === 'object' && 'is_private' in profile) {
+      return !!profile.is_private;
     }
     return false;
   });
@@ -95,10 +106,12 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     setPhotoUrl(profile?.profile_photo_url || '');
     setInitialPhotoUrl(profile?.profile_photo_url || '');
     setBannerUrl(profile?.banner_url || '');
+    setBannerOffsetY(typeof profile?.banner_offset_y === 'number' ? profile.banner_offset_y : 0);
     setUsernameError('');
     setPendingPhotoFile(null);
     setMovementGroupOptOut(!!profile?.movement_group_opt_out);
     setEmailNotificationsOptIn(!!profile?.email_notifications_opt_in);
+    setIsPrivate(!!profile?.is_private);
   }, [open, profile, userEmail]);
 
   React.useEffect(() => {
@@ -162,7 +175,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         setUsernameError('That username is already taken.');
         return;
       }
-      toast.error(String(err?.message || 'Failed to update profile'));
+      toastFriendlyError(err, 'Failed to update profile');
     }
   });
 
@@ -219,6 +232,11 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     try {
       const accessToken = session?.access_token ? String(session.access_token) : null;
       if (!accessToken) throw new Error('Please sign in to upload an image');
+
+      // Banner upload flow:
+      // - Uploads file via POST /uploads (kind=banner) in src/api/uploadsClient.js
+      // - Persists returned URL into user_profiles.banner_url via POST /me/profile (upsertMyProfile)
+      // - Banner renders on Profile/UserProfile as a CSS background image
       const uploaded = await uploadFile(file, {
         accessToken,
         kind: 'banner',
@@ -227,9 +245,10 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const nextUrl = uploaded?.url ? String(uploaded.url) : '';
       if (!nextUrl) throw new Error('Upload succeeded but no URL returned');
       setBannerUrl(nextUrl);
+      setBannerOffsetY(0);
     } catch (e) {
       logError(e, 'Profile banner upload failed');
-      toast.error(String(e?.message || 'Failed to upload banner'));
+      toastFriendlyError(e, 'Failed to upload banner');
     } finally {
       setUploadingBanner(false);
       if (preview) {
@@ -281,7 +300,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         setPendingPhotoFile(null);
       } catch (e) {
         logError(e, 'Profile photo upload failed');
-        toast.error(String(e?.message || 'Failed to upload photo'));
+        toastFriendlyError(e, 'Failed to upload photo');
         setUploading(false);
         return;
       } finally {
@@ -295,6 +314,8 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       bio: bio.trim(),
       profile_photo_url: nextPhotoUrl,
       banner_url: bannerUrl,
+      banner_offset_y: bannerOffsetY,
+      is_private: isPrivate,
       skills,
       ai_features_enabled: aiEnabled,
       movement_group_opt_out: movementGroupOptOut,
@@ -335,7 +356,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
 
       toast.success('Export downloaded');
     } catch (e) {
-      toast.error(String(e?.message || 'Export failed'));
+      toastFriendlyError(e, 'Export failed');
     } finally {
       setExporting(false);
     }
@@ -357,7 +378,14 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
             <label className="block text-sm font-bold text-slate-700 mb-2">Profile Banner</label>
             <div className="relative h-24 rounded-xl overflow-hidden">
               {bannerPreviewUrl || bannerUrl ? (
-                <img src={bannerPreviewUrl || bannerUrl} alt="" className="w-full h-full object-cover" />
+                <img
+                  src={bannerPreviewUrl || bannerUrl}
+                  alt=""
+                  className="w-full h-full object-cover"
+                  style={{
+                    objectPosition: `50% ${Math.max(0, Math.min(100, 50 + Math.max(-1, Math.min(1, Number(bannerOffsetY) || 0)) * 50))}%`,
+                  }}
+                />
               ) : (
                 <div className="w-full h-full bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
               )}
@@ -380,6 +408,23 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
                 </div>
               </label>
             </div>
+
+            {(bannerUrl || bannerPreviewUrl) ? (
+              <div className="mt-3">
+                <label className="block text-xs font-bold text-slate-600 mb-2">Adjust banner position</label>
+                <Slider
+                  value={[Number.isFinite(Number(bannerOffsetY)) ? Number(bannerOffsetY) : 0]}
+                  onValueChange={(v) => {
+                    const next = Array.isArray(v) ? v[0] : 0;
+                    const n = Number(next);
+                    setBannerOffsetY(Number.isFinite(n) ? Math.max(-1, Math.min(1, n)) : 0);
+                  }}
+                  min={-1}
+                  max={1}
+                  step={0.01}
+                />
+              </div>
+            ) : null}
           </div>
 
           {/* Profile Photo */}
@@ -593,6 +638,21 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
 
           {/* Privacy & Notifications */}
           <div className="p-4 rounded-xl border-2 border-slate-200 bg-slate-50 space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <label className="block text-sm font-black text-slate-900 mb-1">
+                  Private account
+                </label>
+                <p className="text-xs text-slate-600 font-semibold">
+                  When enabled, your followers/following lists are only visible to people you follow.
+                </p>
+              </div>
+              <Switch
+                checked={isPrivate}
+                onCheckedChange={setIsPrivate}
+                className="ml-4"
+              />
+            </div>
             <div className="flex items-center justify-between gap-4">
               <div className="flex-1">
                 <label className="block text-sm font-black text-slate-900 mb-1">

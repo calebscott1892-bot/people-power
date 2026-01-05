@@ -11,6 +11,7 @@ import AdminBackButton from '@/components/admin/AdminBackButton';
 import { entities } from '@/api/appClient';
 import { getStaffRole } from '@/utils/staff';
 import { createPageUrl } from '@/utils';
+import ErrorState from '@/components/shared/ErrorState';
 
 export default function AdminReports() {
   const { session, isAdmin } = useAuth();
@@ -165,12 +166,13 @@ export default function AdminReports() {
         ) : isLoading ? (
           <div className="text-slate-600 font-semibold">Loading reports…</div>
         ) : isError ? (
-          <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
-            <div className="font-black text-slate-900">Could not load reports</div>
-            <div className="text-sm font-semibold mt-1">
-              {String(error?.message || 'Unknown error')}
-            </div>
-          </div>
+          <ErrorState
+            compact
+            error={error}
+            onRetry={() => refetch()}
+            onReload={() => window.location.reload()}
+            className="border-slate-200"
+          />
         ) : filteredRows.length === 0 ? (
           <div className="text-slate-600 font-semibold">No reports in this status.</div>
         ) : (

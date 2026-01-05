@@ -11,9 +11,12 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { entities } from '@/api/appClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { isStaff } from '@/utils/staff';
+import ErrorState from '@/components/shared/ErrorState';
+import { upsertNotification } from '@/api/notificationsClient';
 
 function nowIso() {
   return new Date().toISOString();
@@ -57,26 +60,30 @@ async function writeAuditLog({ moderatorEmail, actionType, appeal, details }) {
   }
 }
 
-async function notifyAppellant({ appeal, decision, reviewerNotes }) {
+async function notifyAppellant({ appeal, decision, reviewerNotes, accessToken }) {
   const to = normalizeEmail(appeal?.appellant_email);
   if (!to) return;
 
   try {
-    await entities.Notification.create({
-      recipient_email: to,
-      type: 'moderation_appeal_decision',
-      content:
-        decision === 'approved'
-          ? 'Your appeal was approved and the action will be reviewed/reversed where possible.'
-          : 'Your appeal was denied after review.',
-      created_at: nowIso(),
-      metadata: {
-        appeal_id: appeal?.id,
-        moderation_action_id: appeal?.moderation_action_id,
-        decision,
-        reviewer_notes: reviewerNotes || null,
+    if (!accessToken) return;
+    await upsertNotification(
+      {
+        recipient_email: to,
+        type: 'moderation_appeal_decision',
+        content:
+          decision === 'approved'
+            ? 'Your appeal was approved and the action will be reviewed/reversed where possible.'
+            : 'Your appeal was denied after review.',
+        created_at: nowIso(),
+        metadata: {
+          appeal_id: appeal?.id,
+          moderation_action_id: appeal?.moderation_action_id,
+          decision,
+          reviewer_notes: reviewerNotes || null,
+        },
       },
-    });
+      { accessToken }
+    );
   } catch {
     // ignore
   }
@@ -197,7 +204,8 @@ async function reverseModerationActionIfPossible({ appeal, moderatorEmail }) {
 
 export default function AdminAppealsPanel({ moderatorEmail }) {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
+  const { user, session } = useAuth();
+  const accessToken = session?.access_token || null;
   const authedEmail = user?.email ? String(user.email) : '';
   const canReview = isStaff(authedEmail);
   const effectiveModeratorEmail = authedEmail || (moderatorEmail ? String(moderatorEmail) : '');
@@ -230,7 +238,7 @@ export default function AdminAppealsPanel({ moderatorEmail }) {
       if (!canReview) throw new Error('Staff access required');
 
       const reviewer = normalizeEmail(effectiveModeratorEmail);
-      if (!reviewer) throw new Error('Admin session missing');
+      if (!reviewer) throw new Error('Your session has expired. Please sign in again.');
 
       const updated = {
         status: decision,
@@ -265,7 +273,7 @@ export default function AdminAppealsPanel({ moderatorEmail }) {
         });
       }
 
-      await notifyAppellant({ appeal, decision, reviewerNotes });
+      await notifyAppellant({ appeal, decision, reviewerNotes, accessToken });
 
       return true;
     },
@@ -276,7 +284,7 @@ export default function AdminAppealsPanel({ moderatorEmail }) {
       queryClient.invalidateQueries({ queryKey: ['adminAppeals'] });
     },
     onError: (e) => {
-      toast.error(String(e?.message || 'Failed to review appeal'));
+      toastFriendlyError(e, 'Failed to review appeal');
     },
   });
 
@@ -317,10 +325,13 @@ export default function AdminAppealsPanel({ moderatorEmail }) {
       {isLoading ? (
         <div className="text-slate-600 font-semibold">Loading appeals…</div>
       ) : isError ? (
-        <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 text-slate-700">
-          <div className="font-black text-slate-900">Could not load appeals</div>
-          <div className="text-sm font-semibold mt-1">{String(error?.message || 'Unknown error')}</div>
-        </div>
+        <ErrorState
+          compact
+          error={error}
+          onRetry={() => refetch()}
+          onReload={() => window.location.reload()}
+          className="border-slate-200"
+        />
       ) : appeals.length === 0 ? (
         <div className="text-slate-600 font-semibold">No appeals in this status.</div>
       ) : (

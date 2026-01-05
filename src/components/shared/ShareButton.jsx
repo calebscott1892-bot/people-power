@@ -4,6 +4,7 @@ import { ExternalLink, Link as LinkIcon, Share2 } from 'lucide-react';
 import { toast } from "sonner";
 import { useAuth } from '@/auth/AuthProvider';
 import { createConversation, sendMessage } from '@/api/messagesClient';
+import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { fetchPublicKey, upsertMyPublicKey } from '@/api/keysClient';
 import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import { logError } from '@/utils/logError';
@@ -160,7 +161,7 @@ export default function ShareButton({ movement, profile, variant = "default", la
       setShowDialog(false);
     } catch (e) {
       logError(e, 'ShareButton share to DM failed', { recipient: handle });
-      toast.error('Failed to share via DM');
+      toast.error(getInteractionErrorMessage(e, 'Failed to share via DM'));
     } finally {
       setSendingDm(false);
     }

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
+import { toastFriendlyError } from '@/utils/toastErrors';
 import { useAuth } from '@/auth/AuthProvider';
 import { createReport } from '@/api/reportsClient';
 import { uploadFile } from '@/api/uploadsClient';
@@ -137,7 +138,8 @@ export default function ReportCenter() {
     try {
       const eligibility = await checkReportingEligibility(reporterEmail);
       if (!eligibility.ok) {
-        toast.error(String(eligibility.reason || 'Cannot submit report right now'));
+          const reason = String(eligibility.reason || '').trim();
+          toastFriendlyError(reason ? new Error(reason) : null, reason || 'Cannot submit report right now');
         setSubmitting(false);
         return;
       }

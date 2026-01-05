@@ -35,7 +35,7 @@ export default function PerformanceReport({ movement }) {
         created_date: movement?.created_date,
         tags: movement?.tags || [],
         metrics: {
-          boosts: movement?.boosts || 0,
+          boosts: movement?.boosts_count ?? movement?.upvotes ?? movement?.boosts ?? 0,
           supporters: movement?.supporters || 0,
           participants: totalParticipants,
           momentum_score: movement?.momentum_score || 0,
