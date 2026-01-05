@@ -286,7 +286,7 @@ export default function MovementCard({ movement }) {
               </div>
             </div>
 
-            <div className="mt-2 h-24 sm:h-28 rounded-xl overflow-hidden border border-slate-200 bg-white relative">
+            <div className="mt-2 h-24 sm:h-28 rounded-xl overflow-hidden border border-slate-200 bg-white relative z-0 isolate">
               <MapContainer
                 center={[coords.lat, coords.lon]}
                 zoom={11}

@@ -442,9 +442,10 @@ export default function Home() {
     }
   }, [movementsPages, backendStatus]);
 
-  // Load from cache if offline or fetch error
+  // Load from cache only when truly offline.
+  // (When degraded or errored, show the error state rather than silently falling back.)
   useEffect(() => {
-    if (backendStatus === 'offline' || backendStatus === 'degraded' || isMovementsError) {
+    if (backendStatus === 'offline') {
       try {
         const cached = getPageCache(movementsCacheKey);
         if (cached && Array.isArray(cached)) {
@@ -453,16 +454,13 @@ export default function Home() {
           return;
         }
       } catch {
-        // Ignore cache read failures; fall back to live data.
+        // Ignore cache read failures.
       }
-
-      setOfflineMovements(null);
-      setShowOfflineLabel(false);
-    } else {
-      setOfflineMovements(null);
-      setShowOfflineLabel(false);
     }
-  }, [backendStatus, isMovementsError]);
+
+    setOfflineMovements(null);
+    setShowOfflineLabel(false);
+  }, [backendStatus]);
 
   const rawMovements = useMemo(() => {
     if (offlineMovements) return offlineMovements;
