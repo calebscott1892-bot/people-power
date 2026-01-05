@@ -25,8 +25,21 @@ const LEVELS = [
 ];
 
 export default function GamificationWidget({ userEmail, compact = false }) {
-  const email = String(userEmail || '').trim().toLowerCase();
+  return <GamificationWidgetInner userEmail={userEmail} compact={compact} />;
 
+}
+
+function GamificationWidgetProd({ compact = false }) {
+  if (compact) return null;
+  return (
+    <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-700 font-semibold">
+      Points and streaks are temporarily disabled while we add server persistence.
+    </div>
+  );
+}
+
+function GamificationWidgetDev({ userEmail, compact = false }) {
+  const email = String(userEmail || '').trim().toLowerCase();
   const { data: stats, isLoading } = useQuery({
     queryKey: ['userChallengeStats', email],
     enabled: !!email,
@@ -226,3 +239,5 @@ export default function GamificationWidget({ userEmail, compact = false }) {
     </div>
   );
 }
+
+const GamificationWidgetInner = import.meta?.env?.DEV ? GamificationWidgetDev : GamificationWidgetProd;

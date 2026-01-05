@@ -53,6 +53,7 @@ export default function Profile() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const navigate = useNavigate();
   const accessToken = session?.access_token || null;
+  const challengesEnabled = !!import.meta?.env?.DEV;
   const profileLoadErrorToastedRef = useRef(false);
 
   useEffect(() => {
@@ -187,7 +188,7 @@ export default function Profile() {
       if (!user?.email) return null;
       return fetchOrCreateUserChallengeStats(user.email);
     },
-    enabled: !!user?.email
+    enabled: challengesEnabled && !!user?.email
   });
 
   const { data: myFollowingUsers = [], isLoading: myFollowingUsersLoading } = useQuery({

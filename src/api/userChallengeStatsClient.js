@@ -1,12 +1,20 @@
 import { entities } from '@/api/appClient';
 import { getAwTimeKey, getAwTimeKeyNDaysAgo } from '@/utils/awTime';
 
+const CHALLENGES_ENABLED = !!import.meta?.env?.DEV;
+
+function assertChallengesEnabled() {
+  if (CHALLENGES_ENABLED) return;
+  throw new Error('Daily Challenges are temporarily disabled while we add server persistence.');
+}
+
 function normalizeEmail(email) {
   const s = String(email || '').trim().toLowerCase();
   return s || null;
 }
 
 export async function fetchOrCreateUserChallengeStats(userEmail) {
+  assertChallengesEnabled();
   const email = normalizeEmail(userEmail);
   if (!email) return null;
 
@@ -26,6 +34,7 @@ export async function fetchOrCreateUserChallengeStats(userEmail) {
 }
 
 export async function unlockExpressionReward(userEmail, reward) {
+  assertChallengesEnabled();
   const email = normalizeEmail(userEmail);
   if (!email) throw new Error('Missing user email');
 
@@ -79,12 +88,14 @@ function getEffectiveCurrentStreak(stats) {
 }
 
 export async function listChallengeCompletions({ userEmail } = {}) {
+  assertChallengesEnabled();
   const email = normalizeEmail(userEmail);
   if (email) return entities.ChallengeCompletion.filter({ user_email: email });
   return entities.ChallengeCompletion.list();
 }
 
 export async function recordChallengeCompletion(userEmail, challenge, completionPayload) {
+  assertChallengesEnabled();
   const email = normalizeEmail(userEmail);
   if (!email) throw new Error('Missing user email');
   if (!challenge?.id) throw new Error('Missing challenge');

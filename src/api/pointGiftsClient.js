@@ -1,12 +1,20 @@
 import { entities } from '@/api/appClient';
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
 
+const POINT_GIFTS_ENABLED = !!import.meta?.env?.DEV;
+
+function assertPointGiftsEnabled() {
+  if (POINT_GIFTS_ENABLED) return;
+  throw new Error('Point gifting is temporarily disabled while we add server persistence.');
+}
+
 function normalizeEmail(email) {
   const s = String(email || '').trim().toLowerCase();
   return s || null;
 }
 
 export async function giftPoints(fromUserEmail, toUserEmail, { amount, message } = {}) {
+  assertPointGiftsEnabled();
   const fromEmail = normalizeEmail(fromUserEmail);
   const toEmail = normalizeEmail(toUserEmail);
   if (!fromEmail || !toEmail) throw new Error('Missing users');

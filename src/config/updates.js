@@ -12,6 +12,7 @@ export const updates = [
       'Movement preview cards now refresh engagement numbers immediately after actions (boosts/comments).',
       'Map previews no longer overlap the bottom navigation.',
       'Polls are temporarily disabled in production while we add server persistence.',
+      'Daily Challenges, points, and expression rewards are temporarily disabled in production while we add server persistence.',
       'Profiles, onboarding/tutorial progress, follows, blocks, and notifications now sync more reliably across devices (server-backed).',
       'In production, reports and platform acknowledgment no longer fall back to local stubs when the backend is unavailable.',
       'Profile banners can be positioned so you control which part of the image is shown.',

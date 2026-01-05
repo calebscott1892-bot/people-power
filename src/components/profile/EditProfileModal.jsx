@@ -692,6 +692,10 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
                 userStats={userStats}
                 onUnlock={async (reward) => {
                   if (!userEmail) throw new Error('Missing user');
+                  if (!import.meta?.env?.DEV) {
+                    toast.message('Expression rewards are temporarily disabled while we add server persistence.');
+                    return;
+                  }
                   await unlockExpressionReward(userEmail, reward);
                   await queryClient.invalidateQueries({ queryKey: ['userChallengeStats'] });
                 }}

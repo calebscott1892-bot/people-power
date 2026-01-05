@@ -57,6 +57,7 @@ export default function UserProfile() {
   const [searchParams] = useSearchParams();
   const { user, session } = useAuth();
   const accessToken = session?.access_token || null;
+  const challengesEnabled = !!import.meta?.env?.DEV;
   const profileEmail = useMemo(() => {
     const fromParam = emailParam ? String(emailParam) : '';
     const fromQuery = searchParams?.get('email') ? String(searchParams.get('email')) : '';
@@ -256,7 +257,7 @@ export default function UserProfile() {
       if (!resolvedProfileEmail) return null;
       return fetchOrCreateUserChallengeStats(resolvedProfileEmail);
     },
-    enabled: !!resolvedProfileEmail
+    enabled: challengesEnabled && !!resolvedProfileEmail
   });
 
   const { data: myStats } = useQuery({
@@ -265,7 +266,7 @@ export default function UserProfile() {
       if (!currentUser?.email) return null;
       return fetchOrCreateUserChallengeStats(currentUser.email);
     },
-    enabled: !!currentUser?.email,
+    enabled: challengesEnabled && !!currentUser?.email,
   });
 
   const toggleFollowMutation = useMutation({
@@ -606,6 +607,10 @@ export default function UserProfile() {
                       onClick={() => {
                         if (!currentUser?.email) {
                           toast.error('Sign in to gift points');
+                          return;
+                        }
+                        if (!challengesEnabled) {
+                          toast.message('Point gifting is temporarily disabled while we add server persistence.');
                           return;
                         }
                         setShowGiftModal(true);
