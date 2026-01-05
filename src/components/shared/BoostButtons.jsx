@@ -112,7 +112,7 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
       });
 
       // Keep list + infinite feeds in sync immediately.
-      queryClient.setQueriesData({ queryKey: ['movements'] }, (old) => {
+      const patchMovementInAnyList = (old) => {
         const patchMovement = (m) => {
           if (!m || typeof m !== 'object') return m;
           const mid = String(m?.id ?? m?._id ?? '').trim();
@@ -137,10 +137,19 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
         // Normal list shape
         if (Array.isArray(old)) return old.map(patchMovement);
         return old;
-      });
+      };
+
+      // Home/feed + other list views.
+      queryClient.setQueriesData({ queryKey: ['movements'] }, patchMovementInAnyList);
+      queryClient.setQueriesData({ queryKey: ['myMovements'] }, patchMovementInAnyList);
+      queryClient.setQueriesData({ queryKey: ['followedMovements'] }, patchMovementInAnyList);
+      queryClient.setQueriesData({ queryKey: ['searchMovements'] }, patchMovementInAnyList);
 
       // Refetch as a safety net (also covers other screens).
       queryClient.invalidateQueries({ queryKey: ['movements'] });
+      queryClient.invalidateQueries({ queryKey: ['myMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['followedMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['searchMovements'] });
       queryClient.invalidateQueries({ queryKey: ['movement', id] });
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Could not boost right now')),

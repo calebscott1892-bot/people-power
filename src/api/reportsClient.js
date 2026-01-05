@@ -68,6 +68,10 @@ function looksLikeNetworkError(err) {
   );
 }
 
+function allowDevFallback() {
+  return !!import.meta?.env?.DEV;
+}
+
 async function createLocalReport(payload, options) {
   const reporterEmail = normalizeEmail(options?.reporterEmail);
   const reportedContentType = payload?.reported_content_type ? String(payload.reported_content_type) : null;
@@ -160,7 +164,8 @@ export async function createReport(payload, options) {
     return body;
   } catch (e) {
     if (!looksLikeNetworkError(e)) throw e;
-    return createLocalReport(payload, options);
+    if (allowDevFallback()) return createLocalReport(payload, options);
+    throw e;
   }
 }
 
@@ -195,6 +200,7 @@ export async function fetchReports(params, options) {
     return Array.isArray(body) ? body : body?.reports || [];
   } catch (e) {
     if (!looksLikeNetworkError(e)) throw e;
+    if (!allowDevFallback()) throw e;
     const where = status ? { status } : null;
     const local = status ? await entities.Report.filter(where) : await entities.Report.list();
     return Array.isArray(local) ? local : [];
@@ -233,6 +239,7 @@ export async function updateReport(id, payload, options) {
     return body;
   } catch (e) {
     if (!looksLikeNetworkError(e)) throw e;
+    if (!allowDevFallback()) throw e;
     const patch = { ...(payload ?? {}), updated_at: nowIso() };
     return entities.Report.update(reportId, patch);
   }

@@ -7,7 +7,16 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from "sonner";
 import { entities } from "@/api/appClient";
 
-export default function PollManager({ movementId, currentUser, canCreatePolls }) {
+function PollManagerProd() {
+  return (
+    <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50 text-sm text-slate-700 font-semibold">
+      Polls are temporarily disabled while we add server persistence.
+    </div>
+  );
+}
+
+function PollManagerDev({ movementId, currentUser, canCreatePolls }) {
+
   const [showForm, setShowForm] = useState(false);
   const [question, setQuestion] = useState('');
   const [options, setOptions] = useState(['', '']);
@@ -161,6 +170,10 @@ export default function PollManager({ movementId, currentUser, canCreatePolls })
     </div>
   );
 }
+
+const PollManager = import.meta?.env?.DEV ? PollManagerDev : PollManagerProd;
+
+export default PollManager;
 
 function PollCard({ poll, onVote, currentUser }) {
   const votes = poll.votes || {};

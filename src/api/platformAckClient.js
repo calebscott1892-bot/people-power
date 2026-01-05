@@ -31,6 +31,10 @@ function looksLikeNetworkError(err) {
   );
 }
 
+function allowDevFallback() {
+  return !!import.meta?.env?.DEV;
+}
+
 async function fetchLocalAck(userEmail) {
   const email = normalizeEmail(userEmail);
   if (!email) return { accepted: false };
@@ -64,8 +68,11 @@ export async function fetchMyPlatformAcknowledgment(options) {
   const userEmail = options?.userEmail ? String(options.userEmail) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/platform-acknowledgment/me`;
 
-  // If we have no token, fall back to local storage.
-  if (!accessToken) return fetchLocalAck(userEmail);
+  // If we have no token, never persist anything locally in production.
+  if (!accessToken) {
+    if (allowDevFallback()) return fetchLocalAck(userEmail);
+    throw new Error('Authentication required');
+  }
 
   try {
     const res = await fetch(url, {
@@ -87,7 +94,8 @@ export async function fetchMyPlatformAcknowledgment(options) {
     return body ?? { accepted: false };
   } catch (e) {
     if (!looksLikeNetworkError(e)) throw e;
-    return fetchLocalAck(userEmail);
+    if (allowDevFallback()) return fetchLocalAck(userEmail);
+    throw e;
   }
 }
 
@@ -96,8 +104,11 @@ export async function acceptPlatformAcknowledgment(options) {
   const userEmail = options?.userEmail ? String(options.userEmail) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/platform-acknowledgment/me`;
 
-  // If we have no token, fall back to local storage.
-  if (!accessToken) return acceptLocalAck(userEmail);
+  // If we have no token, never persist anything locally in production.
+  if (!accessToken) {
+    if (allowDevFallback()) return acceptLocalAck(userEmail);
+    throw new Error('Authentication required');
+  }
 
   try {
     const res = await fetch(url, {
@@ -122,6 +133,7 @@ export async function acceptPlatformAcknowledgment(options) {
     return body ?? { ok: true };
   } catch (e) {
     if (!looksLikeNetworkError(e)) throw e;
-    return acceptLocalAck(userEmail);
+    if (allowDevFallback()) return acceptLocalAck(userEmail);
+    throw e;
   }
 }

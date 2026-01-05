@@ -223,6 +223,43 @@ export default function CommentSection({ movementId, movement, canModerate = fal
         const prev = typeof old === 'number' ? old : null;
         return prev == null ? old : prev + 1;
       });
+
+      const bumpCommentsCountOnMovement = (m) => {
+        if (!m || typeof m !== 'object') return m;
+        const mid = String(m?.id ?? m?._id ?? '').trim();
+        if (!mid || mid !== safeMovementId) return m;
+        const prevCount =
+          typeof m.comments_count === 'number'
+            ? m.comments_count
+            : (typeof m.comment_count === 'number' ? m.comment_count : null);
+        if (prevCount == null) return m;
+        const nextCount = prevCount + 1;
+        return {
+          ...m,
+          comments_count: nextCount,
+          comment_count: nextCount,
+        };
+      };
+
+      // Detail view object
+      queryClient.setQueryData(['movement', safeMovementId], bumpCommentsCountOnMovement);
+
+      // Lists across the app (feed, profile, followed, search)
+      const bumpInAnyList = (old) => {
+        if (old && typeof old === 'object' && Array.isArray(old.pages)) {
+          return {
+            ...old,
+            pages: old.pages.map((page) => (Array.isArray(page) ? page.map(bumpCommentsCountOnMovement) : page)),
+          };
+        }
+        if (Array.isArray(old)) return old.map(bumpCommentsCountOnMovement);
+        return old;
+      };
+      queryClient.setQueriesData({ queryKey: ['movements'] }, bumpInAnyList);
+      queryClient.setQueriesData({ queryKey: ['myMovements'] }, bumpInAnyList);
+      queryClient.setQueriesData({ queryKey: ['followedMovements'] }, bumpInAnyList);
+      queryClient.setQueriesData({ queryKey: ['searchMovements'] }, bumpInAnyList);
+
       toast.success('Comment posted');
 
       // Best-effort public activity notification.

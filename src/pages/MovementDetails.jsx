@@ -605,9 +605,10 @@ export default function MovementDetails() {
     },
   });
 
-  // Load from cache if offline or fetch error
+  // Load from cache only when truly offline.
+  // (When degraded or errored, show the error state rather than silently falling back.)
   useEffect(() => {
-    if ((backendStatus === 'offline' || backendStatus === 'degraded' || isMovementError) && movementCacheKey) {
+    if (backendStatus === 'offline' && movementCacheKey) {
       try {
         const cached = getPageCache(movementCacheKey);
         if (cached) {
@@ -616,16 +617,13 @@ export default function MovementDetails() {
           return;
         }
       } catch {
-        // Ignore cache read failures; fall back to live data.
+        // Ignore cache read failures.
       }
-
-      setOfflineMovement(null);
-      setShowOfflineLabel(false);
-    } else {
-      setOfflineMovement(null);
-      setShowOfflineLabel(false);
     }
-  }, [backendStatus, isMovementError, movementCacheKey]);
+
+    setOfflineMovement(null);
+    setShowOfflineLabel(false);
+  }, [backendStatus, movementCacheKey]);
 
   // Prefer last-known-good data when offline.
   const movement = offlineMovement || movementData;
