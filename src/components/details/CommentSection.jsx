@@ -259,6 +259,17 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       queryClient.setQueriesData({ queryKey: ['myMovements'] }, bumpInAnyList);
       queryClient.setQueriesData({ queryKey: ['followedMovements'] }, bumpInAnyList);
       queryClient.setQueriesData({ queryKey: ['searchMovements'] }, bumpInAnyList);
+      queryClient.setQueriesData({ queryKey: ['userMovements'] }, bumpInAnyList);
+      queryClient.setQueriesData({ queryKey: ['participatedMovements'] }, bumpInAnyList);
+
+      // Safety net refetch for list previews.
+      queryClient.invalidateQueries({ queryKey: ['movements'] });
+      queryClient.invalidateQueries({ queryKey: ['myMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['followedMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['searchMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['userMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['participatedMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['movement', safeMovementId] });
 
       toast.success('Comment posted');
 

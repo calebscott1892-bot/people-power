@@ -144,12 +144,16 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
       queryClient.setQueriesData({ queryKey: ['myMovements'] }, patchMovementInAnyList);
       queryClient.setQueriesData({ queryKey: ['followedMovements'] }, patchMovementInAnyList);
       queryClient.setQueriesData({ queryKey: ['searchMovements'] }, patchMovementInAnyList);
+      queryClient.setQueriesData({ queryKey: ['userMovements'] }, patchMovementInAnyList);
+      queryClient.setQueriesData({ queryKey: ['participatedMovements'] }, patchMovementInAnyList);
 
       // Refetch as a safety net (also covers other screens).
       queryClient.invalidateQueries({ queryKey: ['movements'] });
       queryClient.invalidateQueries({ queryKey: ['myMovements'] });
       queryClient.invalidateQueries({ queryKey: ['followedMovements'] });
       queryClient.invalidateQueries({ queryKey: ['searchMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['userMovements'] });
+      queryClient.invalidateQueries({ queryKey: ['participatedMovements'] });
       queryClient.invalidateQueries({ queryKey: ['movement', id] });
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Could not boost right now')),
