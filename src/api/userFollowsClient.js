@@ -38,6 +38,7 @@ export async function fetchUserFollow(targetEmail, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/follow`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -64,6 +65,7 @@ export async function setUserFollow(targetEmail, following, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/follow`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -89,6 +91,7 @@ export async function fetchUserFollowingUsers(targetEmail, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/following-users`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -120,6 +123,7 @@ export async function fetchUserFollowers(targetEmail, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/followers`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -148,6 +152,7 @@ export async function fetchMyFollowingUsers(options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/following-users`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -169,6 +174,7 @@ export async function fetchMyFollowers(options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/followers`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,

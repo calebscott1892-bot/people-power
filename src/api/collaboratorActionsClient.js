@@ -26,6 +26,7 @@ export async function fetchCollaboratorActions(movementId, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/collaborator-actions`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,

@@ -34,6 +34,7 @@ function joinUrl(base, path) {
 async function httpJson(baseUrl, path, init) {
 	const res = await fetch(joinUrl(baseUrl, path), {
 		...init,
+		cache: 'no-store',
 		headers: {
 			'content-type': 'application/json',
 			...(init?.headers || {}),

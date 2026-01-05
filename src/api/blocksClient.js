@@ -28,6 +28,7 @@ export async function fetchMyBlocks(options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/blocks`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...authHeaders(accessToken),
@@ -52,6 +53,7 @@ export async function blockUser(blockedEmail, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/me/blocks`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -77,6 +79,7 @@ export async function unblockUser(blockedEmail, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/me/blocks/${encodeURIComponent(email)}`;
   const res = await fetch(url, {
     method: 'DELETE',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...authHeaders(accessToken),

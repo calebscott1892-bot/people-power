@@ -19,6 +19,7 @@ export async function searchMovements({ q, city, country, limit = 20, offset = 0
   url.searchParams.set('offset', String(offset));
 
   const res = await fetch(url.toString(), {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${String(accessToken)}` } : {}),
@@ -42,6 +43,7 @@ export async function searchUsers({ q, limit = 20, offset = 0, accessToken } = {
   url.searchParams.set('offset', String(offset));
 
   const res = await fetch(url.toString(), {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${token}`,

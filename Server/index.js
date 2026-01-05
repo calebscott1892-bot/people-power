@@ -239,6 +239,15 @@ function initRealtimeServer() {
         if (!messageId) return;
         try {
           if (!hasDatabaseUrl) {
+            if (isProd) {
+              fastify.log.error({ path: '/ws' }, '[storage] FATAL: ws message delivered memory fallback blocked in production');
+              try {
+                ws.close();
+              } catch {
+                // ignore
+              }
+              return;
+            }
             const updated = memoryMarkMessageDelivered(messageId, byEmail);
             if (!updated?.conversation_id) return;
             const convo = getMemoryConversationById(updated.conversation_id);
@@ -301,6 +310,15 @@ function initRealtimeServer() {
 
         try {
           if (!hasDatabaseUrl) {
+            if (isProd) {
+              fastify.log.error({ path: '/ws' }, '[storage] FATAL: ws conversation read memory fallback blocked in production');
+              try {
+                ws.close();
+              } catch {
+                // ignore
+              }
+              return;
+            }
             const convo = getMemoryConversationById(conversationId);
             if (!convo) return;
             const participants = Array.isArray(convo?.participant_emails)
@@ -485,7 +503,10 @@ fastify.get('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }
 
 // Fetch all feature flags (public, for frontend)
 fastify.get('/feature-flags', async (_request, reply) => {
-  if (!hasDatabaseUrl) return reply.send({ flags: [] });
+  if (!hasDatabaseUrl) {
+    if (isProd) return reply.code(503).send({ error: 'Database unavailable' });
+    return reply.send({ flags: [] });
+  }
   await ensureFeatureFlagsTable();
   const res = await pool.query('SELECT * FROM feature_flags');
   return reply.send({ flags: res.rows });
@@ -580,7 +601,10 @@ fastify.delete('/admin/challenges/:id', { config: { rateLimit: RATE_LIMITS.admin
 
 // Public challenges feed (non-admin)
 fastify.get('/challenges', async (_request, reply) => {
-  if (!hasDatabaseUrl) return reply.send({ challenges: [] });
+  if (!hasDatabaseUrl) {
+    if (isProd) return reply.code(503).send({ error: 'Database unavailable' });
+    return reply.send({ challenges: [] });
+  }
   await ensureChallengesTable();
   const today = nowIso().slice(0, 10);
   const res = await pool.query(
@@ -1140,10 +1164,40 @@ function serializeErrorForLog(err, { includeStack } = {}) {
   return { name, message, stack };
 }
 
+function appendVary(existing, token) {
+  const t = String(token || '').trim();
+  if (!t) return existing;
+  const raw = existing != null ? String(existing) : '';
+  if (!raw) return t;
+  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  const has = parts.some((p) => p.toLowerCase() === t.toLowerCase());
+  return has ? raw : `${raw}, ${t}`;
+}
+
+function setNoStoreHeaders(reply) {
+  reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
+  reply.header('Pragma', 'no-cache');
+  reply.header('Expires', '0');
+
+  // Avoid cross-user caching when Authorization differs.
+  const varyExisting = reply.getHeader ? reply.getHeader('Vary') : undefined;
+  reply.header('Vary', appendVary(varyExisting, 'Authorization'));
+}
+
 // Minimal observability: log method/path/status and include stack for 5xx.
 fastify.addHook('onRequest', (request, _reply, done) => {
   request[REQUEST_START] = process.hrtime.bigint();
   done();
+});
+
+// Default to "no-store" to prevent browser/CDN caching of dynamic responses.
+// Skip static uploads, which can be safely cached and are served by @fastify/static.
+fastify.addHook('onSend', (request, reply, payload, done) => {
+  const path = safePathFromRequest(request);
+  if (!String(path || '').startsWith('/uploads/')) {
+    setNoStoreHeaders(reply);
+  }
+  done(null, payload);
 });
 
 fastify.addHook('onResponse', (request, reply, done) => {
@@ -1563,6 +1617,7 @@ const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production'
 const parsedDbUrl = safeParseDatabaseUrl(DATABASE_URL);
 const sslMode = parsedDbUrl?.sslmode ? String(parsedDbUrl.sslmode).toLowerCase() : '';
 const dbHost = parsedDbUrl?.host ? String(parsedDbUrl.host).toLowerCase() : '';
+const databaseUrlHostForLog = parsedDbUrl?.host ? String(parsedDbUrl.host) : 'none';
 const hostLooksRemote = !!dbHost && dbHost !== 'localhost' && dbHost !== '127.0.0.1';
 const shouldUseSsl =
   isProd ||
@@ -1571,6 +1626,12 @@ const shouldUseSsl =
   sslMode === 'verify-ca' ||
   sslMode === 'verify-full' ||
   hostLooksRemote;
+
+function storageStartupLine({ mode, databaseHost }) {
+  const m = String(mode || 'unknown');
+  const host = databaseHost != null ? String(databaseHost) : 'none';
+  return `[storage] mode=${m} database_host=${host}`;
+}
 
 function createPgPool({ useSsl }) {
   return new Pool({
@@ -1588,7 +1649,7 @@ async function poolQueryOnce(config) {
 async function poolQueryWithRetry(config) {
   try {
     return await poolQueryOnce(config);
-  } catch (e) {
+  } catch {
     // Connection pools can become stale (deploys, idle timeouts). Recreate and retry once.
     try {
       pool = createPgPool({ useSsl: shouldUseSsl });
@@ -1607,7 +1668,7 @@ async function checkDatabaseConnection() {
     }
     storageMode = 'memory';
     console.warn('[storage] DEV: DATABASE_URL missing; using memory storage fallback.');
-    console.info('[storage] mode=memory');
+    console.info(storageStartupLine({ mode: storageMode, databaseHost: databaseUrlHostForLog }));
     return;
   }
   try {
@@ -1616,10 +1677,7 @@ async function checkDatabaseConnection() {
     hasDatabaseUrl = true;
     const parsed = safeParseDatabaseUrl(DATABASE_URL);
     const host = parsed?.host ? String(parsed.host) : 'unknown';
-    const dbName = parsed?.dbName ? String(parsed.dbName) : 'unknown';
-    console.info('[storage] Postgres connection ok');
-    console.info(`[storage] mode=postgres host=${host} db=${dbName}`);
-    console.info('[storage] mode=postgres');
+    console.info(storageStartupLine({ mode: storageMode, databaseHost: host }));
   } catch (err) {
     const message = err?.message ? String(err.message) : 'unknown error';
     const code = err?.code ? String(err.code) : 'unknown';
@@ -1636,10 +1694,7 @@ async function checkDatabaseConnection() {
         hasDatabaseUrl = true;
         const parsed = safeParseDatabaseUrl(DATABASE_URL);
         const host = parsed?.host ? String(parsed.host) : 'unknown';
-        const dbName = parsed?.dbName ? String(parsed.dbName) : 'unknown';
-        console.info('[storage] Postgres connection ok (SSL retry)');
-        console.info(`[storage] mode=postgres host=${host} db=${dbName}`);
-        console.info('[storage] mode=postgres');
+        console.info(storageStartupLine({ mode: storageMode, databaseHost: host }));
         return;
       } catch (retryErr) {
         const retryMessage = retryErr?.message ? String(retryErr.message) : 'unknown error';
@@ -1656,8 +1711,16 @@ async function checkDatabaseConnection() {
     console.error(`[storage] DEV: Postgres connection failed, falling back to memory: ${code} ${message}`);
     storageMode = 'memory';
     hasDatabaseUrl = false;
-    console.info('[storage] mode=memory');
+    console.info(storageStartupLine({ mode: storageMode, databaseHost: databaseUrlHostForLog }));
   }
+}
+
+function blockMemoryFallbackInProd(request, reply, label) {
+  if (!isProd) return false;
+  if (hasDatabaseUrl) return false;
+  fastify.log.error({ path: request?.routerPath || request?.url }, `[storage] FATAL: ${label} memory fallback blocked in production`);
+  reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+  return true;
 }
 
 // Production safety net: never serve from memory when DB is unavailable.
@@ -1669,7 +1732,7 @@ fastify.addHook('onRequest', async (request, reply) => {
   const url = String(request?.url || '');
   if (url.startsWith('/health')) return;
   fastify.log.error({ url }, '[storage] FATAL: memory fallback blocked in production');
-  reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+  return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
 });
 
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -1689,6 +1752,9 @@ const memoryMovements = [
     momentum_score: 0,
   },
 ];
+
+const allowDevMemoryMovementMerge =
+  !isProd && String(process.env.DEV_ALLOW_MEMORY_MOVEMENT_MERGE || '').trim().toLowerCase() === 'true';
 
 // Votes for memory-backed movements (and for when DB is unavailable).
 // Map<movementId, Map<userEmail, -1|1>>
@@ -1883,6 +1949,54 @@ async function ensureVotesTable() {
       PRIMARY KEY (movement_id, voter_email)
     );
   `);
+}
+
+// Dev schema bootstrap:
+// Some environments start with an empty database (no migrations applied).
+// We auto-create the minimal `movements` table in dev so core feeds work and
+// don't silently fall back due to missing relations (42P01).
+// Production should still fail loudly on schema issues.
+async function ensureMovementsTable() {
+  if (!hasDatabaseUrl) return;
+  if (isProd) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS movements (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NULL,
+      summary TEXT NULL,
+      tags TEXT[] NULL,
+      category TEXT NULL,
+      visibility TEXT NOT NULL DEFAULT 'public',
+      author_email TEXT NULL,
+      creator_email TEXT NULL,
+      created_by_email TEXT NULL,
+      description_html TEXT NULL,
+      location_city TEXT NULL,
+      location_country TEXT NULL,
+      location_lat DOUBLE PRECISION NULL,
+      location_lon DOUBLE PRECISION NULL,
+      media_urls JSONB NULL,
+      claims JSONB NULL,
+      momentum_score INT NOT NULL DEFAULT 0,
+      verified_participants INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_created_at ON movements (created_at DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_visibility ON movements (visibility)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_author_email ON movements (LOWER(author_email))');
+
+  try {
+    await ensureMovementExtrasColumns();
+  } catch {
+    // best-effort
+  }
+
+  movementsColumnsCache = null;
 }
 
 async function ensureReportsTable() {
@@ -3222,6 +3336,10 @@ async function getPublicProfilesByEmail(emails) {
       });
     }
   } catch (e) {
+    if (isProd) {
+      fastify.log.error({ err: e }, 'Failed to load public profiles');
+      throw e;
+    }
     fastify.log.warn({ err: e }, 'Failed to load public profiles for movement authors');
   }
 
@@ -3941,7 +4059,11 @@ async function getViewerFollowedMovementIds(viewerEmail) {
       if (r?.movement_id) ids.add(String(r.movement_id));
     }
     return ids;
-  } catch {
+  } catch (e) {
+    if (isProd) {
+      fastify.log.error({ err: e }, 'Failed to load viewer followed movement ids');
+      throw e;
+    }
     return new Set();
   }
 }
@@ -4230,6 +4352,7 @@ fastify.get('/movements', async (request, reply) => {
     }
 
     if (!hasDatabaseUrl) {
+      if (blockMemoryFallbackInProd(request, reply, 'movements list')) return;
       const merged = memoryMovements
         .map((m) => {
           const summary = getMemoryVoteSummary(m?.id, null);
@@ -4256,6 +4379,7 @@ fastify.get('/movements', async (request, reply) => {
     }
 
     try {
+      await ensureMovementsTable();
       await ensureVotesTable();
       const values = [];
       let whereClause = '';
@@ -4287,22 +4411,30 @@ fastify.get('/movements', async (request, reply) => {
       });
 
       const rows = Array.isArray(result.rows) ? result.rows : [];
-      const seen = new Set(rows.map((r) => String(r?.id)));
-      const mergedMemory = memoryMovements
-        .filter((m) => !seen.has(String(m?.id)))
-        .map((m) => {
-          const summary = getMemoryVoteSummary(m?.id, null);
-          return {
-            ...m,
-            upvotes: summary.upvotes,
-            boosts_count: summary.upvotes,
-            downvotes: summary.downvotes,
-            score: summary.score,
-            verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
-          };
-        });
+      let merged = rows;
 
-      const merged = [...rows, ...mergedMemory].filter(canViewMovement).sort(sortByCreatedDesc);
+      // Postgres is authoritative when available.
+      // Dev-only: allow merging memory/demo movements only when explicitly enabled.
+      if (allowDevMemoryMovementMerge) {
+        const seen = new Set(rows.map((r) => String(r?.id)));
+        const mergedMemory = memoryMovements
+          .filter((m) => !seen.has(String(m?.id)))
+          .map((m) => {
+            const summary = getMemoryVoteSummary(m?.id, null);
+            return {
+              ...m,
+              upvotes: summary.upvotes,
+              boosts_count: summary.upvotes,
+              downvotes: summary.downvotes,
+              score: summary.score,
+              verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
+            };
+          });
+
+        merged = [...rows, ...mergedMemory];
+      }
+
+      merged = merged.filter(canViewMovement).sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
       return reply.send(enriched.map((m) => projectRecord(m, fields)));
@@ -4378,6 +4510,7 @@ fastify.get('/movements/:id', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement detail')) return;
     const found = memoryMovements.find((m) => String(m.id) === id) || null;
     if (!found) return reply.code(404).send({ error: 'Movement not found' });
     if (isNotVisibleForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
@@ -4395,6 +4528,7 @@ fastify.get('/movements/:id', async (request, reply) => {
   }
 
   try {
+    await ensureMovementsTable();
     await ensureVotesTable();
     const result = await pool.query(
       {
@@ -4422,20 +4556,22 @@ fastify.get('/movements/:id', async (request, reply) => {
     if (!row) {
       // DB is reachable but the movement might have been created via the
       // in-memory fallback path.
-      const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
-      if (fromMemory) {
-        if (isNotVisibleForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
-        if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
-        const summary = getMemoryVoteSummary(fromMemory?.id, null);
-        const enriched = (await attachCreatorProfilesToMovements([{
-          ...fromMemory,
-          upvotes: summary.upvotes,
-          boosts_count: summary.upvotes,
-          downvotes: summary.downvotes,
-          score: summary.score,
-          verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
-        }]))[0];
-        return enriched;
+      if (allowDevMemoryMovementMerge) {
+        const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
+        if (fromMemory) {
+          if (isNotVisibleForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+          if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+          const summary = getMemoryVoteSummary(fromMemory?.id, null);
+          const enriched = (await attachCreatorProfilesToMovements([{
+            ...fromMemory,
+            upvotes: summary.upvotes,
+            boosts_count: summary.upvotes,
+            downvotes: summary.downvotes,
+            score: summary.score,
+            verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
+          }]))[0];
+          return enriched;
+        }
       }
       return reply.code(404).send({ error: 'Movement not found' });
     }
@@ -4444,6 +4580,11 @@ fastify.get('/movements/:id', async (request, reply) => {
     const enriched = (await attachCreatorProfilesToMovements([row]))[0];
     return enriched;
   } catch (e) {
+    if (isProd) {
+      fastify.log.error({ err: e }, 'DB query failed for GET /movements/:id');
+      return reply.code(500).send({ error: 'Failed to load movement' });
+    }
+
     fastify.log.warn({ err: e }, 'DB query failed for GET /movements/:id; using list fallback');
     try {
       await ensureVotesTable();
@@ -4468,20 +4609,22 @@ fastify.get('/movements/:id', async (request, reply) => {
       );
       const found = all.rows.find((m) => String(m.id) === id) || null;
       if (!found) {
-        const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
-        if (fromMemory) {
-        if (isNotVisibleForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
-        if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
-        const summary = getMemoryVoteSummary(fromMemory?.id, null);
-        const enriched = (await attachCreatorProfilesToMovements([{
-          ...fromMemory,
-          upvotes: summary.upvotes,
-          boosts_count: summary.upvotes,
-          downvotes: summary.downvotes,
-          score: summary.score,
-          verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
-        }]))[0];
-        return enriched;
+        if (allowDevMemoryMovementMerge) {
+          const fromMemory = memoryMovements.find((m) => String(m.id) === id) || null;
+          if (fromMemory) {
+            if (isNotVisibleForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+            if (isHiddenForViewer(fromMemory)) return reply.code(404).send({ error: 'Movement not found' });
+            const summary = getMemoryVoteSummary(fromMemory?.id, null);
+            const enriched = (await attachCreatorProfilesToMovements([{
+              ...fromMemory,
+              upvotes: summary.upvotes,
+              boosts_count: summary.upvotes,
+              downvotes: summary.downvotes,
+              score: summary.score,
+              verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
+            }]))[0];
+            return enriched;
+          }
         }
         return reply.code(404).send({ error: 'Movement not found' });
       }
@@ -4504,6 +4647,7 @@ fastify.get('/movements/:id/votes', async (request, reply) => {
   if (!id) return reply.code(400).send({ error: 'Movement id is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement votes summary')) return;
     return reply.send(getMemoryVoteSummary(id, authedUser.email));
   }
 
@@ -4528,6 +4672,7 @@ fastify.get('/movements/:id/follow', async (request, reply) => {
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement follow state')) return;
     const set = memoryMovementFollows.get(String(id)) || new Set();
     const following = set.has(email);
     return reply.send({ following, followers_count: set.size });
@@ -4556,6 +4701,7 @@ fastify.get('/movements/:id/follow/count', async (request, reply) => {
   if (!id) return reply.code(400).send({ error: 'Movement id is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement follow count')) return;
     const set = memoryMovementFollows.get(String(id)) || new Set();
     return reply.send({ count: set.size });
   }
@@ -4597,6 +4743,7 @@ fastify.post('/movements/:id/follow', async (request, reply) => {
   const following = !!parsed.data.following;
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement follow update')) return;
     const key = String(id);
     const set = memoryMovementFollows.get(key) || new Set();
     if (following) set.add(email);
@@ -4855,6 +5002,7 @@ fastify.get('/movements/:id/comments', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement comments list')) return;
     const list = memoryCommentsByMovement.get(String(id)) || [];
     const sorted = [...list].sort(sortByCreatedDesc);
     const page = sorted.filter(isVisibleComment).slice(offset, offset + limit);
@@ -4895,6 +5043,7 @@ fastify.get('/movements/:id/comments/count', async (request, reply) => {
   if (!id) return reply.code(400).send({ error: 'Movement id is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement comments count')) return;
     const list = memoryCommentsByMovement.get(String(id)) || [];
     return reply.send({ count: Array.isArray(list) ? list.length : 0 });
   }
@@ -4935,6 +5084,7 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
   const authorUserId = authedUser?.id ? String(authedUser.id) : null;
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement comment create')) return;
     const settings = getMemoryCommentSettings(id);
     if (settings.locked) {
       await logIncident({
@@ -4985,6 +5135,18 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
     };
     list.unshift(comment);
     memoryCommentsByMovement.set(String(id), list);
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'comment_create',
+        actor_id: authorUserId ? String(authorUserId) : null,
+        movement_id: String(id),
+        comment_id: String(comment.id),
+        storage: 'memory',
+      },
+      '[audit] comment_create'
+    );
     return reply.code(201).send({ comment });
   }
 
@@ -5051,6 +5213,18 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
       [comment.id, comment.movement_id, comment.author_email, comment.content]
     );
     const created = insertRes.rows?.[0] || comment;
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'comment_create',
+        actor_id: authorUserId ? String(authorUserId) : null,
+        movement_id: String(id),
+        comment_id: String(created?.id || comment.id),
+        storage: 'db',
+      },
+      '[audit] comment_create'
+    );
     return reply.code(201).send({ comment: { ...created, author_user_id: authorUserId } });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to post comment');
@@ -5104,6 +5278,7 @@ fastify.get('/movements/:id/resources', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement resources list')) return;
     const list = memoryListExtras(memoryMovementResourcesByMovement, id).sort(sortByCreatedDesc);
     const page = list.slice(offset, offset + limit);
     return reply.send({ resources: page.map((r) => projectRecord(r, fields)) });
@@ -5178,6 +5353,7 @@ fastify.post('/movements/:id/resources', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement resources create')) return;
     return reply.code(201).send({ resource: memoryAppendExtra(memoryMovementResourcesByMovement, id, row) });
   }
 
@@ -5217,6 +5393,7 @@ fastify.post('/resources/:id/download', async (request, reply) => {
   if (!resourceId) return reply.code(400).send({ error: 'Resource id is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'resource download count')) return;
     const existing = findMemoryResourceById(resourceId);
     if (!existing) return reply.code(404).send({ error: 'Resource not found' });
     const nextCount = Math.max(0, Number(existing.download_count || 0)) + 1;
@@ -5255,6 +5432,7 @@ fastify.delete('/resources/:id', async (request, reply) => {
   const isAdmin = ADMIN_EMAILS.has(String(email).toLowerCase());
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'resource delete')) return;
     const existing = findMemoryResourceById(resourceId);
     if (!existing) return reply.code(404).send({ error: 'Resource not found' });
     const owner = normalizeEmail(existing.created_by_email);
@@ -5394,6 +5572,7 @@ fastify.get('/movements/:id/evidence', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement evidence list')) return;
     const list = memoryListExtras(memoryMovementEvidenceByMovement, id).sort(sortByCreatedDesc);
     const filtered = status === 'all' ? list : list.filter((e) => String(e?.status || 'pending') === status);
     const page = filtered.slice(offset, offset + limit).map((e) => projectRecord(e, fields));
@@ -5496,6 +5675,10 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
   }
   if (mediaType === 'text' && !rawText) {
     return reply.code(400).send({ error: 'Evidence text is required' });
+  }
+
+  if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement evidence submit')) return;
   }
 
   const mime = parsed.data.mime_type ? String(parsed.data.mime_type).trim().toLowerCase() : null;
@@ -5607,6 +5790,7 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
   const now = nowIso();
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement evidence verify')) return;
     const existing = findMemoryEvidenceById(evidenceId);
     if (!existing) return reply.code(404).send({ error: 'Evidence not found' });
     if (String(existing.movement_id) !== String(movementId)) {
@@ -5834,6 +6018,7 @@ fastify.get('/movements/:id/events', async (request, reply) => {
   const fields = normalizeFields(request.query?.fields);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement events list')) return;
     const all = memoryListExtras(memoryMovementEventsByMovement, id).slice(0, 10000);
     const page = all.slice(offset, offset + limit);
     return reply.send({ events: page.map((e) => projectRecord(e, fields)) });
@@ -5890,6 +6075,7 @@ fastify.post('/movements/:id/events', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement events create')) return;
     return reply.code(201).send({ event: memoryAppendExtra(memoryMovementEventsByMovement, id, row) });
   }
 
@@ -5926,6 +6112,7 @@ fastify.get('/events/:id/rsvps', async (request, reply) => {
   const myEmail = await tryGetUserEmailFromRequest(request);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'event rsvps summary')) return;
     const summary = memoryGetEventRsvpSummary(eventId);
     const my_rsvp = myEmail ? memoryGetEventRsvp(eventId, myEmail) : null;
     return reply.send({ summary, my_rsvp });
@@ -5977,6 +6164,7 @@ fastify.post('/events/:id/rsvp', async (request, reply) => {
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'event rsvp set')) return;
     const ev = findMemoryEventById(eventId);
     if (!ev) return reply.code(404).send({ error: 'Event not found' });
 
@@ -6037,6 +6225,7 @@ fastify.post('/events/:id/attendance', async (request, reply) => {
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'event attendance set')) return;
     const existing = memoryGetEventRsvp(eventId, email);
     if (!existing) return reply.code(400).send({ error: 'RSVP required to mark attendance' });
     const rsvp = memoryUpsertEventRsvp(eventId, email, { attended: parsed.data.attended });
@@ -6099,6 +6288,7 @@ fastify.get('/movements/:id/petitions', async (request, reply) => {
   const fields = normalizeFields(request.query?.fields);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement petitions list')) return;
     const all = memoryListExtras(memoryMovementPetitionsByMovement, id).slice(0, 10000);
     const page = all.slice(offset, offset + limit);
     return reply.send({ petitions: page.map((p) => projectRecord(p, fields)) });
@@ -6147,6 +6337,7 @@ fastify.post('/movements/:id/petitions', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement petitions create')) return;
     const created = memoryAppendExtra(memoryMovementPetitionsByMovement, id, row);
     fastify.log.info(
       {
@@ -6194,6 +6385,7 @@ fastify.get('/petitions/:id/signatures', async (request, reply) => {
   const myEmail = await tryGetUserEmailFromRequest(request);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'petition signatures summary')) return;
     const summary = memoryGetPetitionSignatureSummary(petitionId);
     const my_signature = myEmail ? memoryGetPetitionSignature(petitionId, myEmail) : null;
     return reply.send({ summary, my_signature });
@@ -6251,6 +6443,7 @@ fastify.post('/petitions/:id/sign', { config: { rateLimit: RATE_LIMITS.petitionS
   const isPublic = typeof parsed.data.is_public === 'boolean' ? parsed.data.is_public : true;
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'petition sign')) return;
     const petition = findMemoryPetitionById(petitionId);
     if (!petition) return reply.code(404).send({ error: 'Petition not found' });
 
@@ -6377,6 +6570,7 @@ fastify.get('/movements/:id/impact', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement impact list')) return;
     const list = memoryListExtras(memoryMovementImpactUpdatesByMovement, id).sort(sortByCreatedDesc);
     const page = list.slice(offset, offset + limit);
     return reply.send({ updates: page.map((u) => projectRecord(u, fields)) });
@@ -6420,6 +6614,7 @@ fastify.post('/movements/:id/impact', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement impact create')) return;
     return reply.code(201).send({ update: memoryAppendExtra(memoryMovementImpactUpdatesByMovement, id, row) });
   }
 
@@ -6478,6 +6673,7 @@ fastify.get('/movements/:id/tasks', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement tasks list')) return;
     const list = memoryListExtras(memoryMovementTasksByMovement, id).sort(sortByUpdatedDesc);
     const page = list.slice(offset, offset + limit);
     const emails = Array.from(
@@ -6566,6 +6762,7 @@ fastify.post('/movements/:id/tasks', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement tasks create')) return;
     let assignedUserId = null;
     if (row.assigned_to_email) {
       const lookup = await getPublicProfilesByEmail([row.assigned_to_email]);
@@ -6621,6 +6818,7 @@ fastify.patch('/tasks/:id', async (request, reply) => {
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement tasks update')) return;
     // Find the task and ensure membership via movement ID lookup.
     for (const [movementId, list] of memoryMovementTasksByMovement.entries()) {
       const t = Array.isArray(list) ? list.find((x) => String(x?.id) === taskId) : null;
@@ -6704,6 +6902,7 @@ fastify.get('/movements/:id/discussions', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement discussions list')) return;
     const list = memoryListExtras(memoryMovementDiscussionsByMovement, id).sort(sortByCreatedDesc);
     const page = list.slice(offset, offset + limit);
     const emails = Array.from(new Set(page.map((m) => normalizeEmail(m?.author_email)).filter(Boolean)));
@@ -6766,6 +6965,7 @@ fastify.post('/movements/:id/discussions', async (request, reply) => {
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'movement discussions create')) return;
     const saved = memoryAppendExtra(memoryMovementDiscussionsByMovement, id, row);
     return reply.code(201).send({ message: { ...saved, author_user_id: authorUserId } });
   }
@@ -6820,6 +7020,18 @@ fastify.post('/movements/:id/vote', async (request, reply) => {
       byUser.set(String(voterEmail), value);
     }
     memoryVotes.set(movementId, byUser);
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'movement_vote',
+        actor_id: authedUser?.id ? String(authedUser.id) : null,
+        movement_id: String(id),
+        value,
+        storage: 'memory',
+      },
+      '[audit] movement_vote'
+    );
     return reply.send(getMemoryVoteSummary(movementId, voterEmail));
   }
 
@@ -6842,6 +7054,18 @@ fastify.post('/movements/:id/vote', async (request, reply) => {
     }
 
     const summary = await getDbVoteSummary(id, voterEmail);
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'movement_vote',
+        actor_id: authedUser?.id ? String(authedUser.id) : null,
+        movement_id: String(id),
+        value,
+        storage: 'db',
+      },
+      '[audit] movement_vote'
+    );
     return reply.send(summary);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to apply vote');
@@ -6993,11 +7217,23 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       },
       'Movement created'
     );
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'movement_create',
+        actor_id: authedUser?.id ? String(authedUser.id) : null,
+        movement_id: String(created.id),
+        storage: 'memory',
+      },
+      '[audit] movement_create'
+    );
     const enriched = (await attachCreatorProfilesToMovements([created]))[0] || created;
     return reply.code(201).send(enriched);
   }
 
   try {
+    await ensureMovementsTable();
     await ensureMovementExtrasColumns();
     const columns = await getMovementsColumns();
     const insert = buildInsertForMovements(columns, payload);
@@ -7015,10 +7251,25 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       },
       'Movement created'
     );
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'movement_create',
+        actor_id: authedUser?.id ? String(authedUser.id) : null,
+        movement_id: String(row.id),
+        storage: 'db',
+      },
+      '[audit] movement_create'
+    );
     const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
     return reply.code(201).send(enriched);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create movement');
+
+    if (isProd) {
+      return reply.code(500).send({ error: 'Failed to create movement' });
+    }
 
     // Crash-proof fallback: if DB insert fails (bad connection/schema/etc),
     // still allow creation in memory so the app remains usable.
@@ -7185,6 +7436,7 @@ fastify.patch('/movements/:id', async (request, reply) => {
   }
 
   try {
+    await ensureMovementsTable();
     const existingRes = await pool.query('SELECT * FROM movements WHERE id = $1 LIMIT 1', [id]);
     const existing = existingRes.rows?.[0] || null;
     if (!existing) return reply.code(404).send({ error: 'Movement not found' });
@@ -7308,6 +7560,7 @@ fastify.delete('/movements/:id', async (request, reply) => {
   }
 
   try {
+    await ensureMovementsTable();
     const existing = await pool.query('SELECT * FROM movements WHERE id = $1 LIMIT 1', [id]);
     const row = existing.rows?.[0] || null;
     if (!row) return reply.code(404).send({ error: 'Movement not found' });
@@ -7457,6 +7710,7 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
   };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'report create')) return;
     const fallbackReport = await createMemoryReport();
     const receipt = buildReportReceiptEmail(fallbackReport);
     void sendReportEmail({
@@ -7541,6 +7795,11 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
     }
     return reply.code(201).send(row ?? { ok: true });
   } catch (e) {
+    if (isProd) {
+      fastify.log.error({ err: e }, 'Failed to create report');
+      return reply.code(500).send({ error: 'Failed to create report' });
+    }
+
     fastify.log.error({ err: e }, 'Failed to create report; using memory fallback');
     try {
       const fallbackReport = await createMemoryReport();
@@ -7564,6 +7823,7 @@ fastify.get('/reports', { config: { rateLimit: RATE_LIMITS.admin } }, async (req
   if (!staffUser) return;
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'reports list')) return;
     const status = request.query?.status ? String(request.query.status) : null;
     const rows = Array.isArray(memoryReports) ? memoryReports : [];
     const filtered = status ? rows.filter((r) => String(r?.status || '') === status) : rows;
@@ -7624,6 +7884,7 @@ fastify.patch('/reports/:id', { config: { rateLimit: RATE_LIMITS.admin } }, asyn
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'report update')) return;
     const idStr = String(rawId || '');
     const row = memoryReports.find((r) => String(r?.id) === idStr);
     if (!row) return reply.code(404).send({ error: 'Report not found' });
@@ -7947,6 +8208,7 @@ fastify.get('/conversations', async (request, reply) => {
   }
 
     if (!hasDatabaseUrl) {
+      if (blockMemoryFallbackInProd(request, reply, 'conversations list')) return;
       const list = memoryListConversationsForUser(myEmail).filter((c) => {
       const status = String(c?.request_status || 'accepted');
       const blockedBy = normalizeEmail(c?.blocked_by_email);
@@ -8078,6 +8340,7 @@ fastify.post('/conversations', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'conversation create')) return;
     const convo = memoryEnsureConversationBetweenWithRequest(myEmail, recipient, {
       is_request: isRequest,
       requester_email: myEmail,
@@ -8154,6 +8417,7 @@ fastify.post('/conversations/group', { config: { rateLimit: RATE_LIMITS.conversa
   const allowedPosters = posters.filter((email) => participants.includes(email));
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'conversation group create')) return;
     const missing = participants.filter((p) => !memoryPublicKeys.get(p));
     if (missing.length) {
       return reply.code(409).send({ error: 'Missing public keys', missing });
@@ -8285,6 +8549,7 @@ fastify.patch('/conversations/:id/group', { config: { rateLimit: RATE_LIMITS.con
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'conversation group update')) return;
     const convo = getMemoryConversationById(conversationId);
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
     const result = applyGroupPatch(convo);
@@ -8404,6 +8669,7 @@ fastify.post('/conversations/:id/participants', { config: { rateLimit: RATE_LIMI
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'conversation participants update')) return;
     const convo = getMemoryConversationById(conversationId);
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
     const result = await applyParticipantPatch(convo);
@@ -8466,6 +8732,7 @@ fastify.post('/conversations/:id/request', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'conversation request update')) return;
     const convo = getMemoryConversationById(conversationId);
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
     const participants = Array.isArray(convo.participant_emails) ? convo.participant_emails.map((x) => normalizeEmail(x)) : [];
@@ -8588,6 +8855,7 @@ fastify.get('/conversations/:id/messages', async (request, reply) => {
   const fields = normalizeFields(request.query?.fields);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'conversation messages list')) return;
     const convo = getMemoryConversationById(conversationId);
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
     const participants = Array.isArray(convo.participant_emails)
@@ -8675,6 +8943,7 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
   const viewerBlocks = await getUserBlockSets(myEmail);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'conversation message send')) return;
     const convo = getMemoryConversationById(conversationId);
     if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
     const participants = Array.isArray(convo.participant_emails)
@@ -8800,6 +9069,7 @@ fastify.get('/users/:email/follow', async (request, reply) => {
   const following = await doesUserFollow(me, target);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'user follow state')) return;
     const mySet = memoryUserFollows.get(me) || new Set();
     let followersCount = 0;
     const targetFollowingSet = memoryUserFollows.get(target) || new Set();
@@ -8836,6 +9106,7 @@ async function getUserIsPrivateByEmail(email) {
   if (!target) return false;
 
   if (!hasDatabaseUrl) {
+    if (isProd) return false;
     const profile = memoryUserProfiles.get(target) || null;
     return !!profile?.is_private;
   }
@@ -8844,7 +9115,11 @@ async function getUserIsPrivateByEmail(email) {
     await ensureUserProfilesTable();
     const res = await pool.query('SELECT is_private FROM user_profiles WHERE user_email = $1 LIMIT 1', [target]);
     return !!res.rows?.[0]?.is_private;
-  } catch {
+  } catch (e) {
+    if (isProd) {
+      fastify.log.error({ err: e }, 'Failed to read profile privacy');
+      throw e;
+    }
     return false;
   }
 }
@@ -8885,6 +9160,7 @@ fastify.get('/users/:email/following-users', async (request, reply) => {
 
   try {
     if (!hasDatabaseUrl) {
+      if (blockMemoryFallbackInProd(request, reply, 'following users list')) return;
       const set = memoryUserFollows.get(target) || new Set();
       const emails = Array.from(set).map((e) => normalizeEmail(e)).filter(Boolean);
       const lookup = await getPublicProfilesByEmail(emails);
@@ -8954,6 +9230,7 @@ fastify.get('/users/:email/followers', async (request, reply) => {
 
   try {
     if (!hasDatabaseUrl) {
+      if (blockMemoryFallbackInProd(request, reply, 'followers list')) return;
       const followers = [];
       for (const [follower, set] of memoryUserFollows.entries()) {
         if (set && set.has(target)) followers.push(normalizeEmail(follower));
@@ -9023,6 +9300,7 @@ fastify.post('/users/:email/follow', async (request, reply) => {
   }
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'follow update')) return;
     const set = memoryUserFollows.get(me) || new Set();
     if (parsed.data.following) set.add(target);
     else set.delete(target);
@@ -9052,6 +9330,23 @@ fastify.post('/users/:email/follow', async (request, reply) => {
       await pool.query('DELETE FROM user_follows WHERE follower_email = $1 AND following_email = $2', [me, target]);
     }
 
+    try {
+      const userIdRaw = authedUser?.id != null ? String(authedUser.id).trim() : '';
+      const actorId = userIdRaw || null;
+      fastify.log.info(
+        {
+          event: 'audit',
+          action: parsed.data.following ? 'user_follow' : 'user_unfollow',
+          actor_id: actorId,
+          target_email: target,
+          storage: 'db',
+        },
+        `[audit] ${parsed.data.following ? 'user_follow' : 'user_unfollow'}`
+      );
+    } catch {
+      // ignore
+    }
+
     const following = await doesUserFollow(me, target);
     const followersRes = await pool.query('SELECT COUNT(*)::int AS count FROM user_follows WHERE following_email = $1', [target]);
     const followingRes = await pool.query('SELECT COUNT(*)::int AS count FROM user_follows WHERE follower_email = $1', [target]);
@@ -9077,6 +9372,7 @@ fastify.get('/me/following-users', async (request, reply) => {
 
   try {
     if (!hasDatabaseUrl) {
+      if (blockMemoryFallbackInProd(request, reply, 'my following users list')) return;
       const set = memoryUserFollows.get(myEmail) || new Set();
       const emails = Array.from(set).map((e) => normalizeEmail(e)).filter(Boolean);
       const lookup = await getPublicProfilesByEmail(emails);
@@ -9132,6 +9428,7 @@ fastify.get('/me/followers', async (request, reply) => {
 
   try {
     if (!hasDatabaseUrl) {
+      if (blockMemoryFallbackInProd(request, reply, 'my followers list')) return;
       const followers = [];
       for (const [follower, set] of memoryUserFollows.entries()) {
         if (set && set.has(myEmail)) followers.push(normalizeEmail(follower));
@@ -9193,7 +9490,10 @@ fastify.get('/users/search', async (request, reply) => {
   const limitRaw = request.query?.limit;
   const limit = Number.isFinite(Number(limitRaw)) ? Math.max(1, Math.min(25, Number(limitRaw))) : 10;
 
-  if (!hasDatabaseUrl) return reply.send({ users: [] });
+  if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'users search')) return;
+    return reply.send({ users: [] });
+  }
 
   try {
     await ensureUserProfilesTable();
@@ -9242,7 +9542,10 @@ fastify.post('/users/lookup', async (request, reply) => {
   const parsed = schema.safeParse(request.body ?? {});
   if (!parsed.success) return reply.code(400).send({ error: 'Invalid payload' });
 
-  if (!hasDatabaseUrl) return reply.send({ users: [] });
+  if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'users lookup')) return;
+    return reply.send({ users: [] });
+  }
 
   try {
     await ensureUserProfilesTable();
@@ -9513,6 +9816,7 @@ async function handleGetMyProfile(request, reply) {
   const meta = { staff_role: staffRole };
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'my profile read')) return;
     const existing = memoryUserProfiles.get(email) || null;
     if (existing) {
       const payload = { profile: sanitizeUserProfileRecord(existing) };
@@ -9714,6 +10018,7 @@ async function handlePostMyProfile(request, reply) {
   });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'my profile update')) return;
     const now = nowIso();
     if (normalizedUsername) {
       for (const [otherEmail, profile] of memoryUserProfiles.entries()) {
@@ -9752,6 +10057,17 @@ async function handlePostMyProfile(request, reply) {
       created_at: existing.created_at || now,
     };
     memoryUserProfiles.set(email, merged);
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'profile_update',
+        actor_id: userId ? String(userId) : null,
+        profile_id: merged?.id ? String(merged.id) : null,
+        storage: 'memory',
+      },
+      '[audit] profile_update'
+    );
     return reply.send({ profile: sanitizeUserProfileRecord(merged) });
   }
 
@@ -9888,6 +10204,17 @@ async function handlePostMyProfile(request, reply) {
       ? await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId])
       : await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
     const updated = sanitizeUserProfileRecord(updatedRes.rows?.[0] || null);
+
+    fastify.log.info(
+      {
+        event: 'audit',
+        action: 'profile_update',
+        actor_id: userId ? String(userId) : null,
+        profile_id: updated?.id ? String(updated.id) : null,
+        storage: 'db',
+      },
+      '[audit] profile_update'
+    );
     return reply.send({ profile: updated });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to upsert user profile');
@@ -9899,6 +10226,8 @@ fastify.get('/me/profile', handleGetMyProfile);
 fastify.get('/api/me/profile', handleGetMyProfile);
 fastify.post('/me/profile', handlePostMyProfile);
 fastify.post('/api/me/profile', handlePostMyProfile);
+fastify.patch('/me/profile', handlePostMyProfile);
+fastify.patch('/api/me/profile', handlePostMyProfile);
 
 // Notifications (Postgres-backed; auth required)
 fastify.get('/me/notifications', async (request, reply) => {
@@ -10481,6 +10810,7 @@ fastify.post('/me/blocks', async (request, reply) => {
   if (blockerEmail === blockedEmail) return reply.code(400).send({ error: 'Cannot block yourself' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'user block create')) return;
     const list = memoryUserBlocks.get(blockerEmail) || new Set();
     list.add(blockedEmail);
     memoryUserBlocks.set(blockerEmail, list);
@@ -10512,6 +10842,7 @@ fastify.delete('/me/blocks/:email', async (request, reply) => {
   if (!blockedEmail) return reply.code(400).send({ error: 'Valid email is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'user block delete')) return;
     const list = memoryUserBlocks.get(blockerEmail) || new Set();
     list.delete(blockedEmail);
     memoryUserBlocks.set(blockerEmail, list);
@@ -10543,6 +10874,7 @@ fastify.get('/profiles/username/:username', async (request, reply) => {
   const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'profile by username')) return;
     const entry = Array.from(memoryUserProfiles.values()).find(
       (p) => normalizeUsername(p?.username) === username
     );
@@ -10585,6 +10917,7 @@ fastify.get('/profiles/email/:email', async (request, reply) => {
   const viewerBlocks = viewerEmail ? await getUserBlockSets(viewerEmail) : null;
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'profile by email')) return;
     const entry = memoryUserProfiles.get(targetEmail) || null;
     if (!entry) return reply.code(404).send({ error: 'Profile not found' });
     if (viewerBlocks && isBlockedForViewer(entry?.user_email, viewerBlocks)) {
@@ -11258,6 +11591,7 @@ fastify.post('/conversations/:id/read', async (request, reply) => {
     }
 
     if (!hasDatabaseUrl) {
+      if (blockMemoryFallbackInProd(request, reply, 'conversation read update')) return;
       const convo = getMemoryConversationById(conversationId);
       if (!convo) return reply.code(404).send({ error: 'Conversation not found' });
       const participants = Array.isArray(convo.participant_emails) ? convo.participant_emails.map((x) => String(x).toLowerCase()) : [];
@@ -11336,6 +11670,7 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
   const viewerBlocks = await getUserBlockSets(myEmail);
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'message reaction update')) return;
     const message = memoryFindMessageById(messageId);
     if (!message) return reply.code(404).send({ error: 'Message not found' });
     if (isBlockedForViewer(message?.sender_email, viewerBlocks)) {
@@ -11395,6 +11730,11 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
 const start = async () => {
   try {
     await checkDatabaseConnection();
+    if (isProd) {
+      console.info(
+        `[storage] effective mode=${String(storageMode)} has_db=${hasDatabaseUrl ? 'true' : 'false'} database_host=${databaseUrlHostForLog}`
+      );
+    }
     initRealtimeServer();
     if (hasDatabaseUrl) {
       try {

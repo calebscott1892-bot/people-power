@@ -36,6 +36,7 @@ export async function fetchMovementCommentsCount(movementId, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments/count`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...(options?.accessToken ? { Authorization: `Bearer ${String(options.accessToken)}` } : {}),
@@ -62,6 +63,7 @@ export async function fetchMovementCommentsPage(movementId, { limit = 20, offset
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments${params.toString() ? `?${params.toString()}` : ''}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${String(accessToken)}` } : {}),
@@ -81,7 +83,7 @@ export async function fetchMovementCommentSettings(movementId) {
   if (!id) throw new Error('Movement ID is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comment-settings`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
   const body = await safeReadJson(res);
 
   if (!res.ok) {
@@ -101,6 +103,7 @@ export async function updateMovementCommentSettings(movementId, patch, options) 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comment-settings`;
   const res = await fetch(url, {
     method: 'PATCH',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -130,6 +133,7 @@ export async function createMovementComment(movementId, content, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',

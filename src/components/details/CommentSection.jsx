@@ -30,6 +30,7 @@ import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { createIncident } from '@/api/incidentsClient';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { upsertNotification } from '@/api/notificationsClient';
+import { queryKeys } from '@/lib/queryKeys';
 
 function getMovementOwnerEmail(movement) {
   const candidates = [
@@ -94,7 +95,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
   const [commentAuthors, setCommentAuthors] = useState({ byEmail: {}, byUserId: {} });
 
   const { data: commentSettings, isLoading: settingsLoading } = useQuery({
-    queryKey: ['commentSettings', safeMovementId],
+    queryKey: queryKeys.movements.commentSettings(safeMovementId),
     enabled: !!safeMovementId,
     queryFn: async () => {
       if (!safeMovementId) return { locked: false, slow_mode_seconds: 0 };
@@ -113,7 +114,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       return updateMovementCommentSettings(safeMovementId, patch, { accessToken });
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['commentSettings', safeMovementId] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.movements.commentSettings(safeMovementId) });
       toast.success('Comment settings updated');
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to update settings')),
@@ -126,7 +127,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['comments', safeMovementId],
+    queryKey: queryKeys.movements.comments(safeMovementId),
     enabled: !!safeMovementId,
     initialPageParam: 0,
     queryFn: async ({ pageParam = 0 }) => {
@@ -218,8 +219,8 @@ export default function CommentSection({ movementId, movement, canModerate = fal
     },
     onSuccess: async (_created) => {
       setDraft('');
-      await queryClient.invalidateQueries({ queryKey: ['comments', safeMovementId] });
-      queryClient.setQueryData(['movementCommentsCount', safeMovementId], (old) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.movements.comments(safeMovementId) });
+      queryClient.setQueryData(queryKeys.movements.commentsCount(safeMovementId), (old) => {
         const prev = typeof old === 'number' ? old : null;
         return prev == null ? old : prev + 1;
       });
@@ -242,7 +243,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       };
 
       // Detail view object
-      queryClient.setQueryData(['movement', safeMovementId], bumpCommentsCountOnMovement);
+      queryClient.setQueryData(queryKeys.movements.detail(safeMovementId), bumpCommentsCountOnMovement);
 
       // Lists across the app (feed, profile, followed, search)
       const bumpInAnyList = (old) => {
@@ -269,7 +270,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       queryClient.invalidateQueries({ queryKey: ['searchMovements'] });
       queryClient.invalidateQueries({ queryKey: ['userMovements'] });
       queryClient.invalidateQueries({ queryKey: ['participatedMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['movement', safeMovementId] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(safeMovementId) });
 
       toast.success('Comment posted');
 
@@ -279,9 +280,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
         const recipient = getMovementOwnerEmail(movement);
         const title = String(movement?.title || movement?.name || '').trim() || null;
         if (actorEmail && recipient && actorEmail !== recipient) {
-          const rawName =
-            (user?.user_metadata && (user.user_metadata.full_name || user.user_metadata.name)) || '';
-          const actorName = rawName && !String(rawName).includes('@') ? String(rawName).trim() : null;
+          const actorName = null;
           upsertNotification({
             recipient_email: recipient,
             type: 'comment',

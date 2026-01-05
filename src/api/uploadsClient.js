@@ -51,6 +51,7 @@ export async function uploadFile(file, options) {
 
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,

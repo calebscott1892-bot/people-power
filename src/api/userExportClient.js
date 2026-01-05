@@ -24,6 +24,7 @@ export async function exportMyData({ accessToken }) {
   const base = BASE_URL.replace(/\/$/, '');
   const res = await fetch(`${base}/user/export`, {
     method: 'GET',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${token}`,

@@ -29,7 +29,7 @@ import AdminReports from "./AdminReports";
 
 import UserProfile from "./UserProfile";
 
-import Messages from "./Messages";
+import MessagesComingSoon from "./MessagesComingSoon";
 
 import Notifications from "./Notifications";
 
@@ -76,7 +76,7 @@ const PAGES = {
     
     UserProfile: UserProfile,
     
-    Messages: Messages,
+    Messages: MessagesComingSoon,
     
     Notifications: Notifications,
     
@@ -182,7 +182,7 @@ function PagesContent() {
                 
                 <Route path="/UserProfile" element={<UserProfile />} />
                 
-                <Route path="/Messages" element={<Messages />} />
+                <Route path="/Messages" element={<MessagesComingSoon />} />
                 
                 <Route path="/Notifications" element={<Notifications />} />
                 

@@ -8,6 +8,7 @@ import { getOrCreateIdentityKeypair } from '@/lib/e2eeCrypto';
 import { logError } from '@/utils/logError';
 import { getStaffRole } from '@/utils/staff';
 import { configureAuthFetch, installAuthFetch } from '@/auth/authFetch';
+import { queryKeys } from '@/lib/queryKeys';
 
 const AuthContext = createContext(null);
 const AUTH_DISABLED_MESSAGE = 'Sign-in is temporarily unavailable; configuration error. Please contact support.';
@@ -24,11 +25,8 @@ export function AuthProvider({ children }) {
   const staffRole = useMemo(() => {
     const serverRole = String(serverStaffRole || '').trim().toLowerCase();
     if (serverRole === 'admin' || serverRole === 'moderator') return serverRole;
-    const claimedRoleRaw = user?.app_metadata?.role || user?.user_metadata?.role || user?.role || '';
-    const claimedRole = String(claimedRoleRaw || '').trim().toLowerCase();
     const emailRole = getStaffRole(user?.email);
     if (emailRole && emailRole !== 'user') return emailRole;
-    if (claimedRole === 'admin' || claimedRole === 'moderator') return claimedRole;
     return 'user';
   }, [user, serverStaffRole]);
   const isAdmin = staffRole === 'admin';
@@ -97,8 +95,8 @@ export function AuthProvider({ children }) {
     if (!isAuthReady) return;
 
     // When auth changes, refresh user-bound queries.
-    queryClient.invalidateQueries({ queryKey: ['userProfile', email] }).catch(() => {});
-    queryClient.invalidateQueries({ queryKey: ['myBlocks', email] }).catch(() => {});
+    queryClient.invalidateQueries({ queryKey: queryKeys.userProfile.me(email) }).catch(() => {});
+    queryClient.invalidateQueries({ queryKey: queryKeys.blocks.mine(email) }).catch(() => {});
   }, [queryClient, user?.email, isAuthReady]);
 
   useEffect(() => {
@@ -116,6 +114,13 @@ export function AuthProvider({ children }) {
         return data?.session ?? null;
       },
       onAuthExpired: async ({ message }) => {
+        try {
+          const msg = String(message || '').trim() || 'Your session has expired. Please sign in again.';
+          sessionStorage.setItem('pp_session_expired_toast', msg);
+        } catch {
+          // ignore
+        }
+
         // Clear local auth state so protected routes redirect predictably.
         setSession(null);
         setUser(null);

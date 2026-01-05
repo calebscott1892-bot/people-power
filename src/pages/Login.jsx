@@ -12,7 +12,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signIn, signUp, resendConfirmationEmail, resetPasswordForEmail, logout, isSupabaseConfigured, authErrorMessage } = useAuth();
+  const { signIn, signUp, resendConfirmationEmail, resetPasswordForEmail, isSupabaseConfigured, authErrorMessage } = useAuth();
 
   // Current auth UX flow summary (frontend):
   // - Signup calls Supabase signUp.
@@ -41,7 +41,38 @@ export default function Login() {
     return typeof window !== 'undefined' ? `${window.location.origin}/reset-password` : undefined;
   }, []);
 
+  const sanitizePostAuthRedirect = (to) => {
+    const raw = String(to || '').trim();
+    if (!raw) return '/';
+    // Avoid self-loops and auth-only routes.
+    const path = raw.startsWith('http') ? (() => {
+      try {
+        return new URL(raw).pathname || '/';
+      } catch {
+        return raw;
+      }
+    })() : raw;
+    if (path === '/welcome' || path.startsWith('/welcome?') || path.startsWith('/welcome#')) return '/';
+    if (path === '/login' || path.startsWith('/login?') || path.startsWith('/login#')) return '/';
+    if (path === '/email-verified' || path.startsWith('/email-verified?') || path.startsWith('/email-verified#')) return '/';
+    if (path === '/reset-password' || path.startsWith('/reset-password?') || path.startsWith('/reset-password#')) return '/';
+    return raw;
+  };
+
   useEffect(() => {
+    // One-time toast when authFetch forces a sign-out.
+    try {
+      const once = sessionStorage.getItem('pp_session_expired_toast');
+      if (once) {
+        sessionStorage.removeItem('pp_session_expired_toast');
+        const msg = String(once || '').trim() || 'Your session has expired. Please sign in again.';
+        toast.error(msg);
+        setStatus(msg);
+      }
+    } catch {
+      // ignore
+    }
+
     const reason = location.state?.reason;
     const message = location.state?.message;
     if (reason === 'session_expired') {
@@ -67,7 +98,7 @@ export default function Login() {
         : rawFrom?.pathname
           ? `${rawFrom.pathname}${rawFrom.search ?? ''}${rawFrom.hash ?? ''}`
           : '/';
-    return to || '/';
+    return sanitizePostAuthRedirect(to || '/');
   };
 
   const submitForgotPassword = async (e) => {
@@ -96,6 +127,7 @@ export default function Login() {
   const submit = async (e) => {
     e.preventDefault();
     setStatus('');
+    if (!isSupabaseConfigured) return;
     setLoading(true);
 
     try {
@@ -107,17 +139,10 @@ export default function Login() {
         );
 
         if (result?.status === 'signed_in') {
-          // If Supabase returns a session immediately on signup, it usually means
-          // email confirmations are disabled in the Supabase project settings.
-          // This product requires verification emails to be sent.
-          try {
-            await logout();
-          } catch {
-            // ignore
-          }
-          setStatus(
-            'Email verification is currently disabled. Please contact support — we require a verification email before accounts can be used.'
-          );
+          // If Supabase returns a session immediately on signup, the user is already signed in.
+          // Keep them signed in and take them into the app.
+          toast.success('Account created. Welcome!');
+          navigate('/welcome', { replace: true, state: { from: toFromRoute(), signedInJustNow: true } });
           return;
         }
 
@@ -213,7 +238,10 @@ export default function Login() {
                       </div>
                     ) : null}
                     <div className="text-xs text-slate-600 font-semibold mt-2">
-                      Check your inbox (and spam folder), click the link to verify your account, then sign in.
+                      Check your inbox (and spam folder), click the link to verify your account, and you should be signed in automatically.
+                    </div>
+                    <div className="text-xs text-slate-500 font-semibold mt-2">
+                      If the link opens in a different browser/device, you can still come back here and sign in after verifying.
                     </div>
                   </>
                 ) : (

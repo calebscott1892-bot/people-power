@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { useAuth } from '@/auth/AuthProvider';
 import { acceptPlatformAcknowledgment, fetchMyPlatformAcknowledgment } from '@/api/platformAckClient';
 import { fetchMyProfile, upsertMyProfile } from '@/api/userProfileClient';
+import { queryKeys } from '@/lib/queryKeys';
 
 const interestOptions = [
   { id: 'environment', label: 'Environment', icon: '🌍', color: 'from-green-500 to-emerald-500' },
@@ -117,7 +118,7 @@ export default function OnboardingFlow({ user, onComplete }) {
   }, []);
 
   const { data: myProfile } = useQuery({
-    queryKey: ['myProfile', user?.email],
+    queryKey: queryKeys.userProfile.me(user?.email),
     queryFn: async () => {
       if (!accessToken) return null;
       return fetchMyProfile({ accessToken });
@@ -168,7 +169,7 @@ export default function OnboardingFlow({ user, onComplete }) {
       await upsertMyProfile(payload, { accessToken });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['myProfile'] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.userProfile.any() });
     }
   });
 

@@ -25,6 +25,7 @@ import { toast } from 'sonner';
 import FollowListDialog from '@/components/profile/FollowListDialog';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 import FeedbackBugDialog from '@/components/shared/FeedbackBugDialog';
+import { queryKeys } from '@/lib/queryKeys';
 
 function getMovementAuthorLabel(movement) {
   const displayName = String(
@@ -63,7 +64,7 @@ export default function Profile() {
   }, [authUser, authLoading]);
 
   const { data: myMovements = [] } = useQuery({
-    queryKey: ['myMovements', user?.email],
+    queryKey: queryKeys.movements.mine(user?.email),
     queryFn: async () => {
       const all = await fetchMovementsPage({
         mine: true,
@@ -93,7 +94,7 @@ export default function Profile() {
     data: userProfile,
     isError: userProfileIsError,
   } = useQuery({
-    queryKey: ['userProfile', user?.email],
+    queryKey: queryKeys.userProfile.me(user?.email),
     queryFn: async () => {
       if (!user?.email) return null;
       const token = accessToken ? String(accessToken) : null;
@@ -177,7 +178,7 @@ export default function Profile() {
   }, [resolvedProfile]);
 
   const { data: followedMovements = [] } = useQuery({
-    queryKey: ['followedMovements', user?.email],
+    queryKey: queryKeys.movements.followed(user?.email),
     queryFn: async () => fetchMyFollowedMovements({ accessToken }),
     enabled: !!user?.email && !!accessToken
   });
@@ -192,13 +193,13 @@ export default function Profile() {
   });
 
   const { data: myFollowingUsers = [], isLoading: myFollowingUsersLoading } = useQuery({
-    queryKey: ['myFollowingUsers', user?.email],
+    queryKey: queryKeys.follows.myFollowingUsers(user?.email),
     queryFn: async () => fetchMyFollowingUsers({ accessToken }),
     enabled: !!user?.email && !!accessToken,
   });
 
   const { data: myFollowers = [], isLoading: myFollowersLoading } = useQuery({
-    queryKey: ['myFollowers', user?.email],
+    queryKey: queryKeys.follows.myFollowers(user?.email),
     queryFn: async () => fetchMyFollowers({ accessToken }),
     enabled: !!user?.email && !!accessToken,
   });
@@ -211,7 +212,7 @@ export default function Profile() {
   }, [myFollowers, myFollowingUsers]);
 
   const { data: followState } = useQuery({
-    queryKey: ['userFollow', user?.email, user?.email],
+    queryKey: queryKeys.follows.userFollow(user?.email, user?.email),
     queryFn: async () => {
       if (!user?.email) return null;
       return fetchUserFollow(user.email, { accessToken });

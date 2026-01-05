@@ -28,6 +28,7 @@ export async function searchUsers(query, options) {
   url.searchParams.set('limit', String(Math.max(1, Math.min(25, limit))));
 
   const res = await fetch(url.toString(), {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...authHeaders(accessToken),
@@ -77,6 +78,7 @@ export async function lookupUsers({ emails, userIds } = {}, options) {
     const userIdChunk = userIdChunks[i] || [];
     const res = await fetch(url, {
       method: 'POST',
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',

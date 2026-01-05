@@ -38,6 +38,7 @@ export async function listNotificationsForUser(userEmail, options) {
   const accessToken = requireAccessToken(options);
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications?limit=200&offset=0`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -70,6 +71,7 @@ export async function listNotificationsForUserPage(userEmail, { limit = 20, offs
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications?${qs.toString()}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -108,6 +110,7 @@ export async function filterNotifications(where, options) {
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications/search?${qs.toString()}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -136,6 +139,7 @@ export async function markNotificationRead(notificationId, options) {
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications/${encodeURIComponent(id)}/read`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -162,6 +166,7 @@ export async function markNotificationsRead(notificationIds, options) {
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications/read`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -186,6 +191,7 @@ export async function upsertNotification(payload, options) {
   const url = `${SERVER_BASE.replace(/\/$/, '')}/notifications`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',

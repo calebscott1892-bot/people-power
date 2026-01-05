@@ -17,6 +17,7 @@ export async function fetchLeadershipCounts(roleType, options) {
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/leadership/counts?role_type=${encodeURIComponent(rt)}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -40,6 +41,7 @@ export async function checkLeadershipCap(roleType, options) {
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/leadership/cap?role_type=${encodeURIComponent(rt)}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -61,6 +63,7 @@ export async function registerLeadershipRole(roleType, movementId, options) {
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/leadership/register`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -88,6 +91,7 @@ export async function deactivateLeadershipRole(roleType, movementId, options) {
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/leadership/deactivate`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',

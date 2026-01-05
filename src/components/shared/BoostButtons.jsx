@@ -7,6 +7,7 @@ import { fetchMovementVotes, voteMovement } from '@/api/movementsClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { upsertNotification } from '@/api/notificationsClient';
+import { queryKeys } from '@/lib/queryKeys';
 
 function getMovementOwnerEmail(movement) {
   const candidates = [
@@ -37,7 +38,7 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
     data: votes,
     isError,
   } = useQuery({
-    queryKey: ['movementVotes', id],
+    queryKey: queryKeys.movements.votes(id),
     enabled: !!id && !!accessToken,
     queryFn: async () => fetchMovementVotes(id, { accessToken }),
     staleTime: 5_000,
@@ -77,9 +78,7 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
         const title = String(movement?.title || movement?.name || '').trim() || null;
         const justBoosted = nextValue === 1 && myVote !== 1;
         if (justBoosted && actorEmail && recipient && actorEmail !== recipient) {
-          const rawName =
-            (user?.user_metadata && (user.user_metadata.full_name || user.user_metadata.name)) || '';
-          const actorName = rawName && !String(rawName).includes('@') ? String(rawName).trim() : null;
+          const actorName = null;
           upsertNotification({
             recipient_email: recipient,
             type: 'movement_boost',
@@ -97,10 +96,10 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
         // best-effort
       }
 
-      queryClient.setQueryData(['movementVotes', id], summary);
+      queryClient.setQueryData(queryKeys.movements.votes(id), summary);
 
       // Keep movement detail view in sync immediately.
-      queryClient.setQueryData(['movement', id], (old) => {
+      queryClient.setQueryData(queryKeys.movements.detail(id), (old) => {
         if (!old || typeof old !== 'object') return old;
         return {
           ...old,
@@ -154,7 +153,7 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
       queryClient.invalidateQueries({ queryKey: ['searchMovements'] });
       queryClient.invalidateQueries({ queryKey: ['userMovements'] });
       queryClient.invalidateQueries({ queryKey: ['participatedMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['movement', id] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(id) });
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Could not boost right now')),
   });

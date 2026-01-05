@@ -16,9 +16,19 @@ export default function Welcome() {
 
   const continueTo = useMemo(() => {
     const rawFrom = state?.from;
-    if (typeof rawFrom === 'string') return rawFrom || '/';
-    if (rawFrom?.pathname) return `${rawFrom.pathname}${rawFrom.search ?? ''}${rawFrom.hash ?? ''}` || '/';
-    return '/';
+    const candidate =
+      typeof rawFrom === 'string'
+        ? rawFrom
+        : rawFrom?.pathname
+          ? `${rawFrom.pathname}${rawFrom.search ?? ''}${rawFrom.hash ?? ''}`
+          : '/';
+
+    const path = String(candidate || '').trim() || '/';
+    if (path === '/welcome' || path.startsWith('/welcome?') || path.startsWith('/welcome#')) return '/';
+    if (path === '/login' || path.startsWith('/login?') || path.startsWith('/login#')) return '/';
+    if (path === '/email-verified' || path.startsWith('/email-verified?') || path.startsWith('/email-verified#')) return '/';
+    if (path === '/reset-password' || path.startsWith('/reset-password?') || path.startsWith('/reset-password#')) return '/';
+    return path;
   }, [state?.from]);
 
   useEffect(() => {

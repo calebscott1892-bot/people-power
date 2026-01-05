@@ -33,7 +33,6 @@ import { useQueryClient } from '@tanstack/react-query';
 import { fetchMovementFollowersCount, fetchMyMovementFollow, setMyMovementFollow } from '@/api/movementFollowsClient';
 import { listMovementCollaborators } from '@/api/collaboratorsClient';
 import { lookupUsers } from '@/api/usersClient';
-import { createMovementGroupConversation } from '@/api/messagesClient';
 import { fetchMovementCommentsCount } from '@/api/commentsClient';
 
 import CommentSection from '@/components/details/CommentSection';
@@ -84,6 +83,7 @@ import { toastFriendlyError } from '@/utils/toastErrors';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { useFeatureFlag } from '@/utils/featureFlags';
 import { getPageCache, setPageCache } from '@/utils/pageCache';
+import { queryKeys } from '@/lib/queryKeys';
 import {
   ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
   ALLOWED_UPLOAD_MIME_TYPES,
@@ -561,6 +561,7 @@ export default function MovementDetails() {
   const { enabled: petitionsEnabled } = useFeatureFlag('petitions', userId);
   const { enabled: donationsEnabled } = useFeatureFlag('donations', userId);
   const { enabled: creatorAnalyticsEnabled } = useFeatureFlag('creator_analytics_dashboard', userId);
+  const allowOfflineMovementCache = !!import.meta?.env?.DEV;
 
   const {
     data: movementData,
@@ -569,14 +570,14 @@ export default function MovementDetails() {
     error: movementError,
     refetch,
   } = useQuery({
-    queryKey: ['movement', movementId],
+    queryKey: queryKeys.movements.detail(movementId),
     enabled: !!movementId,
     retry: 1,
     queryFn: async () => {
       if (!movementId) return null;
       const m = await fetchMovementById(movementId, { accessToken });
       // Cache compact movement details on success
-      if (m && movementCacheKey) {
+      if (allowOfflineMovementCache && m && movementCacheKey) {
         try {
           const compact = {
             id: m.id,
@@ -608,6 +609,11 @@ export default function MovementDetails() {
   // Load from cache only when truly offline.
   // (When degraded or errored, show the error state rather than silently falling back.)
   useEffect(() => {
+    if (!allowOfflineMovementCache) {
+      setOfflineMovement(null);
+      setShowOfflineLabel(false);
+      return;
+    }
     if (backendStatus === 'offline' && movementCacheKey) {
       try {
         const cached = getPageCache(movementCacheKey);
@@ -623,13 +629,13 @@ export default function MovementDetails() {
 
     setOfflineMovement(null);
     setShowOfflineLabel(false);
-  }, [backendStatus, movementCacheKey]);
+  }, [backendStatus, movementCacheKey, allowOfflineMovementCache]);
 
   // Prefer last-known-good data when offline.
-  const movement = offlineMovement || movementData;
+  const movement = (allowOfflineMovementCache && offlineMovement) ? offlineMovement : movementData;
 
   useEffect(() => {
-    const currentMovement = offlineMovement || movementData;
+    const currentMovement = (allowOfflineMovementCache && offlineMovement) ? offlineMovement : movementData;
     if (!currentMovement) return;
     const tagsArray = Array.isArray(currentMovement?.tags) ? currentMovement.tags : [];
     const tagsText = tagsArray.map((t) => String(t).trim()).filter(Boolean).join(', ');
@@ -643,7 +649,7 @@ export default function MovementDetails() {
       location_country: String(currentMovement?.location_country || currentMovement?.country || ''),
       media_urls: mediaUrls.map((u) => String(u)).filter(Boolean).join('\n'),
     });
-  }, [offlineMovement, movementData]);
+  }, [offlineMovement, movementData, allowOfflineMovementCache]);
 
   // Note: avoid early returns before hooks; render an early view at the end instead.
   const earlyView = !movementId ? (
@@ -772,7 +778,7 @@ export default function MovementDetails() {
     try {
       setEditMovementSaving(true);
       const updated = await updateMovement(movementId, payload, { accessToken });
-      queryClient.setQueryData(['movement', movementId], updated);
+      queryClient.setQueryData(queryKeys.movements.detail(movementId), updated);
       queryClient.invalidateQueries({ queryKey: ['movements'] });
       setEditMovementOpen(false);
       toast.success('Movement updated.');
@@ -846,9 +852,9 @@ export default function MovementDetails() {
       queryClient.setQueryData(['movementFollow', movementId], next);
 
       if (next && typeof next.followers_count === 'number') {
-        queryClient.setQueryData(['movementFollowersCount', movementId], next.followers_count);
+        queryClient.setQueryData(queryKeys.movements.followersCount(movementId), next.followers_count);
 
-        queryClient.setQueryData(['movement', movementId], (old) => {
+        queryClient.setQueryData(queryKeys.movements.detail(movementId), (old) => {
           if (!old || typeof old !== 'object') return old;
           return { ...old, followers_count: next.followers_count };
         });
@@ -877,9 +883,9 @@ export default function MovementDetails() {
       try {
         const justFollowed = !!nextFollowing && !following;
         if (justFollowed && ownerEmail && myEmail && movementId && myEmail !== String(ownerEmail).toLowerCase()) {
-          const rawName =
-            (user?.user_metadata && (user.user_metadata.full_name || user.user_metadata.name)) || '';
-          const actorName = rawName && !String(rawName).includes('@') ? String(rawName).trim() : null;
+          const actorName =
+            (userProfile?.display_name ? String(userProfile.display_name).trim() : '') ||
+            (userProfile?.username ? `@${String(userProfile.username).trim()}` : null);
           upsertNotification({
             recipient_email: String(ownerEmail).trim().toLowerCase(),
             type: 'movement_follow',
@@ -906,7 +912,7 @@ export default function MovementDetails() {
   const followersCount = typeof followState?.followers_count === 'number' ? followState.followers_count : null;
 
   const { data: followersCountPublic } = useQuery({
-    queryKey: ['movementFollowersCount', movementId],
+    queryKey: queryKeys.movements.followersCount(movementId),
     enabled: !!movementId,
     retry: 1,
     staleTime: 30 * 1000,
@@ -914,7 +920,7 @@ export default function MovementDetails() {
   });
 
   const { data: commentsCount } = useQuery({
-    queryKey: ['movementCommentsCount', movementId],
+    queryKey: queryKeys.movements.commentsCount(movementId),
     enabled: !!movementId,
     retry: 1,
     staleTime: 30 * 1000,
@@ -932,7 +938,7 @@ export default function MovementDetails() {
     : (typeof followersCountPublic === 'number' ? followersCountPublic : 0);
 
   const { data: recentActivity = [] } = useQuery({
-    queryKey: ['movementEngagementActivity', movementId, ownerEmail],
+    queryKey: queryKeys.movements.engagementActivity(movementId, ownerEmail),
     enabled: !!movementId && !!ownerEmail && (isOwner || isAdmin),
     retry: 0,
     staleTime: 10 * 1000,
@@ -1432,7 +1438,7 @@ export default function MovementDetails() {
   }, [isTeamMember, location?.hash]);
 
   const { data: userProfile = null } = useQuery({
-    queryKey: ['userProfile', myEmail],
+    queryKey: queryKeys.userProfile.me(myEmail),
     enabled: !!accessToken,
     retry: 0,
     queryFn: async () => {
@@ -1676,7 +1682,7 @@ export default function MovementDetails() {
       setEvidenceText('');
       await queryClient.invalidateQueries({ queryKey: ['movementEvidence', movementId] });
       await queryClient.invalidateQueries({ queryKey: ['movementEvidencePending', movementId] });
-      await queryClient.invalidateQueries({ queryKey: ['movement', movementId] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(movementId) });
     },
     onError: (e) => {
       toast.error(getInteractionErrorMessage(e, 'Failed to submit evidence'));
@@ -1691,7 +1697,7 @@ export default function MovementDetails() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['movementEvidence', movementId] });
       await queryClient.invalidateQueries({ queryKey: ['movementEvidencePending', movementId] });
-      await queryClient.invalidateQueries({ queryKey: ['movement', movementId] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(movementId) });
     },
     onError: (e) => {
       toast.error(getInteractionErrorMessage(e, 'Failed to verify evidence'));
@@ -1700,6 +1706,7 @@ export default function MovementDetails() {
 
   const createGroupChatMutation = useMutation({
     mutationFn: async () => {
+      if (import.meta?.env?.PROD) throw new Error('Messaging is temporarily disabled');
       if (!accessToken) throw new Error('Please log in to start a group chat');
       if (!movementId) throw new Error('Movement is required');
       if (!isOwner) throw new Error('Only the movement owner can start this chat');
@@ -1720,6 +1727,7 @@ export default function MovementDetails() {
         throw new Error('Select at least one verified participant');
       }
 
+      const { createMovementGroupConversation } = await import('@/api/messagesClient');
       return createMovementGroupConversation(movementId, selected, { accessToken });
     },
     onSuccess: (conversation) => {
@@ -3749,7 +3757,7 @@ export default function MovementDetails() {
                   if (!token) throw new Error('Missing access token. Please log in again.');
                   await deleteMovement(movementId, { accessToken: token });
                   queryClient.invalidateQueries({ queryKey: ['movements'] });
-                  queryClient.invalidateQueries({ queryKey: ['movement', movementId] });
+                  queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(movementId) });
                   setDeleteMovementOpen(false);
                   navigate('/');
                 } catch (err) {

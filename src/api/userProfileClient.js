@@ -17,6 +17,7 @@ export async function upsertMyProfile(payload, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/me/profile`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -51,6 +52,7 @@ export async function fetchMyProfile(options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/profile${includeMeta ? '?include_meta=1' : ''}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -81,6 +83,7 @@ export async function fetchPublicProfileByUsername(username, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/profiles/username/${encodeURIComponent(handle)}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -109,6 +112,7 @@ export async function fetchPublicProfileByEmail(email, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/profiles/email/${encodeURIComponent(normalized)}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,

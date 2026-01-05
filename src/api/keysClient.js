@@ -21,6 +21,7 @@ export async function upsertMyPublicKey(publicKey, options) {
 
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -44,6 +45,7 @@ export async function fetchPublicKey(email, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/public-keys/${encoded}`;
 
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...authHeaders(accessToken),

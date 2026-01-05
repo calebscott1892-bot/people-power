@@ -87,6 +87,7 @@ export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken, 
 
   const url = `${base}/movements${params.toString() ? `?${params.toString()}` : ''}`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${String(accessToken)}` } : {}),
@@ -110,6 +111,7 @@ export async function fetchMyFollowedMovements(options) {
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/followed-movements`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -140,6 +142,7 @@ export async function fetchMovementById(id, options) {
 
   try {
     const res = await fetch(directUrl, {
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
@@ -179,6 +182,7 @@ export async function createMovement(payload, options) {
 
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -214,6 +218,7 @@ export async function deleteMovement(id, options) {
 
   const res = await fetch(url, {
     method: 'DELETE',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
@@ -241,6 +246,7 @@ export async function updateMovement(id, payload, options) {
 
   const res = await fetch(url, {
     method: 'PATCH',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',

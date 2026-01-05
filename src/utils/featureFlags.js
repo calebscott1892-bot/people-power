@@ -15,12 +15,13 @@ function stableHash(str) {
 
 let _flagsCache = null;
 let _flagsCacheTime = 0;
-const CACHE_MS = 60 * 1000;
+const CACHE_MS = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.PROD) ? 0 : 60 * 1000;
 
 async function fetchFlags() {
-  if (_flagsCache && Date.now() - _flagsCacheTime < CACHE_MS) return _flagsCache;
+  if (CACHE_MS > 0 && _flagsCache && Date.now() - _flagsCacheTime < CACHE_MS) return _flagsCache;
   const baseUrl = getServerBaseUrl();
   const res = await fetch(`${baseUrl}/feature-flags`, {
+    cache: 'no-store',
     headers: { Accept: 'application/json' },
   });
   if (!res.ok) throw new Error('Failed to fetch feature flags');

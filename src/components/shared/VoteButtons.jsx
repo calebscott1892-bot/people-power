@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchMovementVotes, voteMovement } from '@/api/movementsClient';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
+import { queryKeys } from '@/lib/queryKeys';
 
 export default function VoteButtons({ movementId, movement, className = '' }) {
   const { session } = useAuth();
@@ -22,7 +23,7 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
     isLoading,
     isError,
   } = useQuery({
-    queryKey: ['movementVotes', id],
+    queryKey: queryKeys.movements.votes(id),
     enabled: !!id && !!accessToken,
     queryFn: async () => {
       return fetchMovementVotes(id, { accessToken });
@@ -40,10 +41,10 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
       return voteMovement(id, nextValue, { accessToken });
     },
     onSuccess: (next) => {
-      queryClient.setQueryData(['movementVotes', id], next);
+      queryClient.setQueryData(queryKeys.movements.votes(id), next);
 
       // Best-effort cache sync for movement detail + list (if they carry counts).
-      queryClient.setQueryData(['movement', id], (old) => {
+      queryClient.setQueryData(queryKeys.movements.detail(id), (old) => {
         if (!old || typeof old !== 'object') return old;
         return {
           ...old,

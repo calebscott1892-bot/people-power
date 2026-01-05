@@ -35,6 +35,7 @@ export async function fetchMyMovementFollow(movementId, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/follow`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -59,6 +60,7 @@ export async function setMyMovementFollow(movementId, following, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/follow`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -80,7 +82,7 @@ export async function fetchMovementFollowersCount(movementId) {
   if (!id) throw new Error('Movement ID is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/follow/count`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
   const body = await safeReadJson(res);
 
   if (!res.ok) {

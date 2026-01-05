@@ -18,8 +18,8 @@ import toast from 'react-hot-toast';
 import Filter from 'bad-words';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
+import { queryKeys } from '@/lib/queryKeys';
 import { ALLOWED_IMAGE_MIME_TYPES, ALLOWED_UPLOAD_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
-import BackButton from '@/components/shared/BackButton';
 
 const TAG_OPTIONS = [
   // Movement-type categories requested
@@ -374,13 +374,26 @@ export default function CreateMovement() {
 
       // Update Home cache immediately so the new movement appears without reload
       try {
+        // Patch any non-paginated movement lists
         queryClient.setQueryData(['movements'], (old) => {
           const arr = Array.isArray(old) ? old : [];
           const id = created?.id ?? created?._id;
           const exists = id ? arr.some((m) => (m?.id ?? m?._id) === id) : false;
           return exists ? arr : [created, ...arr];
         });
-        await queryClient.invalidateQueries({ queryKey: ['movements', 'feed'] });
+
+        // Patch the Home infinite feed (pages)
+        queryClient.setQueryData(queryKeys.movements.feed(), (old) => {
+          if (!old || typeof old !== 'object' || !Array.isArray(old.pages)) return old;
+          const createdId = created?.id ?? created?._id;
+          const firstPage = Array.isArray(old.pages[0]) ? old.pages[0] : [];
+          const exists = createdId ? firstPage.some((m) => (m?.id ?? m?._id) === createdId) : false;
+          if (exists) return old;
+          const nextFirstPage = [created, ...firstPage];
+          return { ...old, pages: [nextFirstPage, ...old.pages.slice(1)] };
+        });
+
+        await queryClient.invalidateQueries({ queryKey: queryKeys.movements.feed() });
       } catch (e) {
         logError(e, 'Create movement cache update failed');
       }

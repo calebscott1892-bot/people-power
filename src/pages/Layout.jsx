@@ -15,6 +15,7 @@ import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
+import { queryKeys } from '@/lib/queryKeys';
 import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
 import IntroScreen from '@/components/home/IntroScreen';
@@ -92,7 +93,7 @@ function LayoutContent({ children }) {
   const accessToken = session?.access_token ? String(session.access_token) : null;
 
   const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
-    queryKey: ['userProfile', profileEmail],
+    queryKey: queryKeys.userProfile.me(profileEmail),
     enabled: !!profileEmail && !!accessToken,
     retry: 1,
     queryFn: async () => {
@@ -244,7 +245,7 @@ function LayoutContent({ children }) {
           profileEmail={profileEmail}
           accessToken={accessToken}
           onMarkedSeen={(latestVersion) => {
-            queryClient.setQueryData(['userProfile', profileEmail], (prev) => {
+            queryClient.setQueryData(queryKeys.userProfile.me(profileEmail), (prev) => {
               if (!prev || typeof prev !== 'object') return prev;
               return { ...prev, last_seen_update_version: latestVersion };
             });
@@ -260,7 +261,7 @@ function LayoutContent({ children }) {
         accessToken={accessToken}
         onMarkedSeen={(latestVersion) => {
           if (!profileEmail) return;
-          queryClient.setQueryData(['userProfile', profileEmail], (prev) => {
+          queryClient.setQueryData(queryKeys.userProfile.me(profileEmail), (prev) => {
             if (!prev || typeof prev !== 'object') return prev;
             return { ...prev, last_seen_update_version: latestVersion };
           });
@@ -439,7 +440,7 @@ function LayoutContent({ children }) {
         profileEmail={profileEmail}
         hasSeen={hasSeenTutorialV2}
         onCompleted={() => {
-          queryClient.setQueryData(['userProfile', profileEmail], (prev) => {
+          queryClient.setQueryData(queryKeys.userProfile.me(profileEmail), (prev) => {
             if (!prev || typeof prev !== 'object') return prev;
             return { ...prev, has_seen_tutorial_v2: true };
           });

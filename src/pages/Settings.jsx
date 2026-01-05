@@ -8,6 +8,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { useAuth } from '@/auth/AuthProvider';
 import { fetchMyBlocks, unblockUser } from '@/api/blocksClient';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
+import { queryKeys } from '@/lib/queryKeys';
 
 export default function Settings() {
   const { user, session, isEmailVerified } = useAuth();
@@ -15,7 +16,7 @@ export default function Settings() {
   const queryClient = useQueryClient();
 
   const { data: myBlocks, isLoading } = useQuery({
-    queryKey: ['myBlocks', user?.email],
+    queryKey: queryKeys.blocks.mine(user?.email),
     queryFn: async () => fetchMyBlocks({ accessToken }),
     enabled: !!user?.email && !!accessToken,
   });
@@ -32,7 +33,7 @@ export default function Settings() {
       return unblockUser(normalized, { accessToken });
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['myBlocks', user?.email] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.blocks.mine(user?.email) });
       toast.success('User unblocked');
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to unblock user')),

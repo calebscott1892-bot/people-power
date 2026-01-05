@@ -20,6 +20,7 @@ import { logError } from '@/utils/logError';
 import { toastFriendlyError } from '@/utils/toastErrors';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
+import { queryKeys } from '@/lib/queryKeys';
 import {
   Dialog,
   DialogContent,
@@ -141,7 +142,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const accessToken = session?.access_token ? String(session.access_token) : null;
       if (!accessToken) throw new Error('Please sign in to update your profile');
 
-      await upsertMyProfile(data, { accessToken });
+      const updated = await upsertMyProfile(data, { accessToken });
 
       if (allowLocalProfileFallback) {
         // Keep local cache in sync for migration-mode reads.
@@ -158,9 +159,16 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
           logError(e, 'Profile cache update failed');
         }
       }
+
+      return updated || null;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['userProfile'] });
+    onSuccess: (updated) => {
+      // Update the canonical “my profile” cache immediately, then refetch any
+      // other profile views that may rely on the same underlying data.
+      if (userEmail) {
+        queryClient.setQueryData(queryKeys.userProfile.me(userEmail), updated);
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.userProfile.any() });
       try {
         localStorage.setItem('peoplepower_ai_opt_in', aiEnabled ? 'true' : 'false');
       } catch {

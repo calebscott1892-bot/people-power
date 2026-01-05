@@ -52,6 +52,8 @@ import {
   MAX_UPLOAD_BYTES,
   validateFileUpload,
 } from '@/utils/uploadLimits';
+import MessagesComingSoon from '@/pages/MessagesComingSoon';
+import { queryKeys } from '@/lib/queryKeys';
 
 function safeJsonParse(text) {
   try {
@@ -256,7 +258,7 @@ function EncryptedMessage({ myEmail, senderPublicKey, encryptedPayload, messageI
   return <MessageBody plaintext={text} messageId={messageId} />;
 }
 
-export default function Messages() {
+function MessagesInner() {
   const { user, session, loading } = useAuth();
   const queryClient = useQueryClient();
   const accessToken = session?.access_token || null;
@@ -312,7 +314,7 @@ export default function Messages() {
   }, [groupAvatarPreview]);
 
   const { data: myBlocks } = useQuery({
-    queryKey: ['myBlocks', myEmailNormalized],
+    queryKey: queryKeys.blocks.mine(myEmailNormalized),
     queryFn: () => fetchMyBlocks({ accessToken }),
     enabled: !!accessToken,
   });
@@ -2562,4 +2564,10 @@ export default function Messages() {
       </Dialog>
     </div>
   );
+}
+
+export default function Messages() {
+  // Hard-disable messaging runtime in production builds.
+  if (import.meta?.env?.PROD) return <MessagesComingSoon />;
+  return <MessagesInner />;
 }

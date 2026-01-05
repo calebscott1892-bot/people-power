@@ -56,6 +56,7 @@ async function authedFetch(url, { accessToken, method = 'GET', body } = {}) {
 
   const res = await fetch(url, {
     method,
+    cache: 'no-store',
     headers,
     body: body != null ? JSON.stringify(body) : undefined,
   });

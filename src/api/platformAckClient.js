@@ -76,6 +76,7 @@ export async function fetchMyPlatformAcknowledgment(options) {
 
   try {
     const res = await fetch(url, {
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         ...authHeaders(accessToken),
@@ -113,6 +114,7 @@ export async function acceptPlatformAcknowledgment(options) {
   try {
     const res = await fetch(url, {
       method: 'POST',
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',

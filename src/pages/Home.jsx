@@ -8,6 +8,7 @@ import { listNotificationsForUserPage } from '@/api/notificationsClient';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { fetchMovementsPage } from '@/api/movementsClient';
 import { fetchMyProfile, upsertMyProfile } from '@/api/userProfileClient';
+import { queryKeys } from '@/lib/queryKeys';
 import { Plus, Zap, Loader2, Sparkles } from 'lucide-react';
 import { motion, useReducedMotion } from 'framer-motion';
 import FilterTabs from '../components/shared/FilterTabs';
@@ -374,7 +375,7 @@ export default function Home() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['movements', 'feed'],
+    queryKey: queryKeys.movements.feed(),
     queryFn: ({ pageParam = 0 }) =>
       fetchMovementsPage({
         limit: MOVEMENTS_PAGE_SIZE,
@@ -390,8 +391,11 @@ export default function Home() {
     },
   });
 
+  const allowOfflineMovementCache = !!import.meta?.env?.DEV;
+
   // Cache movements to localStorage on successful fetch
   useEffect(() => {
+    if (!allowOfflineMovementCache) return;
     const pages = Array.isArray(movementsPages?.pages) ? movementsPages.pages : [];
     const all = pages.flatMap((p) => (Array.isArray(p) ? p : []));
     if (all.length > 0 && backendStatus === 'healthy') {
@@ -440,11 +444,16 @@ export default function Home() {
         // Ignore cache write failures (storage disabled or full).
       }
     }
-  }, [movementsPages, backendStatus]);
+  }, [movementsPages, backendStatus, allowOfflineMovementCache]);
 
   // Load from cache only when truly offline.
   // (When degraded or errored, show the error state rather than silently falling back.)
   useEffect(() => {
+    if (!allowOfflineMovementCache) {
+      setOfflineMovements(null);
+      setShowOfflineLabel(false);
+      return;
+    }
     if (backendStatus === 'offline') {
       try {
         const cached = getPageCache(movementsCacheKey);
@@ -460,13 +469,13 @@ export default function Home() {
 
     setOfflineMovements(null);
     setShowOfflineLabel(false);
-  }, [backendStatus]);
+  }, [backendStatus, allowOfflineMovementCache]);
 
   const rawMovements = useMemo(() => {
-    if (offlineMovements) return offlineMovements;
+    if (allowOfflineMovementCache && offlineMovements) return offlineMovements;
     const pages = Array.isArray(movementsPages?.pages) ? movementsPages.pages : [];
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
-  }, [movementsPages, offlineMovements]);
+  }, [movementsPages, offlineMovements, allowOfflineMovementCache]);
 
   const { data: leadershipCounts = {} } = useQuery({
     queryKey: ['leadershipCounts', 'movement_creator'],

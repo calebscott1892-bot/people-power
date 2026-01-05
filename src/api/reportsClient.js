@@ -142,6 +142,7 @@ export async function createReport(payload, options) {
   try {
     const res = await fetch(url, {
       method: 'POST',
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',
@@ -180,6 +181,7 @@ export async function fetchReports(params, options) {
 
   try {
     const res = await fetch(url, {
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
@@ -217,6 +219,7 @@ export async function updateReport(id, payload, options) {
   try {
     const res = await fetch(url, {
       method: 'PATCH',
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',

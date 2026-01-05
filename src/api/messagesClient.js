@@ -369,6 +369,7 @@ async function apiFetch(path, { method = 'GET', accessToken = null, body } = {})
   const hasBody = body !== undefined;
   const res = await fetch(url, {
     method,
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
@@ -395,6 +396,7 @@ export async function fetchConversations(options) {
 
   try {
     const res = await fetch(url, {
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         ...authHeaders(accessToken),

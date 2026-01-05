@@ -9,6 +9,7 @@ import { sanitizePublicLocation } from '@/utils/locationPrivacy';
 import ErrorState from '@/components/shared/ErrorState';
 import { getPageCache, setPageCache } from '@/utils/pageCache';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '@/utils/backendStatus';
+import { queryKeys } from '@/lib/queryKeys';
 
 const SEARCH_STATE_CACHE_KEY = 'pp_search_state_v1';
 
@@ -133,6 +134,7 @@ export default function Search() {
   const { user, session } = useAuth();
   const accessToken = session?.access_token ? String(session.access_token) : null;
   const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
+  const allowOfflineResultsCache = !!import.meta?.env?.DEV;
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
   const [city, setCity] = useState('');
@@ -179,7 +181,7 @@ export default function Search() {
   const usersCacheKey = useMemo(() => makeUsersCacheKey({ q: trimmed }), [trimmed]);
 
   const { data: myProfile } = useQuery({
-    queryKey: ['myProfile', user?.email],
+    queryKey: queryKeys.userProfile.me(user?.email),
     enabled: !!accessToken,
     queryFn: async () => {
       const profile = await fetchMyProfile({ accessToken });
@@ -215,36 +217,42 @@ export default function Search() {
 
   useEffect(() => {
     if (!movementEnabled) return;
+    if (!allowOfflineResultsCache) return;
     if (movementsLoading || movementsError) return;
     if (!Array.isArray(movementResults)) return;
     setPageCache(movementsCacheKey, movementResults.slice(0, 20));
-  }, [movementEnabled, movementsLoading, movementsError, movementResults, movementsCacheKey]);
+  }, [movementEnabled, movementsLoading, movementsError, movementResults, movementsCacheKey, allowOfflineResultsCache]);
 
   useEffect(() => {
     if (!userEnabled) return;
+    if (!allowOfflineResultsCache) return;
     if (usersLoading || usersError) return;
     if (!Array.isArray(userResults)) return;
     setPageCache(usersCacheKey, userResults.slice(0, 20));
-  }, [userEnabled, usersLoading, usersError, userResults, usersCacheKey]);
+  }, [userEnabled, usersLoading, usersError, userResults, usersCacheKey, allowOfflineResultsCache]);
 
   const cachedMovementResults = useMemo(() => {
+    if (!allowOfflineResultsCache) return null;
     if (!movementEnabled) return null;
     const cached = getPageCache(movementsCacheKey);
     return Array.isArray(cached) ? cached : null;
-  }, [movementEnabled, movementsCacheKey]);
+  }, [movementEnabled, movementsCacheKey, allowOfflineResultsCache]);
 
   const cachedUserResults = useMemo(() => {
+    if (!allowOfflineResultsCache) return null;
     if (!userEnabled) return null;
     const cached = getPageCache(usersCacheKey);
     return Array.isArray(cached) ? cached : null;
-  }, [userEnabled, usersCacheKey]);
+  }, [userEnabled, usersCacheKey, allowOfflineResultsCache]);
 
   const isOffline = backendStatus === 'offline';
 
   const showSavedMovements = Boolean(
-    isOffline && movementsError && !movementsLoading && cachedMovementResults && cachedMovementResults.length > 0
+    allowOfflineResultsCache && isOffline && movementsError && !movementsLoading && cachedMovementResults && cachedMovementResults.length > 0
   );
-  const showSavedUsers = Boolean(isOffline && usersError && !usersLoading && cachedUserResults && cachedUserResults.length > 0);
+  const showSavedUsers = Boolean(
+    allowOfflineResultsCache && isOffline && usersError && !usersLoading && cachedUserResults && cachedUserResults.length > 0
+  );
 
   const hasQuery = Boolean(trimmed || locationActive);
   const showEmptyPrompt = !hasQuery;

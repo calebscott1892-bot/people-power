@@ -18,7 +18,6 @@ import { useAuth } from '@/auth/AuthProvider';
 import { fetchMyFollowers, fetchMyFollowingUsers, fetchUserFollow, fetchUserFollowers, fetchUserFollowingUsers, setUserFollow } from '@/api/userFollowsClient';
 import { upsertNotification } from '@/api/notificationsClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
-import { createConversation } from '@/api/messagesClient';
 import { fetchOrCreateUserChallengeStats } from '@/api/userChallengeStatsClient';
 import { giftPoints } from '@/api/pointGiftsClient';
 import { fetchMovementsPage } from '@/api/movementsClient';
@@ -28,6 +27,7 @@ import { isAdmin as isAdminEmail } from '@/utils/staff';
 import FollowListDialog from '@/components/profile/FollowListDialog';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
+import { queryKeys } from '@/lib/queryKeys';
 
 function getMovementAuthorLabel(movement) {
   const displayName = String(
@@ -83,7 +83,7 @@ export default function UserProfile() {
   }, [user]);
 
   const { data: userProfile, isLoading: profileLoading } = useQuery({
-    queryKey: ['userProfile', profileEmail, profileUsername],
+    queryKey: queryKeys.userProfile.public({ email: profileEmail, username: profileUsername }),
     queryFn: async () => {
       if (profileEmail) {
         if (!accessToken) return null;
@@ -115,13 +115,13 @@ export default function UserProfile() {
   }, [resolvedProfileEmail]);
 
   const { data: followState } = useQuery({
-    queryKey: ['userFollow', resolvedProfileEmail, currentUser?.email],
+    queryKey: queryKeys.follows.userFollow(resolvedProfileEmail, currentUser?.email),
     queryFn: async () => fetchUserFollow(resolvedProfileEmail, { accessToken }),
     enabled: !!accessToken && !!resolvedProfileEmail && !!currentUser?.email,
   });
 
   const { data: followerListState, isLoading: followerListLoading } = useQuery({
-    queryKey: ['userFollowers', resolvedProfileEmail, currentUser?.email],
+    queryKey: queryKeys.follows.userFollowers(resolvedProfileEmail, currentUser?.email),
     queryFn: async () => {
       if (!resolvedProfileEmail) return { allowed: true, users: [] };
       if (isOwnProfile) {
@@ -134,7 +134,7 @@ export default function UserProfile() {
   });
 
   const { data: followingListState, isLoading: followingListLoading } = useQuery({
-    queryKey: ['userFollowingUsers', resolvedProfileEmail, currentUser?.email],
+    queryKey: queryKeys.follows.userFollowingUsers(resolvedProfileEmail, currentUser?.email),
     queryFn: async () => {
       if (!resolvedProfileEmail) return { allowed: true, users: [] };
       if (isOwnProfile) {
@@ -147,9 +147,9 @@ export default function UserProfile() {
   });
 
   const { data: myBlocks } = useQuery({
-    queryKey: ['myBlocks', accessToken],
+    queryKey: queryKeys.blocks.mine(currentUser?.email),
     queryFn: async () => fetchMyBlocks({ accessToken }),
-    enabled: !!accessToken,
+    enabled: !!accessToken && !!currentUser?.email,
   });
 
   const blockedEmails = useMemo(() => {
@@ -169,7 +169,7 @@ export default function UserProfile() {
   }, [followState, resolvedProfileEmail, currentUser?.email]);
 
   const { data: userMovements = [] } = useQuery({
-    queryKey: ['userMovements', resolvedProfileEmail],
+    queryKey: queryKeys.movements.byUser(resolvedProfileEmail),
     queryFn: async () => {
       const email = resolvedProfileEmail ? String(resolvedProfileEmail) : null;
       if (!email) return [];
@@ -208,7 +208,7 @@ export default function UserProfile() {
   }, [userMovements, userProfile?.created_at, userProfile?.created_date]);
 
   const { data: participatedMovements = [] } = useQuery({
-    queryKey: ['participatedMovements', resolvedProfileEmail],
+    queryKey: queryKeys.movements.participated(resolvedProfileEmail),
     queryFn: async () => {
       if (!resolvedProfileEmail) return [];
       // Participation history is currently backed by a legacy local stub (entities.Participation).
@@ -293,20 +293,23 @@ export default function UserProfile() {
     onSuccess: async (next) => {
       const justFollowed = !!next?.following && !isFollowing;
       setIsFollowing(!!next?.following);
-      await queryClient.invalidateQueries({ queryKey: ['userFollow', resolvedProfileEmail, currentUser?.email] });
-      await queryClient.invalidateQueries({ queryKey: ['userFollowers', resolvedProfileEmail, currentUser?.email] });
-      await queryClient.invalidateQueries({ queryKey: ['userFollowingUsers', resolvedProfileEmail, currentUser?.email] });
-      await queryClient.invalidateQueries({ queryKey: ['myFollowers', currentUser?.email] });
-      await queryClient.invalidateQueries({ queryKey: ['myFollowingUsers', currentUser?.email] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.follows.userFollow(resolvedProfileEmail, currentUser?.email) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.follows.userFollowers(resolvedProfileEmail, currentUser?.email) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.follows.userFollowingUsers(resolvedProfileEmail, currentUser?.email) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.follows.myFollowers(currentUser?.email) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.follows.myFollowingUsers(currentUser?.email) });
 
       if (justFollowed && currentUser?.email && resolvedProfileEmail) {
         try {
           const actorEmail = String(currentUser.email).trim().toLowerCase();
           const recipient = String(resolvedProfileEmail).trim().toLowerCase();
           if (actorEmail && recipient && actorEmail !== recipient) {
+            const cachedMyProfile = queryClient.getQueryData(queryKeys.userProfile.me(actorEmail));
             const rawName =
-              (currentUser?.user_metadata && (currentUser.user_metadata.full_name || currentUser.user_metadata.name)) || '';
-            const actorName = rawName && !String(rawName).includes('@') ? String(rawName).trim() : null;
+              (cachedMyProfile?.display_name || cachedMyProfile?.username || '')
+                ? String(cachedMyProfile?.display_name || cachedMyProfile?.username || '').trim()
+                : '';
+            const actorName = rawName && !rawName.includes('@') ? rawName : null;
             upsertNotification({
               recipient_email: recipient,
               type: 'follow',
@@ -336,7 +339,7 @@ export default function UserProfile() {
       return blockUser(resolvedProfileEmail, { accessToken });
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['myBlocks', accessToken] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.blocks.mine(currentUser?.email) });
       toast.success('User blocked');
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to block user')),
@@ -349,7 +352,7 @@ export default function UserProfile() {
       return unblockUser(resolvedProfileEmail, { accessToken });
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['myBlocks', accessToken] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.blocks.mine(currentUser?.email) });
       toast.success('User unblocked');
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to unblock user')),
@@ -576,7 +579,7 @@ export default function UserProfile() {
                     </Button>
                     <Button
                       onClick={async () => {
-                        const dmDisabled = true;
+                        const dmDisabled = !!import.meta?.env?.PROD;
                         if (dmDisabled) {
                           toast.message(
                             'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
@@ -587,6 +590,7 @@ export default function UserProfile() {
                         // TODO: Re-enable direct messaging by removing this gate.
                         try {
                           if (!accessToken) throw new Error('Sign in to message');
+                          const { createConversation } = await import('@/api/messagesClient');
                           const convo = await createConversation(resolvedProfileEmail, { accessToken });
                           const id = convo?.id ? String(convo.id) : null;
                           navigate(id ? `/Messages?conversationId=${encodeURIComponent(id)}` : '/Messages');

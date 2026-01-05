@@ -39,6 +39,14 @@ The frontend can be pointed at a different API base URL via:
 
 - `VITE_API_BASE_URL` (defaults to `http://localhost:3001`)
 
+### Dev database bootstrapping (Postgres)
+
+In development, the backend will **auto-create a minimal `movements` table** if your Postgres database is empty (no migrations applied yet). This prevents confusing `42P01` (“relation does not exist”) errors that would otherwise trigger dev-only fallback behavior.
+
+Also, when Postgres is available, the backend **does not** merge the built-in in-memory demo movement into DB results by default (to keep dev behavior close to production).
+
+- Opt-in to the old demo merge behavior with `DEV_ALLOW_MEMORY_MOVEMENT_MERGE=true` (dev-only).
+
 ### Cloudflare Worker API (new app-owned client surface)
 
 The newer `@/api/appClient` can be pointed at the Cloudflare Worker scaffold by setting:

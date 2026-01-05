@@ -24,6 +24,7 @@ export async function fetchMovementLocks(movementId, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/locks`;
   const res = await fetch(url, {
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
@@ -47,6 +48,7 @@ export async function setMovementLock(movementId, field, locked, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/locks`;
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',

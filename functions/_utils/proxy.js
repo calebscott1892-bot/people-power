@@ -16,11 +16,24 @@ export async function proxyRequest(context, { stripApiPrefix = false } = {}) {
   const { request, env } = context;
   const backendBase = resolveBackendBase(env);
 
+  const applyNoStoreHeaders = (headers) => {
+    const h = headers instanceof Headers ? headers : new Headers(headers || {});
+    h.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    h.set('Pragma', 'no-cache');
+    h.set('Expires', '0');
+    const vary = h.get('Vary');
+    if (!vary) h.set('Vary', 'Authorization');
+    else if (!vary.split(',').map((s) => s.trim().toLowerCase()).includes('authorization')) {
+      h.set('Vary', `${vary}, Authorization`);
+    }
+    return h;
+  };
+
   if (!backendBase) {
     // TODO: Cloudflare port pending – keep using Node server locally or set BACKEND_BASE_URL.
     return new Response(JSON.stringify({ error: 'Backend unavailable' }), {
       status: 503,
-      headers: { 'Content-Type': 'application/json' },
+      headers: applyNoStoreHeaders({ 'Content-Type': 'application/json' }),
     });
   }
 
@@ -49,7 +62,7 @@ export async function proxyRequest(context, { stripApiPrefix = false } = {}) {
       redirect: 'manual',
     });
 
-    const responseHeaders = new Headers(upstream.headers);
+    const responseHeaders = applyNoStoreHeaders(new Headers(upstream.headers));
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
@@ -58,7 +71,7 @@ export async function proxyRequest(context, { stripApiPrefix = false } = {}) {
   } catch {
     return new Response(JSON.stringify({ error: 'Upstream request failed' }), {
       status: 502,
-      headers: { 'Content-Type': 'application/json' },
+      headers: applyNoStoreHeaders({ 'Content-Type': 'application/json' }),
     });
   }
 }

@@ -15,6 +15,14 @@ function isDev() {
   }
 }
 
+function isProd() {
+  try {
+    return !!import.meta?.env?.PROD;
+  } catch {
+    return false;
+  }
+}
+
 function devLogOnce(kind, message) {
   if (!isDev()) return;
   if (kind === 'fallback') {
@@ -35,6 +43,16 @@ function isOnline() {
 }
 
 export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
+  // Messaging is currently disabled in production; do not open sockets.
+  if (isProd()) {
+    try {
+      if (typeof onStatus === 'function') onStatus('disabled');
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
   if (wsDisabledForSession) {
     try {
       if (typeof onStatus === 'function') onStatus('disabled');

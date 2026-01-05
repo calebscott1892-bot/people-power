@@ -7,7 +7,7 @@ async function fetchResearchFlags({ userId, movementId }) {
   if (movementId) params.push(`movement_id=${encodeURIComponent(movementId)}`);
   const baseUrl = getServerBaseUrl();
   const url = `${baseUrl}/research-flags${params.length ? '?' + params.join('&') : ''}`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
   if (!res.ok) throw new Error('Failed to fetch research flags');
   return res.json();
 }
