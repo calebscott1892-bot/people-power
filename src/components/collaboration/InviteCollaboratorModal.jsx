@@ -22,15 +22,17 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
   const queryClient = useQueryClient();
   const { session } = useAuth();
   const accessToken = session?.access_token || null;
+  const isDev = !!import.meta?.env?.DEV;
 
   const { data: allProfiles = [] } = useQuery({
     queryKey: ['allProfiles'],
     queryFn: () => entities.UserProfile.list('-created_date', 100),
-    enabled: open
+    enabled: isDev && open
   });
 
   // AI-powered skill matching
   React.useEffect(() => {
+    if (!isDev) return;
     if (open && movement && allProfiles.length > 0) {
       const movementTags = movement.tags || [];
       const scored = allProfiles
@@ -68,7 +70,7 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
       
       setSuggestions(scored);
     }
-  }, [open, movement, allProfiles, currentUser]);
+  }, [isDev, open, movement, allProfiles, currentUser]);
 
   const normalizeHandle = (value) => {
     const raw = value == null ? '' : String(value);
@@ -90,8 +92,8 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
       const handle = normalizeHandle(username);
       if (!handle) throw new Error('Please enter a username');
 
-      const profile = findProfileByUsername(handle);
-      if (!profile?.user_email) throw new Error('User not found');
+      const profile = isDev ? findProfileByUsername(handle) : null;
+      if (isDev && !profile?.user_email) throw new Error('User not found');
 
       const rateCheck = await checkActionAllowed({
         email: currentUser?.email ?? null,
@@ -108,20 +110,22 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
 
       // Best-effort notification. Don't block invite if this fails.
       try {
-        await upsertNotification(
-          {
-            recipient_email: profile.user_email,
-            type: 'movement_update',
-            actor_email: currentUser.email,
-            actor_name:
-              currentUser.full_name ||
-              currentUser.display_name ||
-              (currentUser.username ? `@${currentUser.username}` : null),
-            content_id: movementId,
-            content_title: 'invited you to collaborate',
-          },
-          { accessToken }
-        );
+        if (profile?.user_email) {
+          await upsertNotification(
+            {
+              recipient_email: profile.user_email,
+              type: 'movement_update',
+              actor_email: currentUser.email,
+              actor_name:
+                currentUser.full_name ||
+                currentUser.display_name ||
+                (currentUser.username ? `@${currentUser.username}` : null),
+              content_id: movementId,
+              content_title: 'invited you to collaborate',
+            },
+            { accessToken }
+          );
+        }
       } catch {
         // ignore
       }

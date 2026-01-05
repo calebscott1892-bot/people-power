@@ -8,6 +8,7 @@ import { fetchMyProfile } from '@/api/userProfileClient';
 import { sanitizePublicLocation } from '@/utils/locationPrivacy';
 import ErrorState from '@/components/shared/ErrorState';
 import { getPageCache, setPageCache } from '@/utils/pageCache';
+import { getCurrentBackendStatus, subscribeBackendStatus } from '@/utils/backendStatus';
 
 const SEARCH_STATE_CACHE_KEY = 'pp_search_state_v1';
 
@@ -131,10 +132,16 @@ function UserResult({ user }) {
 export default function Search() {
   const { user, session } = useAuth();
   const accessToken = session?.access_token ? String(session.access_token) : null;
+  const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
   const [city, setCity] = useState('');
   const [country, setCountry] = useState('');
+
+  useEffect(() => {
+    const unsub = subscribeBackendStatus(setBackendStatus);
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     const cached = getPageCache(SEARCH_STATE_CACHE_KEY);
@@ -232,10 +239,12 @@ export default function Search() {
     return Array.isArray(cached) ? cached : null;
   }, [userEnabled, usersCacheKey]);
 
+  const isOffline = backendStatus === 'offline';
+
   const showSavedMovements = Boolean(
-    movementsError && !movementsLoading && cachedMovementResults && cachedMovementResults.length > 0
+    isOffline && movementsError && !movementsLoading && cachedMovementResults && cachedMovementResults.length > 0
   );
-  const showSavedUsers = Boolean(usersError && !usersLoading && cachedUserResults && cachedUserResults.length > 0);
+  const showSavedUsers = Boolean(isOffline && usersError && !usersLoading && cachedUserResults && cachedUserResults.length > 0);
 
   const hasQuery = Boolean(trimmed || locationActive);
   const showEmptyPrompt = !hasQuery;

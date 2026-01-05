@@ -23,6 +23,7 @@ import {
 const RAW_API_BASE_URL = (import.meta?.env?.VITE_APP_API_BASE_URL || '').trim();
 const ENABLE_REMOTE = RAW_API_BASE_URL.length > 0;
 const API_BASE_URL = RAW_API_BASE_URL === 'relative' ? '' : RAW_API_BASE_URL;
+const IS_PROD = !!import.meta?.env?.PROD;
 
 function joinUrl(base, path) {
 	const b = String(base || '').replace(/\/$/, '');
@@ -115,6 +116,52 @@ function createRemoteEntities(baseUrl) {
 	);
 }
 
+function createBlockedEntities(reason) {
+	const error = new Error(reason);
+	const blockedApi = {
+		list: async () => {
+			throw error;
+		},
+		filter: async () => {
+			throw error;
+		},
+		create: async () => {
+			throw error;
+		},
+		update: async () => {
+			throw error;
+		},
+		delete: async () => {
+			throw error;
+		},
+	};
+
+	return new Proxy(
+		{},
+		{
+			get(_target, prop) {
+				if (prop === 'then') return undefined;
+				if (typeof prop !== 'string') return blockedApi;
+				return blockedApi;
+			},
+		}
+	);
+}
+
+function createBlockedIntegrations(reason) {
+	const error = new Error(reason);
+	return {
+		Core: {
+			InvokeLLM: async () => {
+				throw error;
+			},
+			UploadFile: async () => {
+				throw error;
+			},
+		},
+	};
+}
+
 function createRemoteIntegrations(baseUrl) {
 	return {
 		Core: {
@@ -161,9 +208,17 @@ const remote = ENABLE_REMOTE
 		}
 	: null;
 
+const prodBlockedReason =
+	'[PeoplePower] Entities API is not configured for this production build. ' +
+	'This app will not fall back to local stub persistence in production. ' +
+	'Set VITE_APP_API_BASE_URL to your /api/entities-capable backend (Worker), ' +
+	'or disable features that depend on entities.';
+
 export const auth = remote?.auth ?? localAuth;
-export const entities = remote?.entities ?? localEntities;
-export const integrations = remote?.integrations ?? localIntegrations;
+export const entities =
+	remote?.entities ?? (IS_PROD ? createBlockedEntities(prodBlockedReason) : localEntities);
+export const integrations =
+	remote?.integrations ?? (IS_PROD ? createBlockedIntegrations(prodBlockedReason) : localIntegrations);
 
 export const app = { auth, entities, integrations };
 
