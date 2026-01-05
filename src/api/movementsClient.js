@@ -198,7 +198,8 @@ export async function createMovement(payload, options) {
       (body && typeof body === 'object' && (body.error || body.message)) || null;
     const message =
       messageFromBody ? String(messageFromBody) : `Failed to create movement: ${res.status}`;
-    throw new Error(message);
+    const requestId = body && typeof body === 'object' && body.request_id ? String(body.request_id) : '';
+    throw new Error(requestId ? `${message} (request_id: ${requestId})` : message);
   }
 
   if (body && typeof body === 'object') {

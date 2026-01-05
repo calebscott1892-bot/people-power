@@ -7088,7 +7088,10 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     }
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to check platform acknowledgment');
-    return reply.code(500).send({ error: 'Failed to validate acknowledgment' });
+    return reply.code(500).send({
+      error: 'Failed to validate acknowledgment',
+      request_id: request?.id ? String(request.id) : null,
+    });
   }
 
   const schema = z
@@ -7240,7 +7243,10 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     const result = await pool.query(insert.text, insert.values);
     const row = result.rows?.[0] || null;
     if (!row) {
-      return reply.code(500).send({ error: 'Failed to create movement' });
+      return reply.code(500).send({
+        error: 'Failed to create movement',
+        request_id: request?.id ? String(request.id) : null,
+      });
     }
     fastify.log.info(
       {
@@ -7268,7 +7274,10 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     fastify.log.error({ err: e }, 'Failed to create movement');
 
     if (isProd) {
-      return reply.code(500).send({ error: 'Failed to create movement' });
+      return reply.code(500).send({
+        error: 'Failed to create movement',
+        request_id: request?.id ? String(request.id) : null,
+      });
     }
 
     // Crash-proof fallback: if DB insert fails (bad connection/schema/etc),
