@@ -1,0 +1,82 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Dev: All (stable)",
+			"type": "shell",
+			"command": "npm run dev:all",
+			"isBackground": true,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": false
+			},
+			"runOptions": {
+				"runOn": "default"
+			}
+		},
+		{
+			"label": "Dev: Client (stable)",
+			"type": "shell",
+			"command": "npm run dev:client -- --host 127.0.0.1 --port 5173 --strictPort",
+			"isBackground": true,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": false
+			}
+		},
+		{
+			"label": "Dev: Server (stable)",
+			"type": "shell",
+			"command": "npm run dev:server",
+			"isBackground": true,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": false
+			}
+		},
+		{
+			"label": "Dev: Worker (stable)",
+			"type": "shell",
+			"command": "npm run dev:worker",
+			"isBackground": true,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": false
+			}
+		},
+		{
+			"label": "Dev: All (worker)",
+			"type": "shell",
+			"command": "npm run dev:all:worker",
+			"isBackground": true,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": false
+			}
+		},
+		{
+			"label": "Verify: Lint + Build",
+			"type": "shell",
+			"command": "npm run lint && npm run build",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Build: Frontend",
+			"type": "shell",
+			"command": "npm run build",
+			"group": "build"
+		}
+	]
+}
