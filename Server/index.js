@@ -1,4 +1,13 @@
 // --- Initialization: Fastify, dotenv, uuid ---
+console.log(
+  `PP_BOOT_PROBE=v1 commit=${String(
+    process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || 'unknown'
+  )
+    .trim()
+    .slice(0, 7)} node=${process.version} NODE_ENV=${String(
+    process.env.NODE_ENV || ''
+  )} DEMO_MODE=${String(process.env.DEMO_MODE || '')}`
+);
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
 /*
