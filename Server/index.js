@@ -6,6 +6,19 @@ console.log(
     process.env.DEMO_MODE || ''
   )} has_database_url=${!!process.env.DATABASE_URL} has_supabase_url=${!!process.env.SUPABASE_URL} has_supabase_anon_key=${!!process.env.SUPABASE_ANON_KEY}`
 );
+
+function bootFatal(err) {
+  const e = err instanceof Error ? err : new Error(String(err));
+  // Intentionally do not print env/config values here.
+  console.error(`[boot-fatal] ${e.name} ${e.message}`);
+  if (e.stack) console.error(e.stack);
+  process.exit(1);
+}
+
+// Single guarded startup wrapper: any uncaught boot-time failure logs clearly and exits 1.
+process.once('uncaughtException', bootFatal);
+process.once('unhandledRejection', bootFatal);
+
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
 /*
@@ -44,7 +57,22 @@ function requireDebugTokenOr404(request, reply) {
   return true;
 }
 
-const { sendEmail } = require('./email');
+// Optional module: email (gated).
+// If ENABLE_EMAIL is not explicitly true, stub sendEmail to avoid startup crashes.
+const ENABLE_EMAIL = String(process.env.ENABLE_EMAIL || '').trim().toLowerCase() === 'true';
+let sendEmail = async () => ({ ok: false, disabled: true });
+if (ENABLE_EMAIL) {
+  try {
+    const mod = require('./email');
+    if (typeof mod?.sendEmail !== 'function') {
+      throw new Error('Email module missing sendEmail export');
+    }
+    sendEmail = mod.sendEmail;
+  } catch (err) {
+    console.error('[email] disabled: failed to load email module');
+    console.error(err instanceof Error ? err.stack || err.message : String(err));
+  }
+}
 
 const fastify = require('fastify')({
   // NOTE: Safety: enforce a global payload ceiling to deter oversized bodies.
