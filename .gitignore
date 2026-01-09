@@ -24,4 +24,12 @@ dist-ssr
 *.sw?
 
 .env
+.env.*
 Server/.env
+
+# Ignore any Server env variants (keep Server/.env.example trackable)
+Server/.env.*
+
+!.env.example
+!.env.local.example
+!Server/.env.example

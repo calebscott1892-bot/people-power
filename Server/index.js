@@ -1,12 +1,10 @@
 // --- Initialization: Fastify, dotenv, uuid ---
 console.log(
-  `PP_BOOT_PROBE=v1 commit=${String(
-    process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || 'unknown'
-  )
+  `PP_BOOT=v1 commit=${String(process.env.RENDER_GIT_COMMIT || process.env.COMMIT_SHA || 'unknown')
     .trim()
-    .slice(0, 7)} node=${process.version} NODE_ENV=${String(
-    process.env.NODE_ENV || ''
-  )} DEMO_MODE=${String(process.env.DEMO_MODE || '')}`
+    .slice(0, 7)} node=${process.version} NODE_ENV=${String(process.env.NODE_ENV || '')} DEMO_MODE=${String(
+    process.env.DEMO_MODE || ''
+  )} has_database_url=${!!process.env.DATABASE_URL} has_supabase_url=${!!process.env.SUPABASE_URL} has_supabase_anon_key=${!!process.env.SUPABASE_ANON_KEY}`
 );
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
@@ -17,16 +15,6 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env') });
  * - If DEMO_MODE=false and Postgres is missing/unreachable, the server fails fast.
  */
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
-
-// Boot marker for deployed version diagnosis (MUST run before any DB connection attempt)
-const PP_SERVER_BUILD_MARKER = String(process.env.COMMIT_SHA || '').trim()
-  ? `COMMIT_SHA=${String(process.env.COMMIT_SHA).trim()}`
-  : 'PP_SERVER_BUILD=sslmode-parser-v2';
-console.info(
-  `[boot] ${PP_SERVER_BUILD_MARKER} node=${process.version} NODE_ENV=${String(
-    process.env.NODE_ENV || ''
-  )} DEMO_MODE=${DEMO_MODE} DATABASE_URL=${!!process.env.DATABASE_URL}`
-);
 
 // NOTE: Debug routes are a security footgun. Keep disabled unless explicitly enabled.
 // Guardrails:
@@ -73,6 +61,18 @@ const fastify = require('fastify')({
   disableRequestLogging: true,
 });
 const { v4: uuidv4 } = require('uuid');
+
+const ADMIN_ALERT_EMAILS = String(process.env.ADMIN_ALERT_EMAIL || '')
+  .split(',')
+  .map((s) => normalizeEmail(s))
+  .filter(Boolean);
+fastify.log.info(
+  {
+    admin_alerts_enabled: ADMIN_ALERT_EMAILS.length > 0,
+    admin_alert_recipients: ADMIN_ALERT_EMAILS.length,
+  },
+  '[email] admin alert configuration'
+);
 
 // ✅ CORS: explicitly allow the SPA origins (prod + dev).
 // Registered BEFORE any routes so headers apply to 4xx/5xx as well.
@@ -3040,6 +3040,7 @@ function memoryFindCollaboratorById(collabId) {
 function memoryUpsertCollaborator(movementId, record) {
   const id = String(movementId || '').trim();
   if (!id) return null;
+  const opts = {};
   const list = memoryCollaboratorsByMovement.get(id) || [];
   const next = Array.isArray(list) ? [...list] : [];
   const idx = next.findIndex((c) => String(c?.id) === String(record?.id));
@@ -3396,7 +3397,7 @@ function setMemoryCommentSettings(movementId, patch) {
   return next;
 }
 
-async function getMovementOwnerEmail(movementId) {
+async function getMovementOwnerEmail(movementId, opts) {
   const id = String(movementId || '').trim();
   if (!id) return null;
 
@@ -3407,7 +3408,8 @@ async function getMovementOwnerEmail(movementId) {
   try {
     const res = await pool.query('SELECT author_email FROM movements WHERE id = $1 LIMIT 1', [id]);
     return normalizeEmail(res.rows?.[0]?.author_email);
-  } catch {
+  } catch (e) {
+    if (!DEMO_MODE && opts?.strict) throw e;
     return null;
   }
 }
@@ -4498,6 +4500,7 @@ fastify.post('/platform-acknowledgment/me', async (request, reply) => {
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
   if (!hasDatabaseUrl) {
+    if (blockMemoryFallbackInProd(request, reply, 'platform acknowledgment record')) return;
     memoryPlatformAcks.set(email, { accepted_at: nowIso() });
     return reply.send({ ok: true });
   }
@@ -5407,7 +5410,7 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
   let ownerEmail;
   try {
     blockSets = await getUserBlockSets(email);
-    ownerEmail = await getMovementOwnerEmail(id);
+    ownerEmail = await getMovementOwnerEmail(id, { strict: true });
   } catch (e) {
     if (!DEMO_MODE) return sendStorageUnavailable(request, reply, 'movement comment create preflight', e);
     throw e;
@@ -8130,8 +8133,7 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
     }
 
     if (row) {
-      const adminAlertEmail = String(process.env.ADMIN_ALERT_EMAIL || '').trim();
-      if (adminAlertEmail) {
+      if (ADMIN_ALERT_EMAILS.length) {
         const reportId = row?.id != null ? String(row.id) : 'unknown';
         const createdAt = row?.created_at ? String(row.created_at) : nowIso();
         const evidenceUrls = Array.isArray(row?.evidence_urls) ? row.evidence_urls : [];
@@ -8154,15 +8156,20 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
 
         // Best-effort: never block or fail the user's report submission.
         void (async () => {
-          try {
-            await sendEmail({
-              to: adminAlertEmail,
-              subject: 'New People Power report submitted',
-              text,
-            });
-          } catch (err) {
+          const results = await Promise.allSettled(
+            ADMIN_ALERT_EMAILS.map((to) =>
+              sendEmail({
+                to,
+                subject: 'New People Power report submitted',
+                text,
+              })
+            )
+          );
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i];
+            if (r.status === 'fulfilled') continue;
             request.log.error(
-              { err, report_id: reportId, admin_email: adminAlertEmail },
+              { err: r.reason, report_id: reportId, admin_email: ADMIN_ALERT_EMAILS[i] },
               'Admin alert email failed (report submitted)'
             );
           }
