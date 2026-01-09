@@ -74,23 +74,30 @@ fastify.log.info(
   '[email] admin alert configuration'
 );
 
-// ✅ CORS: explicitly allow the SPA origins (prod + dev).
+// ✅ CORS policy (minimal + predictable)
+// - Allow local Vite dev SPA origins so local dev doesn't fail preflights.
+// - Allow credentials (cookies / auth) and Authorization + Content-Type headers.
+// - In production, keep a strict allowlist (no wildcard with credentials).
 // Registered BEFORE any routes so headers apply to 4xx/5xx as well.
 const explicitCorsOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
 
+const DEV_CORS_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
+
 fastify.register(require('@fastify/cors'), {
   origin: (origin, cb) => {
     // allow curl / server-to-server (no origin)
     if (!origin) return cb(null, true);
+
+    // Explicit dev allowlist (avoid "any localhost port" surprises).
+    if (DEV_CORS_ORIGINS.has(origin)) return cb(null, true);
+
     try {
       const url = new URL(origin);
       const host = url.hostname;
-      const isLocalhost = host === 'localhost' || host === '127.0.0.1';
       const isAllowedHost =
-        isLocalhost ||
         host === 'peoplepower.app' ||
         host === 'www.peoplepower.app' ||
         host.endsWith('.pages.dev') ||
