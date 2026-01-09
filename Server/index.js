@@ -112,6 +112,11 @@ fastify.register(require('@fastify/cors'), {
   maxAge: 86400,
 });
 
+// API-only root (Render service is API-only; no SPA HTML here)
+fastify.get('/', async (_request, _reply) => {
+  return { ok: true, service: 'people-power-api', docs: ['/health', '/status'] };
+});
+
 // Healthcheck (keep simple and always registered)
 fastify.get('/health', async (_request, _reply) => {
   return {
