@@ -1,4 +1,4 @@
-// Crash-proof local stubs.
+// Crash-proof local fallback client.
 // Guarantees:
 // - exports: auth, entities, integrations
 // - all methods exist, never throw, never hit network
@@ -79,11 +79,11 @@ function newId() {
   } catch {
     // ignore
   }
-  return `stub_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  return `local_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 function getEntityStorageKey(entityName) {
-  return `peoplepower_stub_entities:${entityName}`;
+  return `peoplepower_local_entities:${entityName}`;
 }
 
 function loadEntityRecords(entityName) {
@@ -296,7 +296,7 @@ export const integrations = {
       // satisfy both shapes that might exist in the codebase
       return {
         text: '',
-        choices: [{ message: { content: 'Stubbed response from local dev.' } }],
+        choices: [{ message: { content: 'Local response from dev.' } }],
       };
     },
     UploadFile: async (...args) => {

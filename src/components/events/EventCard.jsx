@@ -22,7 +22,7 @@ export default function EventCard({ event, currentUser, isPast = false }) {
   const queryClient = useQueryClient();
 
   const { data: rsvp } = useQuery({
-    queryKey: ['stubRsvp', event.id, currentUser?.email],
+    queryKey: ['localRsvp', event.id, currentUser?.email],
     queryFn: async () => {
       if (!currentUser) return null;
       const rsvps = await entities.EventRSVP.filter(
@@ -56,8 +56,8 @@ export default function EventCard({ event, currentUser, isPast = false }) {
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['stubRsvp'] });
-      queryClient.invalidateQueries({ queryKey: ['stubEvents'] });
+      queryClient.invalidateQueries({ queryKey: ['localRsvp'] });
+      queryClient.invalidateQueries({ queryKey: ['localEvents'] });
       toast.success('RSVP updated!');
     },
     onError: (e) => {

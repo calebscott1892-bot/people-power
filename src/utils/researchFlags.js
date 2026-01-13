@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { getServerBaseUrl } from '@/api/serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 async function fetchResearchFlags({ userId, movementId }) {
   const params = [];
@@ -7,7 +8,7 @@ async function fetchResearchFlags({ userId, movementId }) {
   if (movementId) params.push(`movement_id=${encodeURIComponent(movementId)}`);
   const baseUrl = getServerBaseUrl();
   const url = `${baseUrl}/research-flags${params.length ? '?' + params.join('&') : ''}`;
-  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+  const res = await httpFetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
   if (!res.ok) throw new Error('Failed to fetch research flags');
   return res.json();
 }

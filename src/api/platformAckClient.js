@@ -1,5 +1,6 @@
 import { entities } from '@/api/appClient';
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -75,7 +76,7 @@ export async function fetchMyPlatformAcknowledgment(options) {
   }
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       cache: 'no-store',
       headers: {
         Accept: 'application/json',
@@ -112,7 +113,7 @@ export async function acceptPlatformAcknowledgment(options) {
   }
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'POST',
       cache: 'no-store',
       headers: {

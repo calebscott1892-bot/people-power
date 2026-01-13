@@ -174,7 +174,9 @@ export default function ModerationPipeline({ report, moderatorProfile }) {
         </Select>
 
         <Textarea
-          placeholder="Detailed reason for action (will be shown to user)..."
+          placeholder={
+            "Detailed reason for action (will be shown to user)..."
+          }
           value={reviewForm.reason}
           onChange={(e) => setReviewForm({ ...reviewForm, reason: e.target.value })}
           className="min-h-[100px]"

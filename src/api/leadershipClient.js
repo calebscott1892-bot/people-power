@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 async function safeReadJson(res) {
   try {
@@ -16,7 +17,7 @@ export async function fetchLeadershipCounts(roleType, options) {
   if (!rt) throw new Error('roleType is required');
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/leadership/counts?role_type=${encodeURIComponent(rt)}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -40,7 +41,7 @@ export async function checkLeadershipCap(roleType, options) {
   if (!rt) throw new Error('roleType is required');
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/leadership/cap?role_type=${encodeURIComponent(rt)}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -61,7 +62,7 @@ export async function registerLeadershipRole(roleType, movementId, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/leadership/register`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -89,7 +90,7 @@ export async function deactivateLeadershipRole(roleType, movementId, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/leadership/deactivate`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {

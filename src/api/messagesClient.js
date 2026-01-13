@@ -31,7 +31,7 @@
  * - POST /conversations/:id/read           -> { ok: true }
  * - POST /messages/:id/reactions           -> Message
  *
- * This module also supports a local fallback mode using `entities.*` (stub)
+ * This module also supports a local fallback mode using `entities.*`
  * for environments where the backend is unavailable.
  *
  * @typedef {Object} Conversation
@@ -69,6 +69,7 @@
 import { SERVER_BASE } from './serverBase';
 import { entities } from '@/api/appClient';
 import { allowLocalMessageFallback } from '@/utils/localFallback';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -238,7 +239,7 @@ async function localFetchMessagesPage(conversationId, { limit = 20, offset = 0, 
   const wanted = normalizeFields(fields);
 
   // Newest-first paging (matches server behavior), so UI can load "older" pages.
-  // Uses the enhanced stub filter signature: filter(where, sort, options).
+  // Uses the enhanced local filter signature: filter(where, sort, options).
   try {
     const page = await entities.Message.filter({ conversation_id: String(id) }, '-created_at', {
       limit,
@@ -367,7 +368,7 @@ async function localToggleReaction(myEmail, messageId, emoji) {
 async function apiFetch(path, { method = 'GET', accessToken = null, body } = {}) {
   const url = `${BASE_URL.replace(/\/$/, '')}${path.startsWith('/') ? '' : '/'}${path}`;
   const hasBody = body !== undefined;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method,
     cache: 'no-store',
     headers: {
@@ -395,7 +396,7 @@ export async function fetchConversations(options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations`;
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       cache: 'no-store',
       headers: {
         Accept: 'application/json',
@@ -436,7 +437,7 @@ export async function fetchConversationsPage(options) {
   if (fields) url.searchParams.set('fields', fields);
 
   try {
-    const res = await fetch(url.toString(), {
+    const res = await httpFetch(url.toString(), {
       headers: {
         Accept: 'application/json',
         ...authHeaders(accessToken),
@@ -469,7 +470,7 @@ export async function createConversation(recipientEmail, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations`;
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -496,7 +497,7 @@ export async function createGroupConversation(payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations/group`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -525,7 +526,7 @@ export async function createMovementGroupConversation(movementId, participantEma
     ? { participant_emails: participantEmails }
     : {};
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -550,7 +551,7 @@ export async function updateGroupSettings(conversationId, payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations/${encodeURIComponent(id)}/group`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'PATCH',
     headers: {
       Accept: 'application/json',
@@ -575,7 +576,7 @@ export async function updateGroupParticipants(conversationId, payload, options) 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations/${encodeURIComponent(id)}/participants`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -602,7 +603,7 @@ export async function fetchMessages(conversationId, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations/${encodeURIComponent(id)}/messages`;
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       headers: {
         Accept: 'application/json',
         ...authHeaders(accessToken),
@@ -643,7 +644,7 @@ export async function fetchMessagesPage(conversationId, options) {
   if (fields) url.searchParams.set('fields', fields);
 
   try {
-    const res = await fetch(url.toString(), {
+    const res = await httpFetch(url.toString(), {
       headers: {
         Accept: 'application/json',
         ...authHeaders(accessToken),
@@ -677,7 +678,7 @@ export async function sendMessage(conversationId, bodyText, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations/${encodeURIComponent(id)}/messages`;
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -709,7 +710,7 @@ export async function markConversationRead(conversationId, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/conversations/${encodeURIComponent(id)}/read`;
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'POST',
       headers: {
         Accept: 'application/json',

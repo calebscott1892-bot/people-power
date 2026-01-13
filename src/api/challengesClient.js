@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -12,7 +13,7 @@ async function safeReadJson(res) {
 
 export async function fetchChallenges() {
   const url = `${BASE_URL.replace(/\/$/, '')}/challenges`;
-  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+  const res = await httpFetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
   const body = await safeReadJson(res);
   if (!res.ok) {
     const msg = body && typeof body === 'object' && (body.error || body.message) ? String(body.error || body.message) : 'Failed to load challenges';
@@ -23,7 +24,7 @@ export async function fetchChallenges() {
 
 export async function fetchAdminChallenges(accessToken) {
   const url = `${BASE_URL.replace(/\/$/, '')}/admin/challenges`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -40,7 +41,7 @@ export async function fetchAdminChallenges(accessToken) {
 
 export async function saveAdminChallenge(payload, accessToken) {
   const url = `${BASE_URL.replace(/\/$/, '')}/admin/challenges`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -60,7 +61,7 @@ export async function saveAdminChallenge(payload, accessToken) {
 
 export async function archiveAdminChallenge(id, accessToken) {
   const url = `${BASE_URL.replace(/\/$/, '')}/admin/challenges/${encodeURIComponent(String(id))}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'DELETE',
     cache: 'no-store',
     headers: {

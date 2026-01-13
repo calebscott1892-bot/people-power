@@ -6,6 +6,7 @@
  */
 
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -22,7 +23,7 @@ export async function exportMyData({ accessToken }) {
   if (!token) throw new Error('Please log in');
 
   const base = BASE_URL.replace(/\/$/, '');
-  const res = await fetch(`${base}/user/export`, {
+  const res = await httpFetch(`${base}/user/export`, {
     method: 'GET',
     cache: 'no-store',
     headers: {

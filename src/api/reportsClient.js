@@ -8,7 +8,7 @@
  *
  * Behavior:
  * - Network-first.
- * - Falls back to local stub entities if the backend is unavailable.
+ * - Falls back to locally persisted entities if the backend is unavailable.
  *
  * @typedef {Object} Report
  * @property {string} id
@@ -32,6 +32,7 @@
 
 import { entities } from '@/api/appClient';
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -140,7 +141,7 @@ export async function createReport(payload, options) {
 
   // Network-first; local fallback when server is unavailable.
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'POST',
       cache: 'no-store',
       headers: {
@@ -180,7 +181,7 @@ export async function fetchReports(params, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/reports${query.toString() ? `?${query}` : ''}`;
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       cache: 'no-store',
       headers: {
         Accept: 'application/json',
@@ -217,7 +218,7 @@ export async function updateReport(id, payload, options) {
   const url = `${BASE_URL.replace(/\/$/, '')}/reports/${encodeURIComponent(reportId)}`;
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'PATCH',
       cache: 'no-store',
       headers: {

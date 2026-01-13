@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -35,7 +36,7 @@ export async function fetchMovementCommentsCount(movementId, options) {
   if (!id) throw new Error('Movement ID is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments/count`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -62,7 +63,7 @@ export async function fetchMovementCommentsPage(movementId, { limit = 20, offset
   if (Array.isArray(fields) && fields.length) params.set('fields', fields.join(','));
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments${params.toString() ? `?${params.toString()}` : ''}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -83,7 +84,7 @@ export async function fetchMovementCommentSettings(movementId) {
   if (!id) throw new Error('Movement ID is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comment-settings`;
-  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+  const res = await httpFetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
   const body = await safeReadJson(res);
 
   if (!res.ok) {
@@ -101,7 +102,7 @@ export async function updateMovementCommentSettings(movementId, patch, options) 
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comment-settings`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'PATCH',
     cache: 'no-store',
     headers: {
@@ -131,7 +132,7 @@ export async function createMovementComment(movementId, content, options) {
   if (!text) throw new Error('Comment cannot be empty');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/comments`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {

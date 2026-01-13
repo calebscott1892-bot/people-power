@@ -2,11 +2,12 @@
  * Notifications client.
  *
  * Production: backed by Node + Postgres (`/me/notifications`).
- * Dev: will fall back to local stub entities if the server is unavailable.
+ * Dev: will fall back to locally persisted entities if the server is unavailable.
  */
 
 import { entities } from '@/api/appClient';
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 function normalizeEmail(value) {
   const s = value ? String(value).trim().toLowerCase() : '';
@@ -37,7 +38,7 @@ export async function listNotificationsForUser(userEmail, options) {
 
   const accessToken = requireAccessToken(options);
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications?limit=200&offset=0`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -70,7 +71,7 @@ export async function listNotificationsForUserPage(userEmail, { limit = 20, offs
   if (Array.isArray(types) && types.length) qs.set('types', types.map((t) => String(t)).join(','));
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications?${qs.toString()}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -109,7 +110,7 @@ export async function filterNotifications(where, options) {
   if (contentId) qs.set('content_id', contentId);
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications/search?${qs.toString()}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -137,7 +138,7 @@ export async function markNotificationRead(notificationId, options) {
   if (!id) return null;
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications/${encodeURIComponent(id)}/read`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -164,7 +165,7 @@ export async function markNotificationsRead(notificationIds, options) {
 
   const accessToken = requireAccessToken(options);
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/notifications/read`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -189,7 +190,7 @@ export async function markNotificationsRead(notificationIds, options) {
 export async function upsertNotification(payload, options) {
   const accessToken = requireAccessToken(options);
   const url = `${SERVER_BASE.replace(/\/$/, '')}/notifications`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {

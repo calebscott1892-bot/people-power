@@ -25,3 +25,7 @@ dist-ssr
 
 .env
 Server/.env
+
+# Local C4 Proof Pack dev DB
+server/dev.db
+Server/dev.db

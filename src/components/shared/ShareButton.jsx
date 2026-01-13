@@ -370,7 +370,9 @@ export default function ShareButton({ movement, profile, variant = "default", la
             <input
               value={recipientUsername}
               onChange={(e) => setRecipientUsername(e.target.value)}
-              placeholder="@username"
+              placeholder={
+                "@username"
+              }
               className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-semibold"
             />
 

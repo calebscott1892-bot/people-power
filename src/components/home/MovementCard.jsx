@@ -6,6 +6,7 @@ import { Flame, MapPin, TrendingUp, ThumbsDown, ThumbsUp, Users } from 'lucide-r
 import { MapContainer, Marker, TileLayer } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import { httpFetch } from '@/utils/httpFetch';
 
 // Ensure Leaflet marker icons resolve correctly in Vite builds.
 delete L.Icon.Default.prototype._getIconUrl;
@@ -105,7 +106,7 @@ async function geocodeCity(query) {
   }
 
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     headers: {
       Accept: 'application/json',
     },

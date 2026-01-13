@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -37,7 +38,7 @@ export async function fetchUserFollow(targetEmail, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/follow`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -63,7 +64,7 @@ export async function setUserFollow(targetEmail, following, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/follow`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -90,7 +91,7 @@ export async function fetchUserFollowingUsers(targetEmail, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/following-users`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -122,7 +123,7 @@ export async function fetchUserFollowers(targetEmail, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/users/${encodeURIComponent(email)}/followers`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -151,7 +152,7 @@ export async function fetchMyFollowingUsers(options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/following-users`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -173,7 +174,7 @@ export async function fetchMyFollowers(options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/followers`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',

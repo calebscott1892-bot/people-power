@@ -22,6 +22,7 @@
  */
 
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 function withCanonicalBoostsCount(movement) {
   if (!movement || typeof movement !== 'object') return movement;
@@ -86,7 +87,7 @@ export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken, 
   }
 
   const url = `${base}/movements${params.toString() ? `?${params.toString()}` : ''}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -110,7 +111,7 @@ export async function fetchMyFollowedMovements(options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${SERVER_BASE.replace(/\/$/, '')}/me/followed-movements`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -141,7 +142,7 @@ export async function fetchMovementById(id, options) {
   const directUrl = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
 
   try {
-    const res = await fetch(directUrl, {
+    const res = await httpFetch(directUrl, {
       cache: 'no-store',
       headers: {
         Accept: 'application/json',
@@ -180,7 +181,7 @@ export async function createMovement(payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${SERVER_BASE.replace(/\/$/, '')}/movements`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -217,7 +218,7 @@ export async function deleteMovement(id, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'DELETE',
     cache: 'no-store',
     headers: {
@@ -245,7 +246,7 @@ export async function updateMovement(id, payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'PATCH',
     cache: 'no-store',
     headers: {
@@ -276,7 +277,7 @@ export async function fetchMovementVotes(id, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}/votes`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     headers: {
       Accept: 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
@@ -304,7 +305,7 @@ export async function voteMovement(id, value, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}/vote`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     headers: {
       Accept: 'application/json',

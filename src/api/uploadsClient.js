@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 import {
   MAX_UPLOAD_BYTES,
   ALLOWED_UPLOAD_MIME_TYPES,
@@ -49,7 +50,7 @@ export async function uploadFile(file, options) {
   }
   form.append('file', file);
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {

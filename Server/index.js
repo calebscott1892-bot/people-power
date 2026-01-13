@@ -64,6 +64,22 @@ fastify.get('/health', async (_request, _reply) => {
   };
 });
 
+fastify.get('/api/health', async (_request, _reply) => {
+  return {
+    ok: true,
+    status: 'healthy',
+    uptime: process.uptime(),
+    env: process.env.NODE_ENV || 'unknown',
+  };
+});
+
+fastify.get('/auth/me', async (_request, reply) => {
+  if (process.env.NODE_ENV === 'production') {
+    return reply.code(404).send({ error: 'Not Found' });
+  }
+  return reply.send({ id: 'dev-user' });
+});
+
 fastify.get('/debug/storage-mode', async (_request, _reply) => {
   return {
     storageMode,
@@ -453,7 +469,7 @@ const fs = require('fs');
 const { pipeline } = require('stream/promises');
 const { WebSocketServer } = require('ws');
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.C4_BACKEND_PORT || process.env.PORT || 3001;
 const HOST = process.env.HOST || '0.0.0.0';
 
 // ...existing code...
@@ -1633,6 +1649,12 @@ const shouldUseSsl =
   sslMode === 'verify-full' ||
   hostLooksRemote;
 
+const PG_CONNECTION_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.PG_CONNECTION_TIMEOUT_MS);
+  const fallback = isProd ? 20_000 : 5_000;
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+})();
+
 function storageStartupLine({ mode, databaseHost }) {
   const m = String(mode || 'unknown');
   const host = databaseHost != null ? String(databaseHost) : 'none';
@@ -1664,6 +1686,7 @@ function formatDbDiagnostic(diag) {
 function createPgPool({ useSsl }) {
   return new Pool({
     connectionString: DATABASE_URL,
+    connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS,
     ...(useSsl ? { ssl: { rejectUnauthorized: false } } : null),
   });
 }
@@ -1689,6 +1712,16 @@ async function poolQueryWithRetry(config) {
 }
 
 async function checkDatabaseConnection() {
+  // C4 Proof Pack runs must be deterministic and not depend on external DBs.
+  // If C4 env vars are present, force memory storage so startup can't hang on network DB calls
+  // before binding the health endpoint.
+  if (process.env.C4_BACKEND_PORT || process.env.C4_DB_PATH) {
+    storageMode = 'memory';
+    hasDatabaseUrl = false;
+    console.info(storageStartupLine({ mode: storageMode, databaseHost: databaseUrlHostForLog }));
+    return;
+  }
+
   if (!hasDatabaseUrl) {
     if (isProd) {
       console.error('[storage] FATAL: DATABASE_URL is missing; aborting startup.');

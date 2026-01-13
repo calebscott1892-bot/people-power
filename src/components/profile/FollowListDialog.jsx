@@ -11,9 +11,9 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 function getUserInitials(user) {
   const display = String(user?.display_name || '').trim();
   const username = String(user?.username || '').trim().replace(/^@/, '');
-  const seed = display || username || String(user?.email || '').trim();
-  if (!seed) return '?';
-  return seed
+  const initialsSource = display || username || String(user?.email || '').trim();
+  if (!initialsSource) return '?';
+  return initialsSource
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)

@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -27,7 +28,7 @@ export async function searchUsers(query, options) {
   url.searchParams.set('query', q);
   url.searchParams.set('limit', String(Math.max(1, Math.min(25, limit))));
 
-  const res = await fetch(url.toString(), {
+  const res = await httpFetch(url.toString(), {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -76,7 +77,7 @@ export async function lookupUsers({ emails, userIds } = {}, options) {
   for (let i = 0; i < maxChunks; i += 1) {
     const emailChunk = emailChunks[i] || [];
     const userIdChunk = userIdChunks[i] || [];
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'POST',
       cache: 'no-store',
       headers: {

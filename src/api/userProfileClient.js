@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 async function safeReadJson(res) {
   try {
@@ -15,7 +16,7 @@ export async function upsertMyProfile(payload, options) {
   const BASE_URL = SERVER_BASE;
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/profile`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -51,7 +52,7 @@ export async function fetchMyProfile(options) {
   const BASE_URL = SERVER_BASE;
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/profile${includeMeta ? '?include_meta=1' : ''}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -82,7 +83,7 @@ export async function fetchPublicProfileByUsername(username, options) {
   if (!handle) throw new Error('Username is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/profiles/username/${encodeURIComponent(handle)}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -111,7 +112,7 @@ export async function fetchPublicProfileByEmail(email, options) {
   if (!normalized) throw new Error('Email is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/profiles/email/${encodeURIComponent(normalized)}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',

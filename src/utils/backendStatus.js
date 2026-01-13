@@ -2,6 +2,7 @@
 // Exports: checkBackendHealth, subscribeBackendStatus, getCurrentBackendStatus
 
 import { SERVER_BASE } from '@/api/serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const STATUS = {
   HEALTHY: 'healthy',
@@ -40,7 +41,7 @@ export async function checkBackendHealth({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`${SERVER_BASE}/health`, {
+    const res = await httpFetch(`${SERVER_BASE}/health`, {
       signal: controller.signal,
       headers: { Accept: 'application/json' },
       cache: 'no-store',

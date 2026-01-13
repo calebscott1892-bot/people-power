@@ -20,6 +20,7 @@
  */
 
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -57,7 +58,7 @@ async function authedFetch(url, { accessToken, method = 'GET', body } = {}) {
   if (accessToken) headers.Authorization = `Bearer ${String(accessToken)}`;
   if (body != null) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method,
     cache: 'no-store',
     headers,

@@ -1579,7 +1579,9 @@ function MessagesInner() {
                 <Input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search users or conversations"
+                  placeholder={
+                    "Search users or conversations"
+                  }
                   className="h-11 pl-9 rounded-xl border-2"
                 />
               </div>
@@ -2498,7 +2500,9 @@ function MessagesInner() {
                         <Input
                           value={groupAddUsername}
                           onChange={(e) => setGroupAddUsername(e.target.value)}
-                          placeholder="@username"
+                          placeholder={
+                            "@username"
+                          }
                           className="rounded-xl border-2"
                         />
                         <Button

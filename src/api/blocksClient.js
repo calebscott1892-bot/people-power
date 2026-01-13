@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -27,7 +28,7 @@ export async function fetchMyBlocks(options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/blocks`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -51,7 +52,7 @@ export async function blockUser(blockedEmail, options) {
   if (!email) throw new Error('Blocked email is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/blocks`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -77,7 +78,7 @@ export async function unblockUser(blockedEmail, options) {
   if (!email) throw new Error('Blocked email is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/blocks/${encodeURIComponent(email)}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'DELETE',
     cache: 'no-store',
     headers: {

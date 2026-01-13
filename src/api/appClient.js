@@ -2,7 +2,7 @@
  * App-owned client surface.
  *
  * Goal: keep an app-owned client surface (no third-party SDK coupling).
- * Today this is backed by the local persistent stub in `dataClient`.
+ * Today this is backed by the local persistent client in `dataClient`.
  * Over time, this module should be re-pointed to your Workers + Postgres + R2 API.
  */
 
@@ -11,6 +11,8 @@ import {
 	entities as localEntities,
 	integrations as localIntegrations,
 } from './dataClient';
+
+import { httpFetch } from '@/utils/httpFetch';
 
 // IMPORTANT: Many legacy REST clients in this repo already use VITE_API_BASE_URL
 // (pointing at the Fastify server). To avoid accidentally switching the entire
@@ -32,7 +34,7 @@ function joinUrl(base, path) {
 }
 
 async function httpJson(baseUrl, path, init) {
-	const res = await fetch(joinUrl(baseUrl, path), {
+	const res = await httpFetch(joinUrl(baseUrl, path), {
 		...init,
 		cache: 'no-store',
 		headers: {
@@ -211,7 +213,7 @@ const remote = ENABLE_REMOTE
 
 const prodBlockedReason =
 	'[PeoplePower] Entities API is not configured for this production build. ' +
-	'This app will not fall back to local stub persistence in production. ' +
+	'This app will not fall back to local persistence in production. ' +
 	'Set VITE_APP_API_BASE_URL to your /api/entities-capable backend (Worker), ' +
 	'or disable features that depend on entities.';
 

@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -18,7 +19,7 @@ export async function searchMovements({ q, city, country, limit = 20, offset = 0
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('offset', String(offset));
 
-  const res = await fetch(url.toString(), {
+  const res = await httpFetch(url.toString(), {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -42,7 +43,7 @@ export async function searchUsers({ q, limit = 20, offset = 0, accessToken } = {
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('offset', String(offset));
 
-  const res = await fetch(url.toString(), {
+  const res = await httpFetch(url.toString(), {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',

@@ -27,7 +27,7 @@ export default function PetitionCard({ petition, currentUser, isPast = false }) 
   }, [showSignModal]);
 
   const { data: hasSigned } = useQuery({
-    queryKey: ['stubSignature', petition.id, currentUser?.email],
+    queryKey: ['localSignature', petition.id, currentUser?.email],
     queryFn: async () => {
       if (!currentUser) return false;
       const sigs = await entities.PetitionSignature.filter(
@@ -58,8 +58,8 @@ export default function PetitionCard({ petition, currentUser, isPast = false }) 
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['stubSignature'] });
-      queryClient.invalidateQueries({ queryKey: ['stubPetitions'] });
+      queryClient.invalidateQueries({ queryKey: ['localSignature'] });
+      queryClient.invalidateQueries({ queryKey: ['localPetitions'] });
       setShowSignModal(false);
       toast.success('Petition signed!');
     },

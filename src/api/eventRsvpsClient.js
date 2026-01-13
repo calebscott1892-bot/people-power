@@ -18,6 +18,7 @@
  */
 
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -52,7 +53,7 @@ async function authedFetch(url, { accessToken, method = 'GET', body } = {}) {
     headers['Content-Type'] = 'application/json';
   }
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method,
     cache: 'no-store',
     headers,

@@ -5,10 +5,11 @@ import { Navigate } from 'react-router-dom';
 import AdminBackButton from '@/components/admin/AdminBackButton';
 import { logError } from '@/utils/logError';
 import { getServerBaseUrl } from '@/api/serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 function fetchMigrationLogs(token) {
   const baseUrl = getServerBaseUrl();
-  return fetch(`${baseUrl}/admin/migrations`, {
+  return httpFetch(`${baseUrl}/admin/migrations`, {
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${token}`,

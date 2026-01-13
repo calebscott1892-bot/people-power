@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 // API client for CollaboratorActionLog
 const BASE_URL = SERVER_BASE;
@@ -25,7 +26,7 @@ export async function fetchCollaboratorActions(movementId, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/collaborator-actions`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',

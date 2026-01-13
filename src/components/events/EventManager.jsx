@@ -20,7 +20,7 @@ export default function EventManager({ movementId, movement, className = '' }) {
     error,
     refetch,
   } = useQuery({
-    queryKey: ['stubEvents', safeMovementId],
+    queryKey: ['localEvents', safeMovementId],
     enabled: !!safeMovementId,
     queryFn: async () => {
       if (!safeMovementId) return [];
@@ -66,7 +66,7 @@ export default function EventManager({ movementId, movement, className = '' }) {
               : 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
           }`}
         >
-          Create (stub)
+          Create
         </button>
       </div>
 

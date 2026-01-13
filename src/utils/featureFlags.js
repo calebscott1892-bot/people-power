@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { getServerBaseUrl } from '@/api/serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const FORCE_ALL_FLAGS_ON = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FORCE_ALL_FLAGS_ON === 'true' && import.meta.env.MODE !== 'production';
 
@@ -20,7 +21,7 @@ const CACHE_MS = (typeof import.meta !== 'undefined' && import.meta.env && impor
 async function fetchFlags() {
   if (CACHE_MS > 0 && _flagsCache && Date.now() - _flagsCacheTime < CACHE_MS) return _flagsCache;
   const baseUrl = getServerBaseUrl();
-  const res = await fetch(`${baseUrl}/feature-flags`, {
+  const res = await httpFetch(`${baseUrl}/feature-flags`, {
     cache: 'no-store',
     headers: { Accept: 'application/json' },
   });

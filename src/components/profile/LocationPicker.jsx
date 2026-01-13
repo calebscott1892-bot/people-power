@@ -8,6 +8,7 @@ import { Slider } from "@/components/ui/slider";
 import { toast } from 'sonner';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import { httpFetch } from '@/utils/httpFetch';
 
 // Fix marker icon
 delete L.Icon.Default.prototype._getIconUrl;
@@ -119,7 +120,7 @@ export default function LocationPicker({
     }
 
     const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    const res = await httpFetch(url, { headers: { Accept: 'application/json' } });
     if (!res.ok) return null;
     const json = await res.json();
     const first = Array.isArray(json) ? json[0] : null;

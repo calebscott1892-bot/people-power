@@ -6,10 +6,11 @@ import { useAuth } from '@/auth/AuthProvider';
 import { getServerBaseUrl } from '@/api/serverBase';
 import { logError } from '@/utils/logError';
 import AdminBackButton from '@/components/admin/AdminBackButton';
+import { httpFetch } from '@/utils/httpFetch';
 
 function fetchFlags(accessToken) {
   const baseUrl = getServerBaseUrl();
-  return fetch(`${baseUrl}/admin/feature-flags`, {
+  return httpFetch(`${baseUrl}/admin/feature-flags`, {
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -21,7 +22,7 @@ function fetchFlags(accessToken) {
 }
 function addOrUpdateFlag(payload, accessToken) {
   const baseUrl = getServerBaseUrl();
-  return fetch(`${baseUrl}/admin/feature-flags`, {
+  return httpFetch(`${baseUrl}/admin/feature-flags`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -36,7 +37,7 @@ function addOrUpdateFlag(payload, accessToken) {
 }
 function deleteFlag(id, accessToken) {
   const baseUrl = getServerBaseUrl();
-  return fetch(`${baseUrl}/admin/feature-flags/${id}`, {
+  return httpFetch(`${baseUrl}/admin/feature-flags/${id}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}` },
   }).then((r) => {

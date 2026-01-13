@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -34,7 +35,7 @@ export async function fetchMyMovementFollow(movementId, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/follow`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -58,7 +59,7 @@ export async function setMyMovementFollow(movementId, following, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/follow`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -82,7 +83,7 @@ export async function fetchMovementFollowersCount(movementId) {
   if (!id) throw new Error('Movement ID is required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/follow/count`;
-  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+  const res = await httpFetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
   const body = await safeReadJson(res);
 
   if (!res.ok) {

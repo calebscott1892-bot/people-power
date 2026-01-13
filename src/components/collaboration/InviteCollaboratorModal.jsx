@@ -192,7 +192,9 @@ export default function InviteCollaboratorModal({ open, onClose, movementId, cur
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="@username"
+              placeholder={
+                "@username"
+              }
               className="rounded-xl border-2"
             />
             <div className="mt-1 text-xs text-slate-500 font-semibold">

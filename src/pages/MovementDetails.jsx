@@ -3397,7 +3397,13 @@ export default function MovementDetails() {
                         </div>
                         <div>
                           <Label>Assign to (username, optional)</Label>
-                          <TextInput value={taskAssignee} onChange={setTaskAssignee} placeholder="@username" />
+                          <TextInput
+                            value={taskAssignee}
+                            onChange={setTaskAssignee}
+                            placeholder={
+                              "@username"
+                            }
+                          />
                         </div>
                       </div>
                       <div>

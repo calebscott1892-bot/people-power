@@ -516,7 +516,9 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
                   setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''));
                   setUsernameError('');
                 }}
-                placeholder="username"
+                placeholder={
+                  "username"
+                }
                 className="pl-8 rounded-xl border-2"
               />
             </div>

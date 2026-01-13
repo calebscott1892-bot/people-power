@@ -5,6 +5,7 @@ import BarChart from '@/components/ui/BarChart';
 import { getServerBaseUrl } from '@/api/serverBase';
 import { logError } from '@/utils/logError';
 import AdminBackButton from '@/components/admin/AdminBackButton';
+import { httpFetch } from '@/utils/httpFetch';
 
 function formatNumber(n) {
   if (n == null) return '—';
@@ -51,7 +52,7 @@ export default function CommunityHealth() {
     }
     setLoading(true);
     const baseUrl = getServerBaseUrl();
-    fetch(`${baseUrl}/admin/community-health`, {
+    httpFetch(`${baseUrl}/admin/community-health`, {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
     })
       .then((r) => r.ok ? r.json() : Promise.reject(r))

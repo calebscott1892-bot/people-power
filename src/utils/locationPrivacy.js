@@ -7,7 +7,7 @@
  */
 
 const STORAGE_PREFIX = 'peoplepower_private_location:';
-const STUB_ENTITIES_PREFIX = 'peoplepower_stub_entities:';
+const LOCAL_ENTITIES_PREFIX = 'peoplepower_local_entities:';
 
 function safeJsonParse(value, fallback) {
   if (!value) return fallback;
@@ -116,13 +116,13 @@ export function haversineDistanceKm(a, b) {
 }
 
 /**
- * One-time local cleanup for dev/stub persistence.
+ * One-time local cleanup for legacy on-device persistence.
  * Removes any legacy `location.coordinates` from locally stored UserProfile records.
  */
 export function scrubLegacyCoordinatesFromLocalUserProfiles() {
   try {
     if (typeof window === 'undefined' || !window?.localStorage) return { scanned: 0, updated: 0 };
-    const key = `${STUB_ENTITIES_PREFIX}UserProfile`;
+    const key = `${LOCAL_ENTITIES_PREFIX}UserProfile`;
     const records = safeJsonParse(window.localStorage.getItem(key), []);
     if (!Array.isArray(records) || records.length === 0) return { scanned: 0, updated: 0 };
 

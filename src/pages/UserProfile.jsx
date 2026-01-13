@@ -211,7 +211,7 @@ export default function UserProfile() {
     queryKey: queryKeys.movements.participated(resolvedProfileEmail),
     queryFn: async () => {
       if (!resolvedProfileEmail) return [];
-      // Participation history is currently backed by a legacy local stub (entities.Participation).
+      // Participation history is currently backed by a legacy local fallback (entities.Participation).
       // Avoid showing non-authoritative, device-local data in production.
       if (!import.meta?.env?.DEV) return [];
       const participations = await entities.Participation.filter({ user_email: resolvedProfileEmail });

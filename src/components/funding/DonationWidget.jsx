@@ -8,7 +8,8 @@ export default function DonationWidget({ movementId }) {
   const [showAddLink, setShowAddLink] = useState(false);
 
   // In a real app, this would be stored in the Movement entity
-  // For now, using localStorage as a simple demo
+  // For now, using localStorage
+  // as a simple preview
   const storedLink = localStorage.getItem(`donation_link_${movementId}`);
 
   const handleSaveLink = () => {

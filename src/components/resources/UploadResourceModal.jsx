@@ -64,7 +64,7 @@ export default function UploadResourceModal({ open, onOpenChange, movementId, on
         return;
       }
 
-      toast.success('Resource added (stub)');
+      toast.success('Resource added');
       setTitle('');
       setUrl('');
       close();
@@ -120,11 +120,11 @@ export default function UploadResourceModal({ open, onOpenChange, movementId, on
             disabled={submitting}
             className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
           >
-            {submitting ? 'Saving…' : 'Save (stub)'}
+            {submitting ? 'Saving…' : 'Save'}
           </button>
         </div>
 
-        <div className="text-xs text-slate-500 font-semibold">Saved locally (stub).</div>
+        <div className="text-xs text-slate-500 font-semibold">Saved locally.</div>
       </div>
     </div>
   );

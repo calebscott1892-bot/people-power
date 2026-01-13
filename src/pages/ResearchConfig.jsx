@@ -6,10 +6,11 @@ import { useAuth } from '@/auth/AuthProvider';
 import { getServerBaseUrl } from '@/api/serverBase';
 import { logError } from '@/utils/logError';
 import AdminBackButton from '@/components/admin/AdminBackButton';
+import { httpFetch } from '@/utils/httpFetch';
 
 function fetchConfigs(accessToken) {
   const baseUrl = getServerBaseUrl();
-  return fetch(`${baseUrl}/admin/research-mode-configs`, {
+  return httpFetch(`${baseUrl}/admin/research-mode-configs`, {
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -21,7 +22,7 @@ function fetchConfigs(accessToken) {
 }
 function addOrUpdateConfig(payload, accessToken) {
   const baseUrl = getServerBaseUrl();
-  return fetch(`${baseUrl}/admin/research-mode-configs`, {
+  return httpFetch(`${baseUrl}/admin/research-mode-configs`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -36,7 +37,7 @@ function addOrUpdateConfig(payload, accessToken) {
 }
 function deleteConfig(id, accessToken) {
   const baseUrl = getServerBaseUrl();
-  return fetch(`${baseUrl}/admin/research-mode-configs/${id}`, {
+  return httpFetch(`${baseUrl}/admin/research-mode-configs/${id}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}` },
   }).then((r) => {
@@ -116,7 +117,9 @@ export default function ResearchConfig() {
         </div>
         {scope !== 'global' && (
           <Input
-            placeholder={scope === 'user' ? 'User email or id' : 'Movement id'}
+            placeholder={
+              scope === 'user' ? 'User email or id' : 'Movement id'
+            }
             value={scopeId}
             onChange={e => setScopeId(e.target.value)}
             required

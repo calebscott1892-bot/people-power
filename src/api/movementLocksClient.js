@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -23,7 +24,7 @@ export async function fetchMovementLocks(movementId, options) {
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/locks`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
@@ -46,7 +47,7 @@ export async function setMovementLock(movementId, field, locked, options) {
   if (!accessToken) throw new Error('Authentication required');
 
   const url = `${BASE_URL.replace(/\/$/, '')}/movements/${encodeURIComponent(id)}/locks`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {

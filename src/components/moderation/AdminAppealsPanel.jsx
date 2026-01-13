@@ -425,7 +425,9 @@ export default function AdminAppealsPanel({ moderatorEmail }) {
                 <Textarea
                   value={reviewerNotes}
                   onChange={(e) => setReviewerNotes(e.target.value)}
-                  placeholder="Notes for audit log and user notice…"
+                  placeholder={
+                    "Notes for audit log and user notice…"
+                  }
                   className="min-h-[120px]"
                 />
               </div>

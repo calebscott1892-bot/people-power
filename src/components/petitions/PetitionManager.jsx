@@ -20,7 +20,7 @@ export default function PetitionManager({ movementId, movement, className = '' }
     error,
     refetch,
   } = useQuery({
-    queryKey: ['stubPetitions', safeMovementId],
+    queryKey: ['localPetitions', safeMovementId],
     enabled: !!safeMovementId,
     queryFn: async () => {
       if (!safeMovementId) return [];
@@ -61,7 +61,7 @@ export default function PetitionManager({ movementId, movement, className = '' }
               : 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
           }`}
         >
-          Create (stub)
+          Create
         </button>
       </div>
 

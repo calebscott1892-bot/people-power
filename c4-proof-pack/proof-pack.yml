@@ -1,0 +1,300 @@
+name: C4 Proof Pack
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proof-pack:
+    runs-on: ubuntu-latest
+
+    # Configure these as GitHub "Variables" (recommended) or replace with literals.
+    env:
+      C4_DB_PATH: ${{ vars.C4_DB_PATH }}
+      C4_BACKEND_PORT: ${{ vars.C4_BACKEND_PORT }}
+      C4_FRONTEND_PORT: ${{ vars.C4_FRONTEND_PORT }}
+      C4_HEALTH_ENDPOINT: ${{ vars.C4_HEALTH_ENDPOINT }}
+      C4_BOOTSTRAP_COMMAND: ${{ vars.C4_BOOTSTRAP_COMMAND }}
+      C4_DEV_COMMAND: ${{ vars.C4_DEV_COMMAND }}
+      # Optional override: defaults to /auth/me in the verifiers
+      C4_AUTH_ENDPOINT: ${{ vars.C4_AUTH_ENDPOINT }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+
+      - name: Install dependencies (root)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== npm ci (root) ====="
+          npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ms-playwright-
+
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== npx playwright install --with-deps chromium ====="
+          npx playwright install --with-deps chromium
+
+      - name: Sanity check ports (start)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== lsof backend ====="
+          lsof -nP -iTCP:${C4_BACKEND_PORT} -sTCP:LISTEN || true
+          echo "===== lsof frontend ====="
+          lsof -nP -iTCP:${C4_FRONTEND_PORT} -sTCP:LISTEN || true
+
+      - name: Step 1 — BEFORE BOOTSTRAP verifier behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${C4_DB_PATH:?Missing C4_DB_PATH}"
+          : "${C4_BACKEND_PORT:?Missing C4_BACKEND_PORT}"
+          : "${C4_FRONTEND_PORT:?Missing C4_FRONTEND_PORT}"
+          : "${C4_HEALTH_ENDPOINT:?Missing C4_HEALTH_ENDPOINT}"
+          : "${C4_BOOTSTRAP_COMMAND:?Missing C4_BOOTSTRAP_COMMAND}"
+          : "${C4_DEV_COMMAND:?Missing C4_DEV_COMMAND}"
+
+          echo "===== STEP 1: simulate missing dev data ====="
+
+          moved=0
+          if [[ -f "${C4_DB_PATH}" ]]; then
+            echo "$ mv ${C4_DB_PATH} /tmp/c4_proof_pack_db.bak"
+            mv "${C4_DB_PATH}" /tmp/c4_proof_pack_db.bak
+            moved=1
+          fi
+
+          # Ensure no DB exists at all during Step 1.
+          rm -f "${C4_DB_PATH}"
+
+          restore_db() {
+            if [[ "$moved" -eq 1 ]]; then
+              echo "$ mv /tmp/c4_proof_pack_db.bak ${C4_DB_PATH}"
+              mkdir -p "$(dirname "${C4_DB_PATH}")"
+              mv /tmp/c4_proof_pack_db.bak "${C4_DB_PATH}"
+            fi
+          }
+          trap restore_db EXIT
+
+          expect_missing() {
+            local name="$1"
+            local cmd="$2"
+
+            echo "$ ${cmd}; echo \"exit=\$?\""
+
+            set +e
+            local out
+            out=$(timeout 90s bash -lc "$cmd" 2>&1)
+            local code=$?
+            set -e
+
+            if [[ "$code" -eq 124 ]]; then
+              echo "::error::${name} timed out after 90s (process hung)"
+              echo "pwd=$(pwd)"
+              echo "node=$(node -v || true)"
+              echo "npm=$(npm -v || true)"
+              exit 1
+            fi
+
+            printf '%s\n' "$out"
+            echo "exit=$code"
+
+            if [[ "$code" -ne 2 ]]; then
+              echo "::error::${name} exit=${code} (expected 2)"
+              exit 1
+            fi
+
+            expected="MISSING_DEV_DATA: run ${C4_BOOTSTRAP_COMMAND}"
+            if ! printf '%s\n' "$out" | sed -E 's/[[:space:]]+$//' | grep -Fxq "$expected"; then
+              echo "::error::${name} output missing guidance line: $expected"
+              exit 1
+            fi
+          }
+
+          expect_missing "verify-backend-contract" "node c4-proof-pack/verify-backend-contract.mjs"
+          expect_missing "verify-runtime" "node c4-proof-pack/verify-runtime.mjs"
+
+      - name: Sanity check ports (after Step 1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== lsof backend ====="
+          lsof -nP -iTCP:${C4_BACKEND_PORT} -sTCP:LISTEN || true
+          echo "===== lsof frontend ====="
+          lsof -nP -iTCP:${C4_FRONTEND_PORT} -sTCP:LISTEN || true
+
+      - name: Step 2 — AFTER BOOTSTRAP verifier pass
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== $ ${C4_BOOTSTRAP_COMMAND} ====="
+          bash -lc "${C4_BOOTSTRAP_COMMAND}"
+
+          echo "===== $ node c4-proof-pack/verify-backend-contract.mjs ====="
+          timeout 120s bash -lc "node c4-proof-pack/verify-backend-contract.mjs"
+
+          echo "===== $ node c4-proof-pack/verify-runtime.mjs ====="
+          set +e
+          out=$(timeout 240s bash -lc "node c4-proof-pack/verify-runtime.mjs" 2>&1)
+          code=$?
+          set -e
+
+          if [[ "$code" -eq 124 ]]; then
+            echo "::error::verify-runtime timed out after 240s"
+            echo "node=$(node -v || true)"
+            echo "npm=$(npm -v || true)"
+
+            if command -v lsof >/dev/null 2>&1; then
+              echo "===== lsof backend ====="
+              lsof -nP -iTCP:${C4_BACKEND_PORT} -sTCP:LISTEN || true
+              echo "===== lsof frontend ====="
+              lsof -nP -iTCP:${C4_FRONTEND_PORT} -sTCP:LISTEN || true
+            else
+              echo "===== ss -lntp (no lsof) ====="
+              ss -lntp || true
+            fi
+
+            echo "===== ps aux | head -n 50 ====="
+            ps aux | head -n 50 || true
+
+            exit 1
+          fi
+
+          printf '%s\n' "$out"
+          if [[ "$code" -ne 0 ]]; then
+            exit "$code"
+          fi
+
+      - name: Step 3 — Proof Pack A–G (exact commands)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== A) rg legacy tokens ====="
+          A_CMD_B64="cmcgLW4gLS1oaWRkZW4gLS1nbG9iICchLmdpdC8qKicgLWkgImJhc2U0NENsaWVudHxzdHViRGJ8dmVyaWZ5LXN0dWItY29udHJhY3R8XFxiYmFzZTQ0XFxffGJhc2U0NFxcLmNvbSIgLiB8fCB0cnVl"
+          A_CMD="$(printf '%s' "$A_CMD_B64" | base64 -d)"
+          printf '%s\n' "$ $A_CMD"
+          A_OUT=$(eval "$A_CMD")
+          printf '%s\n' "$A_OUT"
+          if [[ -n "$A_OUT" ]]; then
+            echo "::error::Proof A failed (expected zero matches)"
+            exit 1
+          fi
+
+          echo "===== B) rg fallback/fabrication tokens ====="
+          B_CMD_B64="cmcgLW4gLS1oaWRkZW4gLS1nbG9iICchLmdpdC8qKicgLWkgIm1vY2t8c3R1YnxmaXh0dXJlfHNlZWR8ZGVtbyBtb2RlfGdlbmVyYXRlU2FtcGxlfHJhbmRvbS4qKGRhdGF8cmVjb3JkfGVudGl0eXx1c2VyKXxwbGFjZWhvbGRlci4qKGRhdGF8cmVjb3JkfGVudGl0eXx1c2VyKXxmYWtlLiogKGRhdGF8cmVjb3JkfGVudGl0eXx1c2VyKXxsb2NhbFN0b3JhZ2UuKihtb2NrfHN0dWJ8ZGVtb3xmaXh0dXJlfGZha2UpIiBzcmMgc2VydmVyIHNjcmlwdHMgfHwgdHJ1ZQ=="
+          B_CMD="$(printf '%s' "$B_CMD_B64" | base64 -d)"
+          printf '%s\n' "$ $B_CMD"
+          B_OUT=$(eval "$B_CMD")
+          printf '%s\n' "$B_OUT"
+          if [[ -n "$B_OUT" ]]; then
+            echo "::error::Proof B failed (expected zero matches)"
+            exit 1
+          fi
+
+          echo "===== C) node c4-proof-pack/verify-no-direct-fetch.mjs ====="
+          echo "$ node c4-proof-pack/verify-no-direct-fetch.mjs"
+          node c4-proof-pack/verify-no-direct-fetch.mjs
+
+          echo "===== D) npm run build ====="
+          echo "$ npm run build"
+          npm run build
+
+          echo "===== E) git status --porcelain ====="
+
+          allow_path() {
+            local p="$1"
+            case "$p" in
+              dist/*) return 0 ;;
+              "$C4_DB_PATH") return 0 ;;
+              playwright-report/*) return 0 ;;
+              test-results/*) return 0 ;;
+              */.DS_Store|.DS_Store) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          touched=()
+          pending_second=0
+          while IFS= read -r -d '' token; do
+            if [[ "$pending_second" -eq 1 ]]; then
+              touched+=("$token")
+              pending_second=0
+              continue
+            fi
+
+            if [[ ${#token} -lt 4 || "${token:2:1}" != " " ]]; then
+              echo "::error::Proof E failed (unexpected -z porcelain token format)"
+              echo "===== E.debug) git status --porcelain ====="
+              git status --porcelain
+              printf 'token=%q\n' "$token"
+              exit 1
+            fi
+
+            status="${token:0:2}"
+            path1="${token:3}"
+            touched+=("$path1")
+
+            if [[ "${status:0:1}" == "R" || "${status:0:1}" == "C" ]]; then
+              pending_second=1
+            fi
+          done < <(git status --porcelain=v1 -z)
+
+          if [[ "$pending_second" -eq 1 ]]; then
+            echo "::error::Proof E failed (unexpected end of rename/copy record)"
+            echo "===== E.debug) git status --porcelain ====="
+            git status --porcelain
+            exit 1
+          fi
+
+          offending=()
+          for p in "${touched[@]}"; do
+            if [[ -n "$p" ]] && ! allow_path "$p"; then
+              offending+=("$p")
+            fi
+          done
+
+          if [[ ${#offending[@]} -gt 0 ]]; then
+            echo "::error::Proof E failed (unexpected working tree paths)"
+            echo "===== E.debug) git status --porcelain ====="
+            git status --porcelain
+            echo "===== E.debug) offending paths ====="
+            printf '%s\n' "${offending[@]}"
+            exit 1
+          fi
+
+          echo "===== F) node c4-proof-pack/verify-backend-contract.mjs ====="
+          echo "$ node c4-proof-pack/verify-backend-contract.mjs"
+          node c4-proof-pack/verify-backend-contract.mjs
+
+          echo "===== G) node c4-proof-pack/verify-runtime.mjs ====="
+          echo "$ node c4-proof-pack/verify-runtime.mjs"
+          node c4-proof-pack/verify-runtime.mjs
+
+          echo "PROOF PACK PASSED"

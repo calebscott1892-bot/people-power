@@ -1,4 +1,5 @@
 import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
 
 const BASE_URL = SERVER_BASE;
 
@@ -19,7 +20,7 @@ export async function upsertMyPublicKey(publicKey, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const url = `${BASE_URL.replace(/\/$/, '')}/me/public-key`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -44,7 +45,7 @@ export async function fetchPublicKey(email, options) {
   const encoded = encodeURIComponent(String(email || '').trim());
   const url = `${BASE_URL.replace(/\/$/, '')}/public-keys/${encoded}`;
 
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
