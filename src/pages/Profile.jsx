@@ -27,6 +27,8 @@ import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 import FeedbackBugDialog from '@/components/shared/FeedbackBugDialog';
 import { queryKeys } from '@/lib/queryKeys';
 
+const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
+
 function getMovementAuthorLabel(movement) {
   const displayName = String(
     movement?.creator_display_name ||
@@ -282,6 +284,11 @@ export default function Profile() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
+      {isProof && user?.email ? (
+        <span className="sr-only" data-c4-proof-email>
+          {user.email}
+        </span>
+      ) : null}
       <FollowListDialog
         open={followListOpen}
         onOpenChange={setFollowListOpen}

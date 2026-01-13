@@ -6,19 +6,21 @@
   "scripts": {
     "dev": "npm run dev:all",
     "dev:server": "npm --prefix Server run dev",
-    "dev:client": "VITE_BACKEND_PORT=\"${C4_BACKEND_PORT:-8787}\" VITE_BACKEND_BASE=\"http://127.0.0.1:${C4_BACKEND_PORT:-8787}\" vite --host 127.0.0.1 --port 5173 --strictPort",
+    "dev:client": "sh -lc 'export VITE_BACKEND_PORT=\"${C4_BACKEND_PORT:-8787}\"; export VITE_BACKEND_BASE=\"http://127.0.0.1:${C4_BACKEND_PORT:-8787}\"; if [ -n \"${C4_PROOF_PACK:-}\" ]; then export VITE_C4_PROOF_PACK=1; fi; exec vite --host 127.0.0.1 --port 5173 --strictPort'",
     "dev:all": "concurrently -k --kill-others-on-fail --success first -n server,client -c red,blue \"npm run dev:server\" \"npm run dev:client\"",
     "dev:worker": "wrangler dev --config cloudflare/wrangler.toml --port 8787",
     "dev:all:worker": "concurrently -k --kill-others-on-fail --success first -n worker,client -c magenta,blue \"npm run dev:worker\" \"npm run dev:client\"",
-    "bootstrap": "node -e \"const fs=require('fs'); const path=require('path'); const p=process.env.C4_DB_PATH||'server/dev.db'; fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,'bootstrapped\\n'); console.log('OK bootstrap '+p);\"",
+    "bootstrap": "node -e \"const fs=require('fs'); const path=require('path'); function findRepoRoot(start){let dir=path.resolve(start);for(;;){const pkg=path.join(dir,'package.json');const serverDir=path.join(dir,'Server');if(fs.existsSync(pkg)&&fs.existsSync(serverDir)&&fs.statSync(serverDir).isDirectory())return dir;const parent=path.dirname(dir);if(parent===dir)return start;dir=parent;}} const repoRoot=findRepoRoot(process.cwd()); const raw=process.env.C4_DB_PATH||'server/dev.db'; const dbPath=path.isAbsolute(raw)?raw:path.resolve(repoRoot,raw); console.log(JSON.stringify({repoRoot,raw,dbPath})); if(fs.existsSync(dbPath)&&fs.statSync(dbPath).isDirectory()){throw new Error('C4_DB_PATH is a directory: '+dbPath);} fs.mkdirSync(path.dirname(dbPath),{recursive:true}); const Database=require('better-sqlite3'); const db=new Database(dbPath); db.pragma('journal_mode = WAL'); db.pragma('foreign_keys = ON'); db.exec('PRAGMA user_version = 1;'); db.close(); console.log('OK bootstrap sqlite '+dbPath);\"",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "node Server/index.js",
     "dev:cf": "wrangler pages dev dist --binding SUPABASE_URL=<your-supabase-url> --binding SUPABASE_ANON_KEY=<your-supabase-anon-key>",
-    "deploy:cf": "npm run build && wrangler pages publish dist"
+    "deploy:cf": "npm run build && wrangler pages publish dist",
+    "proof:stability": "bash scripts/c4-proof-pack-stability.sh"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.0.2",
     "@hookform/resolvers": "^4.1.2",
     "@radix-ui/react-accordion": "^1.2.3",
     "@radix-ui/react-alert-dialog": "^1.1.6",
@@ -49,6 +51,7 @@
     "@supabase/supabase-js": "^2.89.0",
     "@tanstack/react-query": "^5.90.12",
     "bad-words": "^3.0.4",
+    "better-sqlite3": "^12.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.0.0",

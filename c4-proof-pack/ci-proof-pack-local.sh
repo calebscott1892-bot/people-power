@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+# Enable proof-pack bypass for deterministic test user
+export C4_PROOF_PACK=1
+
+# The proof pack starts a dev server (Vite + backend). If the caller's shell has
+# NODE_ENV=production exported, npm/dev servers may omit dev dependencies and/or
+# the backend may refuse to start (e.g., memory fallback blocked). Force a
+# deterministic development environment for this harness.
+export NODE_ENV=development
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -33,6 +43,16 @@ kill_listeners_best_effort() {
     kill $pids 2>/dev/null || true
     sleep 0.5
     kill -9 $pids 2>/dev/null || true
+    # Retry once if still present
+    sleep 1
+    local retry_pids
+    retry_pids="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)"
+    if [[ -n "$retry_pids" ]]; then
+      echo "Retry: killing listeners on port $port: $retry_pids" >&2
+      kill $retry_pids 2>/dev/null || true
+      sleep 0.5
+      kill -9 $retry_pids 2>/dev/null || true
+    fi
   fi
 }
 
@@ -164,12 +184,26 @@ required_env C4_DEV_COMMAND
 
 MOVED=0
 DB_BAK="/tmp/c4_proof_pack_db.bak"
+DB_WAL_BAK="/tmp/c4_proof_pack_db.wal.bak"
+DB_SHM_BAK="/tmp/c4_proof_pack_db.shm.bak"
 
 restore_db() {
   if [[ "$MOVED" -eq 1 ]]; then
-    echo "$ mv $DB_BAK $C4_DB_PATH"
     mkdir -p "$(dirname "$C4_DB_PATH")"
-    mv "$DB_BAK" "$C4_DB_PATH"
+
+    if [[ -f "$DB_BAK" ]]; then
+      echo "$ mv $DB_BAK $C4_DB_PATH"
+      mv "$DB_BAK" "$C4_DB_PATH"
+    fi
+    if [[ -f "$DB_WAL_BAK" ]]; then
+      echo "$ mv $DB_WAL_BAK ${C4_DB_PATH}-wal"
+      mv "$DB_WAL_BAK" "${C4_DB_PATH}-wal"
+    fi
+    if [[ -f "$DB_SHM_BAK" ]]; then
+      echo "$ mv $DB_SHM_BAK ${C4_DB_PATH}-shm"
+      mv "$DB_SHM_BAK" "${C4_DB_PATH}-shm"
+    fi
+
     MOVED=0
   fi
 }
@@ -194,10 +228,10 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 header "npm ci (root)"
-( set -x; npm ci )
+( set -x; NODE_ENV=development npm ci --include=dev )
 
 header "npm ci (Server)"
-( set -x; npm --prefix Server ci )
+( set -x; NODE_ENV=development npm --prefix Server ci --include=dev )
 
 header "Playwright install (chromium)"
 if [[ "$(uname -s)" == "Linux" ]]; then
@@ -212,9 +246,19 @@ if [[ -f "$C4_DB_PATH" ]]; then
   mv "$C4_DB_PATH" "$DB_BAK"
   MOVED=1
 fi
+if [[ -f "${C4_DB_PATH}-wal" ]]; then
+  echo "$ mv ${C4_DB_PATH}-wal $DB_WAL_BAK"
+  mv "${C4_DB_PATH}-wal" "$DB_WAL_BAK"
+  MOVED=1
+fi
+if [[ -f "${C4_DB_PATH}-shm" ]]; then
+  echo "$ mv ${C4_DB_PATH}-shm $DB_SHM_BAK"
+  mv "${C4_DB_PATH}-shm" "$DB_SHM_BAK"
+  MOVED=1
+fi
 
 # Ensure no DB exists at all during Step 1.
-rm -f "$C4_DB_PATH"
+rm -f "$C4_DB_PATH" "${C4_DB_PATH}-wal" "${C4_DB_PATH}-shm"
 
 expect_missing "verify-backend-contract" "node c4-proof-pack/verify-backend-contract.mjs"
 expect_missing "verify-runtime" "node c4-proof-pack/verify-runtime.mjs"
@@ -223,6 +267,7 @@ header "Step 2 — AFTER BOOTSTRAP"
 ( set -x; bash -lc "$C4_BOOTSTRAP_COMMAND" )
 ( set -x; node c4-proof-pack/verify-backend-contract.mjs )
 ( set -x; node c4-proof-pack/verify-runtime.mjs )
+( set -x; node c4-proof-pack/verify-persistence.mjs )
 
 header "Step 3 — Proof Pack A–G"
 
@@ -261,5 +306,6 @@ header "F)"
 
 header "G)"
 ( set -x; node c4-proof-pack/verify-runtime.mjs )
+( set -x; node c4-proof-pack/verify-persistence.mjs )
 
 echo "PROOF PACK PASSED"

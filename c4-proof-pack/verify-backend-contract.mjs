@@ -234,7 +234,7 @@ main()
     process.exit(process.exitCode ?? 0);
   })
   .catch((err) => {
-    // eslint-disable-next-line no-console
+     
     console.error(String(err?.stack || err));
     process.exit(1);
   });

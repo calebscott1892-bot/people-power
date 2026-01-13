@@ -2,13 +2,23 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
+const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
+import { SERVER_BASE } from '@/api/serverBase';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { upsertMyPublicKey } from '@/api/keysClient';
 import { getOrCreateIdentityKeypair } from '@/lib/e2eeCrypto';
 import { logError } from '@/utils/logError';
+import { httpFetch } from '@/utils/httpFetch';
 import { getStaffRole } from '@/utils/staff';
 import { configureAuthFetch, installAuthFetch } from '@/auth/authFetch';
 import { queryKeys } from '@/lib/queryKeys';
+
+// --- Backend user sync for persistence proof ---
+import { syncUserWithBackend } from '@/api/usersClient';
+
+
+// Move sessionRef to top-level so it can be exported and used by getAccessToken
+export const sessionRef = { current: null };
 
 const AuthContext = createContext(null);
 const AUTH_DISABLED_MESSAGE = 'Sign-in is temporarily unavailable; configuration error. Please contact support.';
@@ -21,7 +31,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [serverStaffRole, setServerStaffRole] = useState(null);
   const lastKeyPublishRef = useRef({ accessToken: null, email: null });
-  const sessionRef = useRef(null);
+  // sessionRef is now top-level and exported
   const staffRole = useMemo(() => {
     const serverRole = String(serverStaffRole || '').trim().toLowerCase();
     if (serverRole === 'admin' || serverRole === 'moderator') return serverRole;
@@ -49,6 +59,33 @@ export function AuthProvider({ children }) {
     []
   );
 
+  const refreshProofUser = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await httpFetch(`${SERVER_BASE}/auth/me`, { credentials: 'include' });
+      if (!res.ok) {
+        setUser(null);
+        return null;
+      }
+      const data = await res.json();
+      const id = data?.user?.id ?? data?.id ?? null;
+      const email = data?.user?.email ?? data?.email ?? null;
+      const role = data?.user?.role ?? data?.role ?? 'user';
+      if (id && email) {
+        const next = { id: String(id), email: String(email), role: String(role || 'user') };
+        setUser(next);
+        return next;
+      }
+      setUser(null);
+      return null;
+    } catch {
+      setUser(null);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   // Current auth/token flow summary:
   // - We create the Supabase client in `src/api/supabaseClient.js` (persisted sessions + auto refresh enabled).
   // - On startup we call `supabase.auth.getSession()` and keep the session/user in React state.
@@ -56,6 +93,12 @@ export function AuthProvider({ children }) {
   // - API requests attach the access token via `Authorization: Bearer <token>`.
   //   (We also install a global fetch wrapper to attach the latest token and handle session expiry consistently.)
   useEffect(() => {
+    if (isProof) {
+      // Proof mode: cookie-based auth against backend
+      refreshProofUser();
+      return;
+    }
+    // ...existing code for Supabase...
     const supabase = getSupabaseClient();
     if (supabaseConfigError) {
       setSession(null);
@@ -71,23 +114,19 @@ export function AuthProvider({ children }) {
       setLoading(false);
       return undefined;
     }
-
     let mounted = true;
-
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
       applySession(data?.session ?? null);
     });
-
     const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
       applySession(newSession ?? null);
     });
-
     return () => {
       mounted = false;
       sub?.subscription?.unsubscribe?.();
     };
-  }, [applySession]);
+  }, [applySession, refreshProofUser]);
 
   // Keep React Query caches in sync with auth state.
   useEffect(() => {
@@ -204,7 +243,16 @@ export function AuthProvider({ children }) {
     }
 
     // Ensure UI updates immediately even before onAuthStateChange fires.
-    if (data?.session) applySession(data.session);
+    if (data?.session) {
+      applySession(data.session);
+      // Backend user sync for persistence proof
+      try {
+        await syncUserWithBackend();
+      } catch (e) {
+        // Log but do not block login
+        logError(e, 'Failed to sync user with backend after signIn');
+      }
+    }
     return { status: 'signed_in', session: data?.session ?? null, user: data?.user ?? null };
   }, [applySession]);
 
@@ -224,6 +272,13 @@ export function AuthProvider({ children }) {
     // - If email confirmation is REQUIRED, `data.session` is null but `data.user.confirmation_sent_at` is present.
     if (data?.session) {
       applySession(data.session);
+      // Backend user sync for persistence proof
+      try {
+        await syncUserWithBackend();
+      } catch (e) {
+        // Log but do not block signup
+        logError(e, 'Failed to sync user with backend after signUp');
+      }
       return { status: 'signed_in', session: data.session, user: data.user ?? null };
     }
 
@@ -289,8 +344,52 @@ export function AuthProvider({ children }) {
     }
   }, [queryClient]);
 
-  const value = useMemo(
-    () => ({
+  const value = useMemo(() => {
+    if (isProof) {
+      return {
+        session: null,
+        user,
+        accessToken: null,
+        loading,
+        signIn: async (email, password) => {
+          const res = await httpFetch(`${SERVER_BASE}/auth/proof/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ email, password }),
+          });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) throw new Error(data?.error || 'Auth error');
+          await refreshProofUser();
+          return { ok: true };
+        },
+        signUp: async (email, password) => {
+          const res = await httpFetch(`${SERVER_BASE}/auth/proof/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ email, password }),
+          });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) throw new Error(data?.error || 'Auth error');
+          await refreshProofUser();
+          return { ok: true, status: 'signed_in' };
+        },
+        resendConfirmationEmail: async () => { throw new Error('Not implemented in proof mode'); },
+        resetPasswordForEmail: async () => { throw new Error('Not implemented in proof mode'); },
+        signOut: async () => { await httpFetch(`${SERVER_BASE}/auth/proof/logout`, { method: 'POST', credentials: 'include' }); setUser(null); },
+        staffRole: 'user',
+        isAdmin: false,
+        isStaff: false,
+        emailConfirmedAt: null,
+        isEmailVerified: true,
+        isAuthReady: !loading,
+        isSupabaseConfigured: true,
+        authErrorMessage: null,
+        logout: async () => { await httpFetch(`${SERVER_BASE}/auth/proof/logout`, { method: 'POST', credentials: 'include' }); setUser(null); },
+      };
+    }
+    return {
       session,
       user,
       accessToken: session?.access_token ? String(session.access_token) : null,
@@ -309,24 +408,26 @@ export function AuthProvider({ children }) {
       isSupabaseConfigured: !supabaseConfigError,
       authErrorMessage: supabaseConfigError ? AUTH_DISABLED_MESSAGE : null,
       logout,
-    }),
-    [
-      session,
-      user,
-      loading,
-      signIn,
-      signUp,
-      resendConfirmationEmail,
-      resetPasswordForEmail,
-      logout,
-      staffRole,
-      isAdmin,
-      isStaff,
-      emailConfirmedAt,
-      isEmailVerified,
-      isAuthReady,
-    ]
-  );
+    };
+  }, [
+    session,
+    user,
+    loading,
+    signIn,
+    signUp,
+    resendConfirmationEmail,
+    resetPasswordForEmail,
+    logout,
+    staffRole,
+    isAdmin,
+    isStaff,
+    emailConfirmedAt,
+    isEmailVerified,
+    isAuthReady,
+    // proof
+    isProof,
+    refreshProofUser
+  ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
@@ -335,4 +436,10 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used within AuthProvider');
   return ctx;
+}
+
+// Helper to get access token for backend sync
+
+export function getAccessToken() {
+  return sessionRef.current?.access_token ? String(sessionRef.current.access_token) : null;
 }

@@ -137,7 +137,7 @@ function detachChildStreamsBestEffort(child) {
       // ignore
     }
     try {
-      // eslint-disable-next-line no-underscore-dangle
+       
       if (typeof s.unref === 'function') s.unref();
     } catch {
       // ignore
@@ -157,6 +157,7 @@ function startDev() {
       C4_BOOTSTRAP_COMMAND,
       C4_DEV_COMMAND,
       C4_AUTH_ENDPOINT,
+      C4_PROOF_PACK: '1',
     },
     detached: true,
   });
@@ -374,7 +375,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
+   
   console.error(String(err?.stack || err));
   process.exit(1);
 });

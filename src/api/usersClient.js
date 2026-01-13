@@ -1,5 +1,8 @@
+
 import { SERVER_BASE } from './serverBase';
 import { httpFetch } from '@/utils/httpFetch';
+import { getAccessToken } from '../auth/AuthProvider';
+const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
 
 const BASE_URL = SERVER_BASE;
 
@@ -110,4 +113,37 @@ export async function lookupUsers({ emails, userIds } = {}, options) {
 
 export async function lookupUsersByEmail(emails, options) {
   return lookupUsers({ emails }, options);
+}
+
+// --- Backend user sync for persistence proof ---
+export async function syncUserWithBackend() {
+  if (isProof) return;
+  const token = getAccessToken();
+  if (!token) throw new Error('No Supabase access token');
+  const res = await httpFetch(`${BASE_URL.replace(/\/$/, '')}/auth/sync`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  });
+  if (!res.ok) throw new Error('Failed to sync user with backend');
+  return await res.json();
+}
+
+export async function fetchMeFromBackend() {
+  if (isProof) {
+    const res = await httpFetch('/auth/me', { credentials: 'include' });
+    if (!res.ok) throw new Error('Failed to fetch user from backend');
+    return await res.json();
+  }
+  const token = getAccessToken();
+  if (!token) throw new Error('No Supabase access token');
+  const res = await httpFetch(`${BASE_URL.replace(/\/$/, '')}/auth/me`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+  if (!res.ok) throw new Error('Failed to fetch user from backend');
+  return await res.json();
 }

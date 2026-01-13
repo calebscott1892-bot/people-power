@@ -3,11 +3,13 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { useAuth } from '@/auth/AuthProvider';
+const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
 import BackButton from '@/components/shared/BackButton';
 import { toastFriendlyError } from '@/utils/toastErrors';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { syncUserWithBackend } from '@/api/usersClient';
 
 export default function Login() {
   const navigate = useNavigate();
@@ -127,26 +129,21 @@ export default function Login() {
   const submit = async (e) => {
     e.preventDefault();
     setStatus('');
-    if (!isSupabaseConfigured) return;
     setLoading(true);
-
     try {
+      if (!isSupabaseConfigured) return;
       if (mode === 'signup') {
         const result = await signUp(
           String(email || '').trim(),
           String(password || ''),
           redirectToEmailVerified ? { emailRedirectTo: redirectToEmailVerified } : undefined
         );
-
+        try { await syncUserWithBackend(); } catch { /* ignore for now */ }
         if (result?.status === 'signed_in') {
-          // If Supabase returns a session immediately on signup, the user is already signed in.
-          // Keep them signed in and take them into the app.
           toast.success('Account created. Welcome!');
           navigate('/welcome', { replace: true, state: { from: toFromRoute(), signedInJustNow: true } });
           return;
         }
-
-        // Confirmation required: show a dedicated screen.
         const emailValue = String(email || '').trim();
         setPendingEmail(emailValue);
         setPendingConfirmationSentAt(result?.confirmationSentAt || null);
@@ -155,12 +152,10 @@ export default function Login() {
         return;
       } else {
         await signIn(String(email || '').trim(), String(password || ''));
-        // Clear success state: take them into the app, then let them continue.
+        try { await syncUserWithBackend(); } catch { /* ignore for now */ }
         navigate('/welcome', { replace: true, state: { from: toFromRoute(), signedInJustNow: true } });
       }
     } catch (err) {
-      // Special case: Supabase sometimes blocks sign-in until email is confirmed.
-      // Route users into the same "check your email" UX with a resend option.
       if (err?.code === 'EMAIL_NOT_CONFIRMED') {
         const emailValue = String(email || '').trim();
         setPendingEmail(emailValue);
@@ -169,7 +164,6 @@ export default function Login() {
         setStatus('');
         return;
       }
-
       setStatus(err?.message ?? 'Auth error');
     } finally {
       setLoading(false);
@@ -212,7 +206,7 @@ export default function Login() {
         </CardHeader>
 
         <CardContent className="space-y-4">
-          {!isSupabaseConfigured ? (
+          {!isSupabaseConfigured && !isProof ? (
             <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
               {authErrorMessage || 'Sign-in is temporarily unavailable.'}
             </div>
@@ -299,7 +293,7 @@ export default function Login() {
                   type="email"
                   required
                   placeholder="you@example.com"
-                  disabled={loading || !isSupabaseConfigured}
+                  disabled={loading || (!isSupabaseConfigured && !isProof)}
                 />
               </div>
 
@@ -312,7 +306,7 @@ export default function Login() {
                   required
                   minLength={6}
                   placeholder="••••••••"
-                  disabled={loading || !isSupabaseConfigured}
+                  disabled={loading || (!isSupabaseConfigured && !isProof)}
                 />
               </div>
 
@@ -320,7 +314,7 @@ export default function Login() {
                 <button
                   type="button"
                   onClick={() => setMode('forgot')}
-                  disabled={loading || !isSupabaseConfigured}
+                  disabled={loading || (!isSupabaseConfigured && !isProof)}
                   className="text-left text-sm font-bold underline underline-offset-2 text-slate-700 hover:text-slate-900 disabled:opacity-70"
                 >
                   Forgot password?
@@ -331,7 +325,7 @@ export default function Login() {
                 </div>
               )}
 
-              <Button type="submit" className="w-full" disabled={loading || !isSupabaseConfigured}>
+              <Button type="submit" className="w-full" disabled={loading || (!isSupabaseConfigured && !isProof)}>
                 {loading ? 'Working…' : mode === 'signup' ? 'Create account' : 'Sign in'}
               </Button>
 

@@ -1,6 +1,17 @@
+# Proof-pack and dev DBs, cookies, logs
+cookies.txt
+Server/server/dev.db
+Server/server/*.db*
+server/*.db*
+**/*.db
+**/*.db-wal
+**/*.db-shm
+test-results/
+playwright-report/
 # Logs
 logs
 *.log
+*.pid
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -28,4 +39,12 @@ Server/.env
 
 # Local C4 Proof Pack dev DB
 server/dev.db
+server/dev.db-shm
+server/dev.db-wal
 Server/dev.db
+Server/dev.db-shm
+Server/dev.db-wal
+
+# Playwright
+/test-results/
+/playwright-report/
