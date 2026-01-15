@@ -1882,6 +1882,14 @@ const shouldUseSsl =
   sslMode === 'verify-full' ||
   hostLooksRemote;
 
+const rejectUnauthorized =
+  String(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? 'true').toLowerCase() !== 'false';
+
+fastify.log.info(
+  { rejectUnauthorized },
+  '[storage] pg ssl rejectUnauthorized'
+);
+
 const PG_CONNECTION_TIMEOUT_MS = (() => {
   const raw = Number(process.env.PG_CONNECTION_TIMEOUT_MS);
   const fallback = isProd ? 20_000 : 5_000;
@@ -1918,9 +1926,15 @@ function formatDbDiagnostic(diag) {
 
 function createPgPool({ useSsl }) {
   return new Pool({
-    connectionString: DATABASE_URL,
+    connectionString: process.env.DATABASE_URL,
     connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS,
-    ...(useSsl ? { ssl: { rejectUnauthorized: false } } : null),
+    ...(useSsl
+      ? {
+          ssl: rejectUnauthorized
+            ? { rejectUnauthorized: true }
+            : { rejectUnauthorized: false },
+        }
+      : null),
   });
 }
 
