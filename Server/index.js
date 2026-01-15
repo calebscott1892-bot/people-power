@@ -5068,7 +5068,7 @@ fastify.post('/movements/:id/follow', async (request, reply) => {
   }
 });
 
-fastify.get('/me/followed-movements', async (request, reply) => {
+fastify.get('/followed-movements', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -10544,6 +10544,7 @@ async function handlePostMyProfile(request, reply) {
 
 fastify.get('/me/profile', handleGetMyProfile);
 fastify.get('/api/me/profile', handleGetMyProfile);
+fastify.get('/profile', handleGetMyProfile);
 fastify.post('/me/profile', handlePostMyProfile);
 fastify.post('/api/me/profile', handlePostMyProfile);
 fastify.patch('/me/profile', handlePostMyProfile);
