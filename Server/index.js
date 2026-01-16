@@ -1885,11 +1885,6 @@ const shouldUseSsl =
 const rejectUnauthorized =
   String(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? 'true').toLowerCase() !== 'false';
 
-fastify.log.info(
-  { rejectUnauthorized },
-  '[storage] pg ssl rejectUnauthorized'
-);
-
 const PG_CONNECTION_TIMEOUT_MS = (() => {
   const raw = Number(process.env.PG_CONNECTION_TIMEOUT_MS);
   const fallback = isProd ? 20_000 : 5_000;
@@ -1924,9 +1919,62 @@ function formatDbDiagnostic(diag) {
   return parts.join(' ');
 }
 
+function sanitizeDatabaseUrlForPg(rawUrl) {
+  if (!rawUrl) return { connectionString: rawUrl, stripped: [] };
+
+  const sslParamKeys = new Set(['sslmode', 'sslrootcert', 'sslcert', 'sslkey']);
+
+  try {
+    const url = new URL(String(rawUrl));
+    const params = new URLSearchParams(url.search || '');
+    const strippedSet = new Set();
+    const exactKeysToDelete = new Set();
+
+    for (const key of params.keys()) {
+      const lower = String(key).toLowerCase();
+      if (sslParamKeys.has(lower)) {
+        strippedSet.add(lower);
+        exactKeysToDelete.add(key);
+      }
+    }
+
+    for (const key of exactKeysToDelete) params.delete(key);
+
+    url.search = params.toString() ? `?${params.toString()}` : '';
+    return { connectionString: url.toString(), stripped: Array.from(strippedSet) };
+  } catch {
+    const s = String(rawUrl);
+    const qIndex = s.indexOf('?');
+    if (qIndex === -1) return { connectionString: rawUrl, stripped: [] };
+
+    const base = s.slice(0, qIndex);
+    const query = s.slice(qIndex + 1);
+    const params = new URLSearchParams(query);
+    const strippedSet = new Set();
+    const exactKeysToDelete = new Set();
+
+    for (const key of params.keys()) {
+      const lower = String(key).toLowerCase();
+      if (sslParamKeys.has(lower)) {
+        strippedSet.add(lower);
+        exactKeysToDelete.add(key);
+      }
+    }
+
+    for (const key of exactKeysToDelete) params.delete(key);
+
+    const rebuilt = params.toString() ? `${base}?${params.toString()}` : base;
+    return { connectionString: rebuilt, stripped: Array.from(strippedSet) };
+  }
+}
+
+const { connectionString, stripped } = sanitizeDatabaseUrlForPg(process.env.DATABASE_URL);
+
+fastify.log.info({ strippedSslParams: stripped, rejectUnauthorized }, '[storage] pg ssl config');
+
 function createPgPool({ useSsl }) {
   return new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString,
     connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS,
     ...(useSsl
       ? {
