@@ -1,4 +1,4 @@
-import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import { fetchMovementLocks, setMovementLock } from '@/api/movementLocksClient';
 import { fetchCollaboratorActions } from '@/api/collaboratorActionsClient';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
@@ -2226,8 +2226,8 @@ export default function MovementDetails() {
           <BoostButtons
             movementId={movementId}
             movement={movement}
-            disabled={!voteUnlocked}
-            disabledReason="Read a bit first (unlocks in ~3s)"
+            requireRead
+            isReadEligible={voteUnlocked}
           />
           <ShareButton movementId={movementId} movement={movement} />
           <ReportButton contentType="movement" contentId={movementId} />

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { motion, useReducedMotion } from 'framer-motion';
@@ -7,6 +7,14 @@ import { MapContainer, Marker, TileLayer } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { httpFetch } from '@/utils/httpFetch';
+import BoostButtons from '@/components/shared/BoostButtons';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 // Ensure Leaflet marker icons resolve correctly in Vite builds.
 delete L.Icon.Default.prototype._getIconUrl;
@@ -201,18 +209,56 @@ export default function MovementCard({ movement }) {
 
   const to = id ? `/movement/${encodeURIComponent(String(id))}` : '/';
 
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewVoteEligible, setPreviewVoteEligible] = useState(false);
+  const previewScrollRef = useRef(null);
+
+  const canPreview = !!id && String(id) !== 'preview';
+
+  useEffect(() => {
+    if (!previewOpen) return;
+
+    setPreviewVoteEligible(false);
+    const timer = setTimeout(() => setPreviewVoteEligible(true), 3_000);
+
+    const el = previewScrollRef.current;
+    if (!el) {
+      return () => clearTimeout(timer);
+    }
+
+    const onScroll = () => {
+      try {
+        const remaining = el.scrollHeight - (el.scrollTop + el.clientHeight);
+        if (remaining < 200) setPreviewVoteEligible(true);
+      } catch {
+        // ignore
+      }
+    };
+
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, [previewOpen]);
+
   if (!movement) return null;
 
   return (
+    <>
     <motion.div whileHover={reduceMotion ? undefined : { y: -4 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm w-full max-w-md mx-auto">
       <div
         role="button"
         tabIndex={0}
-        onClick={() => navigate(to)}
+        onClick={() => {
+          if (!canPreview) return;
+          setPreviewOpen(true);
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
-            navigate(to);
+            if (!canPreview) return;
+            setPreviewOpen(true);
           }
         }}
         className="block p-3 sm:p-4 space-y-3 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#3A3DFF]/40 rounded-2xl"
@@ -362,5 +408,71 @@ export default function MovementCard({ movement }) {
         </div>
       </div>
     </motion.div>
+
+    {canPreview ? (
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="sm:max-w-lg w-[92vw] max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-black">{String(title)}</DialogTitle>
+          </DialogHeader>
+
+          <div
+            ref={previewScrollRef}
+            className="max-h-[55vh] overflow-y-auto pr-1 space-y-4"
+          >
+            <div className="text-sm text-slate-600 font-semibold whitespace-pre-line">
+              {String(description || 'No description provided.')}
+            </div>
+
+            {tags.length ? (
+              <div className="flex flex-wrap gap-2">
+                {tags.map((t) => (
+                  <span key={t} className="text-[11px] sm:text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-full">
+                    {formatTagLabel(t)}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="pt-1">
+              <div className="text-xs font-black text-slate-700 mb-2">Vote</div>
+              <BoostButtons
+                movementId={id}
+                movement={movement}
+                requireRead
+                isReadEligible={previewVoteEligible}
+              />
+              {!previewVoteEligible ? (
+                <div className="mt-2 text-xs text-slate-500 font-semibold">
+                  Read a bit first to unlock voting (scroll near the bottom or wait ~3s).
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="rounded-xl font-bold"
+              onClick={() => setPreviewOpen(false)}
+            >
+              Close
+            </Button>
+            <Button
+              type="button"
+              className="rounded-xl font-bold"
+              onClick={() => {
+                setPreviewOpen(false);
+                navigate(to);
+              }}
+            >
+              View full movement
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    ) : null}
+    </>
   );
 }

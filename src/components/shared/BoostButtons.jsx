@@ -23,7 +23,15 @@ function getMovementOwnerEmail(movement) {
   return null;
 }
 
-export default function BoostButtons({ movementId, movement, className = '', disabled = false, disabledReason }) {
+export default function BoostButtons({
+  movementId,
+  movement,
+  className = '',
+  disabled = false,
+  disabledReason,
+  requireRead = false,
+  isReadEligible = true,
+}) {
   const { session, user } = useAuth();
   const queryClient = useQueryClient();
 
@@ -160,10 +168,15 @@ export default function BoostButtons({ movementId, movement, className = '', dis
 
   const isBusy = mutation.isPending;
 
+  const readLocked = requireRead && !isReadEligible;
+  const effectiveDisabled = disabled || readLocked;
+  const effectiveDisabledReason =
+    disabledReason || (readLocked ? 'Read a bit first (unlocks in ~3s or near bottom)' : undefined);
+
   const handleVote = async (value) => {
     if (!id) return;
-    if (disabled) {
-      toast.message(disabledReason ? String(disabledReason) : 'Please read a bit more before voting.');
+    if (effectiveDisabled) {
+      toast.message(effectiveDisabledReason ? String(effectiveDisabledReason) : 'Please read a bit more before voting.');
       return;
     }
     if (!accessToken) {
@@ -199,15 +212,19 @@ export default function BoostButtons({ movementId, movement, className = '', dis
         type="button"
         whileTap={{ scale: 0.98 }}
         onClick={() => handleVote(1)}
-        disabled={disabled || !id || isBusy || !accessToken}
+        disabled={effectiveDisabled || !id || isBusy || !accessToken}
         className={`px-3 py-2 rounded-xl border font-black text-xs ${
-          (disabled || !id)
+          (effectiveDisabled || !id)
             ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
             : boostActive
               ? 'border-[#3A3DFF] bg-[#3A3DFF] text-white'
               : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
         }`}
-        title={disabled ? (disabledReason ? String(disabledReason) : 'Please read before voting') : (!accessToken ? 'Log in to boost' : 'Boost')}
+        title={
+          effectiveDisabled
+            ? (effectiveDisabledReason ? String(effectiveDisabledReason) : 'Please read before voting')
+            : (!accessToken ? 'Log in to boost' : 'Boost')
+        }
       >
         Boost ({boostsCount})
       </motion.button>
@@ -216,15 +233,19 @@ export default function BoostButtons({ movementId, movement, className = '', dis
         type="button"
         whileTap={{ scale: 0.98 }}
         onClick={() => handleVote(-1)}
-        disabled={disabled || !id || isBusy || !accessToken}
+        disabled={effectiveDisabled || !id || isBusy || !accessToken}
         className={`px-3 py-2 rounded-xl border font-black text-xs ${
-          (disabled || !id)
+          (effectiveDisabled || !id)
             ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
             : downActive
               ? 'border-slate-900 bg-slate-900 text-white'
               : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
         }`}
-        title={disabled ? (disabledReason ? String(disabledReason) : 'Please read before voting') : (!accessToken ? 'Log in to downvote' : 'Downvote')}
+        title={
+          effectiveDisabled
+            ? (effectiveDisabledReason ? String(effectiveDisabledReason) : 'Please read before voting')
+            : (!accessToken ? 'Log in to downvote' : 'Downvote')
+        }
       >
         Downvote ({downvotes})
       </motion.button>
