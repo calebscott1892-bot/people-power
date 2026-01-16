@@ -23,7 +23,7 @@ function getMovementOwnerEmail(movement) {
   return null;
 }
 
-export default function BoostButtons({ movementId, movement, className = '' }) {
+export default function BoostButtons({ movementId, movement, className = '', disabled = false, disabledReason }) {
   const { session, user } = useAuth();
   const queryClient = useQueryClient();
 
@@ -162,6 +162,10 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
 
   const handleVote = async (value) => {
     if (!id) return;
+    if (disabled) {
+      toast.message(disabledReason ? String(disabledReason) : 'Please read a bit more before voting.');
+      return;
+    }
     if (!accessToken) {
       toast.error('Please log in to boost');
       return;
@@ -195,15 +199,15 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
         type="button"
         whileTap={{ scale: 0.98 }}
         onClick={() => handleVote(1)}
-        disabled={!id || isBusy || !accessToken}
+        disabled={disabled || !id || isBusy || !accessToken}
         className={`px-3 py-2 rounded-xl border font-black text-xs ${
-          !id
+          (disabled || !id)
             ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
             : boostActive
               ? 'border-[#3A3DFF] bg-[#3A3DFF] text-white'
               : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
         }`}
-        title={!accessToken ? 'Log in to boost' : 'Boost'}
+        title={disabled ? (disabledReason ? String(disabledReason) : 'Please read before voting') : (!accessToken ? 'Log in to boost' : 'Boost')}
       >
         Boost ({boostsCount})
       </motion.button>
@@ -212,15 +216,15 @@ export default function BoostButtons({ movementId, movement, className = '' }) {
         type="button"
         whileTap={{ scale: 0.98 }}
         onClick={() => handleVote(-1)}
-        disabled={!id || isBusy || !accessToken}
+        disabled={disabled || !id || isBusy || !accessToken}
         className={`px-3 py-2 rounded-xl border font-black text-xs ${
-          !id
+          (disabled || !id)
             ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
             : downActive
               ? 'border-slate-900 bg-slate-900 text-white'
               : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
         }`}
-        title={!accessToken ? 'Log in to downvote' : 'Downvote'}
+        title={disabled ? (disabledReason ? String(disabledReason) : 'Please read before voting') : (!accessToken ? 'Log in to downvote' : 'Downvote')}
       >
         Downvote ({downvotes})
       </motion.button>

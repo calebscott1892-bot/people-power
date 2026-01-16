@@ -122,6 +122,7 @@ export async function syncUserWithBackend() {
   if (!token) throw new Error('No Supabase access token');
   const res = await httpFetch(`${BASE_URL.replace(/\/$/, '')}/auth/sync`, {
     method: 'POST',
+    timeoutMs: 12_000,
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',

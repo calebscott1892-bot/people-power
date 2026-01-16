@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2 } from 'lucide-react';
+import { Home, User, Zap, MessageCircle, Megaphone, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -91,6 +91,37 @@ function LayoutContent({ children }) {
   });
   const profileEmail = authUser?.email ? String(authUser.email) : null;
   const accessToken = session?.access_token ? String(session.access_token) : null;
+
+  const isFetchingRef = useRef(isFetchingCount);
+  useEffect(() => {
+    isFetchingRef.current = isFetchingCount;
+  }, [isFetchingCount]);
+
+  const syncingStuckLoggedRef = useRef(false);
+  useEffect(() => {
+    if (!import.meta?.env?.DEV) return;
+
+    if (isFetchingCount > 0) {
+      if (syncingStuckLoggedRef.current) return;
+      const timer = setTimeout(() => {
+        if (syncingStuckLoggedRef.current) return;
+        if (isFetchingRef.current <= 0) return;
+
+        syncingStuckLoggedRef.current = true;
+        try {
+          const active = queryClient.getQueryCache().findAll({ fetchStatus: 'fetching' });
+          const keys = active.map((q) => q.queryKey);
+          console.warn('[PeoplePower] Syncing > 10s. Active query keys:', keys);
+        } catch (e) {
+          console.warn('[PeoplePower] Syncing > 10s. Failed to inspect queries.', e);
+        }
+      }, 10_000);
+
+      return () => clearTimeout(timer);
+    }
+
+    syncingStuckLoggedRef.current = false;
+  }, [isFetchingCount, queryClient]);
 
   const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
     queryKey: queryKeys.userProfile.me(profileEmail),
@@ -338,7 +369,7 @@ function LayoutContent({ children }) {
                     className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
                     aria-label="Send feedback or report a bug"
                   >
-                    <MessageCircle className="w-4 h-4" />
+                    <Megaphone className="w-4 h-4" />
                     <span className="hidden md:inline text-xs font-bold">Feedback</span>
                   </button>
                 ) : null}

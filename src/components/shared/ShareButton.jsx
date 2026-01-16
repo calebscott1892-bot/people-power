@@ -15,7 +15,55 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-const NEW_MOVEMENT_EXTERNAL_SHARE_COOLDOWN_MS = 15 * 60 * 1000;
+const EXTERNAL_SHARE_COOLDOWN_MS = 15 * 60 * 1000;
+
+function getShareUserKey(user) {
+  const id = user?.id ? String(user.id).trim() : '';
+  if (id) return id;
+  const email = user?.email ? String(user.email).trim().toLowerCase() : '';
+  if (email) return email;
+  return 'anon';
+}
+
+function shareCooldownStorageKey({ userKey, method }) {
+  return `pp_share_cooldown_v1:${String(userKey || 'anon')}:${String(method || 'external')}`;
+}
+
+function readLastShareAtMs({ userKey, method }) {
+  try {
+    const raw = localStorage.getItem(shareCooldownStorageKey({ userKey, method }));
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    // Guard against clock changes / corrupted future timestamps.
+    const now = Date.now();
+    if (n > now + 60_000) return now;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastShareAtMs({ userKey, method }, atMs) {
+  try {
+    const v = Number.isFinite(atMs) ? String(Math.floor(atMs)) : String(Date.now());
+    localStorage.setItem(shareCooldownStorageKey({ userKey, method }), v);
+  } catch {
+    // ignore
+  }
+}
+
+function remainingCooldownMs({ userKey, method, cooldownMs }) {
+  const last = readLastShareAtMs({ userKey, method });
+  if (!last) return 0;
+  const remaining = Number(cooldownMs) - (Date.now() - last);
+  return Math.max(0, remaining);
+}
+
+function formatRemainingLabel(ms) {
+  if (!ms || ms <= 0) return '';
+  const minutes = Math.max(1, Math.ceil(ms / (60 * 1000)));
+  return `${minutes} min`;
+}
 
 export default function ShareButton({ movement, profile, variant = "default", label }) {
   const { user, session } = useAuth();
@@ -37,25 +85,19 @@ export default function ShareButton({ movement, profile, variant = "default", la
     return e2eePromiseRef.current;
   };
 
-  const movementCreatedAt = movement?.created_at || movement?.created_date || movement?.createdAt || null;
-  const movementAgeMs = useMemo(() => {
-    if (targetType !== 'movement' || !movementCreatedAt) return null;
-    const t = new Date(movementCreatedAt).getTime();
-    if (!Number.isFinite(t)) return null;
-    return Date.now() - t;
-  }, [movementCreatedAt, targetType]);
-
-  const externalShareRemainingMs = useMemo(() => {
-    if (movementAgeMs === null) return 0;
-    return Math.max(0, NEW_MOVEMENT_EXTERNAL_SHARE_COOLDOWN_MS - movementAgeMs);
-  }, [movementAgeMs]);
-
-  const externalShareLocked = targetType === 'movement' && externalShareRemainingMs > 0;
-  const externalShareRemainingLabel = useMemo(() => {
-    if (!externalShareLocked) return '';
-    const minutes = Math.max(1, Math.ceil(externalShareRemainingMs / (60 * 1000)));
-    return `${minutes} min`;
-  }, [externalShareLocked, externalShareRemainingMs]);
+  const shareUserKey = useMemo(() => getShareUserKey(user), [user]);
+  const deviceShareRemainingMs = useMemo(
+    () => remainingCooldownMs({ userKey: shareUserKey, method: 'device', cooldownMs: EXTERNAL_SHARE_COOLDOWN_MS }),
+    [shareUserKey]
+  );
+  const externalShareRemainingMs = useMemo(
+    () => remainingCooldownMs({ userKey: shareUserKey, method: 'external', cooldownMs: EXTERNAL_SHARE_COOLDOWN_MS }),
+    [shareUserKey]
+  );
+  const deviceShareLocked = deviceShareRemainingMs > 0;
+  const externalShareLocked = externalShareRemainingMs > 0;
+  const deviceShareRemainingLabel = useMemo(() => formatRemainingLabel(deviceShareRemainingMs), [deviceShareRemainingMs]);
+  const externalShareRemainingLabel = useMemo(() => formatRemainingLabel(externalShareRemainingMs), [externalShareRemainingMs]);
 
   const safeMovementId = movement?.id ?? movement?._id ?? null;
   const profileUsername = String(profile?.username || profile?.handle || '').trim().replace(/^@/, '');
@@ -174,13 +216,14 @@ export default function ShareButton({ movement, profile, variant = "default", la
         return;
       }
 
-      if (externalShareLocked) {
-        toast.message(`External sharing unlocks in ${externalShareRemainingLabel} (anti-spam cooldown).`);
+      if (deviceShareLocked) {
+        toast.message(`Sharing unlocks in ${deviceShareRemainingLabel} (cooldown).`);
         return;
       }
 
       if (navigator.share) {
         await navigator.share({ title: shareTitle, text: shareText, url: shareUrl });
+        writeLastShareAtMs({ userKey: shareUserKey, method: 'device' }, Date.now());
       } else {
         toast.message('On supported devices, this uses the native share sheet (AirDrop/Instagram/etc).');
         await handleCopyLink();
@@ -198,10 +241,11 @@ export default function ShareButton({ movement, profile, variant = "default", la
   const openUrl = (url) => {
     try {
       if (externalShareLocked) {
-        toast.message(`External sharing unlocks in ${externalShareRemainingLabel} (anti-spam cooldown).`);
+        toast.message(`Sharing unlocks in ${externalShareRemainingLabel} (cooldown).`);
         return;
       }
       window.open(url, '_blank', 'noopener,noreferrer');
+      writeLastShareAtMs({ userKey: shareUserKey, method: 'external' }, Date.now());
       setShowDialog(false);
     } catch (e) {
       logError(e, 'ShareButton openUrl failed', { url });
@@ -270,12 +314,12 @@ export default function ShareButton({ movement, profile, variant = "default", la
               variant="outline"
               className={`${optionClass} flex-wrap gap-2`}
               title="Uses your device's native share sheet when available (AirDrop/Instagram/Messages/etc)"
-              disabled={externalShareLocked}
+              disabled={deviceShareLocked}
             >
               <Share2 className="w-5 h-5 mr-3" />
               Share via device (AirDrop / Instagram)
-              {externalShareLocked ? (
-                <span className="ml-auto text-xs font-black text-slate-600">Cooldown {externalShareRemainingLabel}</span>
+              {deviceShareLocked ? (
+                <span className="ml-auto text-xs font-black text-slate-600">Cooldown {deviceShareRemainingLabel}</span>
               ) : null}
             </Button>
 
@@ -341,10 +385,11 @@ export default function ShareButton({ movement, profile, variant = "default", la
                   const body = encodeURIComponent([shareText, shareUrl].filter(Boolean).join('\n\n'));
                   // "sms:" URL support varies by platform; this is a best-effort.
                   if (externalShareLocked) {
-                    toast.message(`External sharing unlocks in ${externalShareRemainingLabel} (anti-spam cooldown).`);
+                    toast.message(`Sharing unlocks in ${externalShareRemainingLabel} (cooldown).`);
                     return;
                   }
                   window.location.href = `sms:?&body=${body}`;
+                  writeLastShareAtMs({ userKey: shareUserKey, method: 'external' }, Date.now());
                   setShowDialog(false);
                 }}
                 variant="outline"

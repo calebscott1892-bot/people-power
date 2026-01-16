@@ -1,6 +1,6 @@
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchMovementLocks, setMovementLock } from '@/api/movementLocksClient';
 import { fetchCollaboratorActions } from '@/api/collaboratorActionsClient';
-import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
@@ -517,6 +517,7 @@ function sanitizeRichText(html) {
 }
 
 export default function MovementDetails() {
+  const [voteUnlocked, setVoteUnlocked] = useState(false);
   const { user, session, isAdmin } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
@@ -533,6 +534,27 @@ export default function MovementDetails() {
     () => (movementId ? `pp_movement_details_v1:${encodeURIComponent(String(movementId))}` : null),
     [movementId]
   );
+
+  useEffect(() => {
+    setVoteUnlocked(false);
+    const timer = setTimeout(() => setVoteUnlocked(true), 3_000);
+
+    const onScroll = () => {
+      try {
+        const doc = document.documentElement;
+        const remaining = doc.scrollHeight - (window.scrollY + window.innerHeight);
+        if (remaining < 500) setVoteUnlocked(true);
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('scroll', onScroll);
+    };
+  }, [movementId]);
 
   // Listen for backend status changes
   useEffect(() => {
@@ -2201,7 +2223,12 @@ export default function MovementDetails() {
         </div>
 
         <div id="share" className="pt-4 flex flex-wrap gap-3 items-center">
-          <BoostButtons movementId={movementId} movement={movement} />
+          <BoostButtons
+            movementId={movementId}
+            movement={movement}
+            disabled={!voteUnlocked}
+            disabledReason="Read a bit first (unlocks in ~3s)"
+          />
           <ShareButton movementId={movementId} movement={movement} />
           <ReportButton contentType="movement" contentId={movementId} />
         </div>

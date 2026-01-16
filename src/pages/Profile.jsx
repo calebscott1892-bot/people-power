@@ -398,7 +398,7 @@ export default function Profile() {
           </div>
 
           {/* Stats Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
             <motion.div 
               whileHover={{ scale: 1.05 }}
               className="bg-gradient-to-br from-indigo-50 to-white p-5 rounded-2xl border-2 border-indigo-200 text-center"
@@ -423,18 +423,6 @@ export default function Profile() {
               </div>
             </motion.div>
             
-            <motion.div 
-              whileHover={{ scale: 1.05 }}
-              className="bg-gradient-to-br from-slate-50 to-white p-5 rounded-2xl border-2 border-slate-200 text-center"
-            >
-              <div className="text-3xl font-black text-slate-900 mb-1">
-                {followersCount}
-              </div>
-              <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
-                Followers
-              </div>
-            </motion.div>
-
             <motion.div 
               whileHover={{ scale: 1.05 }}
               className="bg-gradient-to-br from-purple-50 to-white p-5 rounded-2xl border-2 border-purple-200 text-center"

@@ -16,7 +16,7 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         transition={{ duration: reduceMotion ? 0 : 1.2, ease: "easeInOut" }}
-        className="fixed inset-0 z-[9999] bg-gradient-to-br from-slate-900 via-[#1a1d4d] to-slate-900 overflow-y-auto"
+        className="fixed inset-0 z-[9999] bg-gradient-to-br from-slate-900 via-[#1a1d4d] to-slate-900 overflow-y-auto overflow-x-hidden touch-pan-y"
       >
         {/* Animated Background Circles */}
         <motion.div
