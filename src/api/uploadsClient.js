@@ -16,8 +16,35 @@ async function safeReadJson(res) {
   }
 }
 
-function absolutizeUrl(url) {
-  const s = url ? String(url) : '';
+function toUploadsPath(input) {
+  const raw = input == null ? '' : String(input);
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('/uploads/')) return trimmed;
+  if (trimmed.startsWith('uploads/')) return `/${trimmed}`;
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      const pathname = String(parsed.pathname || '');
+      const idx = pathname.indexOf('/uploads/');
+      if (idx >= 0) return pathname.slice(idx);
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  if (trimmed.startsWith('/')) {
+    const idx = trimmed.indexOf('/uploads/');
+    if (idx >= 0) return trimmed.slice(idx);
+  }
+
+  return null;
+}
+
+function toRenderUrl(pathOrUrl) {
+  const s = pathOrUrl ? String(pathOrUrl).trim() : '';
   if (!s) return null;
   if (/^https?:\/\//i.test(s)) return s;
   if (s.startsWith('/')) return `${BASE_URL.replace(/\/$/, '')}${s}`;
@@ -70,8 +97,13 @@ export async function uploadFile(file, options) {
   const fileUrl =
     body && typeof body === 'object' && (body.url || body.file_url || body.path) ? String(body.url || body.file_url || body.path) : null;
 
+  const canonicalPath = toUploadsPath(fileUrl);
+
   return {
     ...(body && typeof body === 'object' ? body : {}),
-    url: absolutizeUrl(fileUrl),
+    // Persist path-only, never absolute URLs.
+    url: canonicalPath,
+    // Convenience for immediate rendering if needed.
+    render_url: canonicalPath ? toRenderUrl(canonicalPath) : null,
   };
 }
