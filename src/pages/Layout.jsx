@@ -124,7 +124,7 @@ function LayoutContent({ children }) {
       if (!accessToken) return null;
 
       try {
-        const profile = await fetchMyProfile({ accessToken });
+          const profile = await fetchMyProfile({ accessToken, profileEmail });
         return profile || null;
       } catch (e) {
         if (!allowLocalProfileFallback) throw e;

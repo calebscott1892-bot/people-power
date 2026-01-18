@@ -1,6 +1,12 @@
 import { SERVER_BASE } from './serverBase';
 import { httpFetch } from '@/utils/httpFetch';
 
+const DEV = !!import.meta?.env?.DEV;
+const FETCH_MY_PROFILE_COOLDOWN_MS = 2000;
+const fetchMyProfileInflightByKey = new Map();
+const fetchMyProfileCooldownCacheByKey = new Map();
+let fetchMyProfileSeq = 0;
+
 function toUploadsPath(input) {
   const raw = input == null ? '' : String(input);
   const trimmed = raw.trim();
@@ -120,35 +126,120 @@ export async function upsertMyProfile(payload, options) {
 export async function fetchMyProfile(options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const includeMeta = options?.includeMeta === true;
+  const force = options?.force === true;
+  const profileEmailRaw = options?.profileEmail != null ? String(options.profileEmail) : '';
+  const profileEmail = profileEmailRaw.trim().toLowerCase() || 'unknown';
   if (!accessToken) throw new Error('Authentication required');
 
   const BASE_URL = SERVER_BASE;
 
-  const url = `${BASE_URL.replace(/\/$/, '')}/me/profile${includeMeta ? '?include_meta=1' : ''}`;
-  const res = await httpFetch(url, {
-    cache: 'no-store',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  const key = `${profileEmail}|${includeMeta ? 'meta' : 'base'}`;
+  const now = Date.now();
 
-  const body = await safeReadJson(res);
-
-  if (!res.ok) {
-    const messageFromBody =
-      (body && typeof body === 'object' && (body.message || body.error)) || null;
-    throw new Error(messageFromBody ? String(messageFromBody) : `Failed to load profile: ${res.status}`);
-  }
-
-  if (includeMeta) {
-    if (body && typeof body === 'object' && body.profile) {
-      return { ...body, profile: normalizeProfileMediaForClient(body.profile) };
+  if (!force) {
+    const cached = fetchMyProfileCooldownCacheByKey.get(key);
+    if (cached && now - cached.at < FETCH_MY_PROFILE_COOLDOWN_MS) {
+      if (DEV) {
+        console.debug('[PeoplePower] fetchMyProfile cooldown_hit', {
+          key,
+          includeMeta,
+          ageMs: now - cached.at,
+        });
+      }
+      return cached.value;
     }
-    return body;
   }
-  if (body && typeof body === 'object' && 'profile' in body) return normalizeProfileMediaForClient(body.profile);
-  return normalizeProfileMediaForClient(body);
+
+  const inflight = fetchMyProfileInflightByKey.get(key);
+  if (inflight) {
+    if (DEV) {
+      console.debug('[PeoplePower] fetchMyProfile dedupe_inflight', { key, includeMeta });
+    }
+    return inflight;
+  }
+
+  const reqId = ++fetchMyProfileSeq;
+  const startedAt = now;
+
+  const url = `${BASE_URL.replace(/\/$/, '')}/me/profile${includeMeta ? '?include_meta=1' : ''}`;
+
+  const promise = (async () => {
+    if (DEV) {
+      console.debug('[PeoplePower] fetchMyProfile start', {
+        reqId,
+        key,
+        includeMeta,
+        force,
+      });
+    }
+
+    const res = await httpFetch(url, {
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    const body = await safeReadJson(res);
+
+    if (!res.ok) {
+      const messageFromBody =
+        (body && typeof body === 'object' && (body.message || body.error)) || null;
+      const error = new Error(
+        messageFromBody ? String(messageFromBody) : `Failed to load profile: ${res.status}`
+      );
+      error.status = res.status;
+      throw error;
+    }
+
+    let value;
+    if (includeMeta) {
+      if (body && typeof body === 'object' && body.profile) {
+        value = { ...body, profile: normalizeProfileMediaForClient(body.profile) };
+      } else {
+        value = body;
+      }
+    } else if (body && typeof body === 'object' && 'profile' in body) {
+      value = normalizeProfileMediaForClient(body.profile);
+    } else {
+      value = normalizeProfileMediaForClient(body);
+    }
+
+    fetchMyProfileCooldownCacheByKey.set(key, { at: Date.now(), value });
+    return value;
+  })();
+
+  fetchMyProfileInflightByKey.set(key, promise);
+
+  try {
+    const value = await promise;
+    if (DEV) {
+      console.debug('[PeoplePower] fetchMyProfile end', {
+        reqId,
+        key,
+        includeMeta,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+      });
+    }
+    return value;
+  } catch (e) {
+    if (DEV) {
+      console.debug('[PeoplePower] fetchMyProfile end', {
+        reqId,
+        key,
+        includeMeta,
+        ok: false,
+        status: e?.status ?? e?.statusCode ?? null,
+        durationMs: Date.now() - startedAt,
+        message: e?.message ? String(e.message) : null,
+      });
+    }
+    throw e;
+  } finally {
+    fetchMyProfileInflightByKey.delete(key);
+  }
 }
 
 export async function fetchPublicProfileByUsername(username, options) {

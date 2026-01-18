@@ -113,7 +113,7 @@ export default function Profile() {
       const token = accessToken ? String(accessToken) : null;
       try {
         if (token) {
-          const profile = await fetchMyProfile({ accessToken: token });
+            const profile = await fetchMyProfile({ accessToken: token, profileEmail: user.email });
           if (profile) return { ...profile, location: sanitizePublicLocation(profile?.location) };
         }
       } catch (e) {

@@ -31,6 +31,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [serverStaffRole, setServerStaffRole] = useState(null);
   const lastKeyPublishRef = useRef({ accessToken: null, email: null });
+  const lastStaffRoleFetchRef = useRef({ email: null, ok: false });
   // sessionRef is now top-level and exported
   const staffRole = useMemo(() => {
     const serverRole = String(serverStaffRole || '').trim().toLowerCase();
@@ -130,8 +131,11 @@ export function AuthProvider({ children }) {
 
   // Keep React Query caches in sync with auth state.
   useEffect(() => {
-    const email = user?.email ? String(user.email).trim().toLowerCase() : null;
     if (!isAuthReady) return;
+
+      const emailRaw = user?.email != null ? String(user.email) : '';
+      const email = emailRaw.trim().toLowerCase();
+      if (!email) return;
 
     // When auth changes, refresh user-bound queries.
     queryClient.invalidateQueries({ queryKey: queryKeys.userProfile.me(email) }).catch(() => {});
@@ -178,25 +182,37 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     const accessToken = session?.access_token ? String(session.access_token) : null;
-    if (!accessToken) {
+    const email = user?.email ? String(user.email).trim().toLowerCase() : null;
+    if (!accessToken || !email) {
       setServerStaffRole(null);
+      lastStaffRoleFetchRef.current = { email: null, ok: false };
       return;
     }
+
+    const prev = lastStaffRoleFetchRef.current;
+    // If we've already successfully fetched the role for this email, don't refetch
+    // on routine token refreshes (reduces /me/profile storms).
+    if (prev.email === email && prev.ok) return;
+
     let active = true;
-    fetchMyProfile({ accessToken, includeMeta: true })
+    fetchMyProfile({ accessToken, includeMeta: true, profileEmail: email })
       .then((res) => {
         const role = res?.meta?.staff_role ? String(res.meta.staff_role).toLowerCase() : null;
         if (active && (role === 'admin' || role === 'moderator' || role === 'user')) {
           setServerStaffRole(role);
+          lastStaffRoleFetchRef.current = { email, ok: true };
         }
       })
       .catch(() => {
-        if (active) setServerStaffRole(null);
+        if (active) {
+          setServerStaffRole(null);
+          lastStaffRoleFetchRef.current = { email, ok: false };
+        }
       });
     return () => {
       active = false;
     };
-  }, [session?.access_token]);
+  }, [session?.access_token, user?.email]);
 
   // Publish the user's identity public key shortly after sign-in.
   // This lets other users message a newly created account without requiring
