@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
@@ -90,6 +90,9 @@ function LayoutContent({ children }) {
   });
   const profileEmail = authUser?.email ? String(authUser.email) : null;
   const accessToken = session?.access_token ? String(session.access_token) : null;
+  const lastResumeRefetchAtRef = useRef(0);
+  const isFetchingRef = useRef(false);
+  const refetchRef = useRef(null);
 
   const getHttpStatus = (err) => {
     if (!err) return null;
@@ -124,7 +127,7 @@ function LayoutContent({ children }) {
       if (!accessToken) return null;
 
       try {
-          const profile = await fetchMyProfile({ accessToken, profileEmail });
+        const profile = await fetchMyProfile({ accessToken, profileEmail });
         return profile || null;
       } catch (e) {
         if (!allowLocalProfileFallback) throw e;
@@ -137,6 +140,33 @@ function LayoutContent({ children }) {
       }
     },
   });
+
+  useEffect(() => {
+    isFetchingRef.current = !!userProfileQuery.isFetching;
+    refetchRef.current = userProfileQuery.refetch;
+  }, [userProfileQuery.isFetching, userProfileQuery.refetch]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!profileEmail || !accessToken) return;
+      if (isFetchingRef.current) return;
+
+      const now = Date.now();
+      if (now - lastResumeRefetchAtRef.current < 30_000) return;
+      lastResumeRefetchAtRef.current = now;
+
+      const refetch = refetchRef.current;
+      if (typeof refetch === 'function') refetch();
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [profileEmail, accessToken]);
 
   const userProfile = userProfileQuery.data;
   const userProfileLoading = userProfileQuery.isLoading;
