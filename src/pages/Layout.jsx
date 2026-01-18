@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
@@ -11,7 +11,7 @@ import { useAuth } from '@/auth/AuthProvider';
 import ErrorBoundary from '@/components/shared/ErrorBoundary';
 import Footer from '@/components/layout/Footer';
 import { useFeatureFlag } from '@/utils/featureFlags';
-import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
@@ -72,7 +72,6 @@ function EarlyAccessBanner() {
 
 function LayoutContent({ children }) {
   const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
-  const isFetchingCount = useIsFetching();
   const { user: authUser, session, isAdmin, logout } = useAuth();
   const [showIntroAgain, setShowIntroAgain] = useState(false);
   const location = useLocation();
@@ -92,41 +91,34 @@ function LayoutContent({ children }) {
   const profileEmail = authUser?.email ? String(authUser.email) : null;
   const accessToken = session?.access_token ? String(session.access_token) : null;
 
-  const isFetchingRef = useRef(isFetchingCount);
-  useEffect(() => {
-    isFetchingRef.current = isFetchingCount;
-  }, [isFetchingCount]);
+  const getHttpStatus = (err) => {
+    if (!err) return null;
+    const direct = err?.status ?? err?.statusCode;
+    if (typeof direct === 'number') return direct;
+    const resp = err?.response?.status ?? err?.response?.statusCode;
+    if (typeof resp === 'number') return resp;
+    const cause = err?.cause?.status ?? err?.cause?.statusCode;
+    if (typeof cause === 'number') return cause;
+    return null;
+  };
 
-  const syncingStuckLoggedRef = useRef(false);
-  useEffect(() => {
-    if (!import.meta?.env?.DEV) return;
-
-    if (isFetchingCount > 0) {
-      if (syncingStuckLoggedRef.current) return;
-      const timer = setTimeout(() => {
-        if (syncingStuckLoggedRef.current) return;
-        if (isFetchingRef.current <= 0) return;
-
-        syncingStuckLoggedRef.current = true;
-        try {
-          const active = queryClient.getQueryCache().findAll({ fetchStatus: 'fetching' });
-          const keys = active.map((q) => q.queryKey);
-          console.warn('[PeoplePower] Syncing > 10s. Active query keys:', keys);
-        } catch (e) {
-          console.warn('[PeoplePower] Syncing > 10s. Failed to inspect queries.', e);
-        }
-      }, 10_000);
-
-      return () => clearTimeout(timer);
-    }
-
-    syncingStuckLoggedRef.current = false;
-  }, [isFetchingCount, queryClient]);
-
-  const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
+  const userProfileQuery = useQuery({
     queryKey: queryKeys.userProfile.me(profileEmail),
     enabled: !!profileEmail && !!accessToken,
-    retry: 1,
+    retry: (failureCount, error) => {
+      const status = getHttpStatus(error);
+      if (status === 401 || status === 403) return false;
+      return failureCount < 2;
+    },
+    retryDelay: (attemptIndex) => {
+      // Exponential backoff: 1s, 2s (capped).
+      const base = 1000;
+      const delay = base * Math.pow(2, attemptIndex);
+      return Math.min(delay, 8000);
+    },
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchOnMount: false,
     queryFn: async () => {
       if (!profileEmail) return null;
       if (!accessToken) return null;
@@ -144,10 +136,12 @@ function LayoutContent({ children }) {
         }
       }
     },
-    onError: (e) => {
-      toastFriendlyError(e, "Couldn't load your profile");
-    },
   });
+
+  const userProfile = userProfileQuery.data;
+  const userProfileLoading = userProfileQuery.isLoading;
+  const userProfileFetching = userProfileQuery.isFetching;
+  const userProfileIsError = userProfileQuery.isError;
 
   const hideFooter = location.pathname === '/login';
 
@@ -260,11 +254,24 @@ function LayoutContent({ children }) {
             <span>Reconnecting to People Power — some data may be out of date.</span>
           </div>
         </div>
-      ) : isFetchingCount > 0 ? (
+      ) : userProfileFetching ? (
         <div className="w-full border-b border-slate-200 bg-white text-slate-700 px-4 sm:px-6 py-2">
           <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
             <Loader2 className="w-4 h-4 animate-spin" />
             <span>Syncing…</span>
+          </div>
+        </div>
+      ) : userProfileIsError ? (
+        <div className="w-full border-b border-amber-200 bg-amber-50 text-amber-900 px-4 sm:px-6 py-2">
+          <div className="max-w-7xl mx-auto flex items-center justify-center gap-3 text-sm font-bold">
+            <span>Couldn&apos;t load your profile.</span>
+            <button
+              type="button"
+              onClick={() => userProfileQuery.refetch()}
+              className="underline underline-offset-2"
+            >
+              Retry
+            </button>
           </div>
         </div>
       ) : null}

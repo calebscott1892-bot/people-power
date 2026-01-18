@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useRef } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -21,7 +21,6 @@ import { sanitizePublicLocation } from '@/utils/locationPrivacy';
 import { logError } from '@/utils/logError';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
-import { toast } from 'sonner';
 import FollowListDialog from '@/components/profile/FollowListDialog';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 import FeedbackBugDialog from '@/components/shared/FeedbackBugDialog';
@@ -57,7 +56,17 @@ export default function Profile() {
   const navigate = useNavigate();
   const accessToken = session?.access_token || null;
   const challengesEnabled = !!import.meta?.env?.DEV;
-  const profileLoadErrorToastedRef = useRef(false);
+
+  const getHttpStatus = (err) => {
+    if (!err) return null;
+    const direct = err?.status ?? err?.statusCode;
+    if (typeof direct === 'number') return direct;
+    const resp = err?.response?.status ?? err?.response?.statusCode;
+    if (typeof resp === 'number') return resp;
+    const cause = err?.cause?.status ?? err?.cause?.statusCode;
+    if (typeof cause === 'number') return cause;
+    return null;
+  };
 
   useEffect(() => {
     if (authLoading) return;
@@ -95,6 +104,8 @@ export default function Profile() {
   const {
     data: userProfile,
     isError: userProfileIsError,
+    isFetching: userProfileIsFetching,
+    refetch: refetchUserProfile,
   } = useQuery({
     queryKey: queryKeys.userProfile.me(user?.email),
     queryFn: async () => {
@@ -131,7 +142,20 @@ export default function Profile() {
         return null;
       }
     },
-    enabled: !!user?.email && (!!accessToken || allowLocalProfileFallback)
+    enabled: !!user?.email && (!!accessToken || allowLocalProfileFallback),
+    retry: (failureCount, error) => {
+      const status = getHttpStatus(error);
+      if (status === 401 || status === 403) return false;
+      return failureCount < 2;
+    },
+    retryDelay: (attemptIndex) => {
+      const base = 1000;
+      const delay = base * Math.pow(2, attemptIndex);
+      return Math.min(delay, 8000);
+    },
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchOnMount: false,
   });
 
   const softTrustMarkers = useMemo(() => {
@@ -140,13 +164,6 @@ export default function Profile() {
     const joinedAt = user?.created_date || userProfile?.created_at || null;
     return getSoftTrustMarkers({ movementsPosted, boostsEarned, joinedAt });
   }, [myMovements, user?.created_date, userProfile?.created_at]);
-
-  useEffect(() => {
-    if (!userProfileIsError) return;
-    if (profileLoadErrorToastedRef.current) return;
-    profileLoadErrorToastedRef.current = true;
-    toast.error('Failed to load your profile. Please try again.');
-  }, [userProfileIsError]);
 
   useEffect(() => {
     if (!import.meta?.env?.DEV) return;
@@ -257,6 +274,27 @@ export default function Profile() {
         >
           Go to login
         </button>
+      </div>
+    );
+  }
+
+  if (userProfileIsError && !userProfileIsFetching) {
+    return (
+      <div className="max-w-xl mx-auto py-20 px-6 text-center space-y-4">
+        <div className="w-16 h-16 mx-auto rounded-full bg-slate-100 flex items-center justify-center">
+          <User className="w-8 h-8 text-slate-400" />
+        </div>
+        <h2 className="text-2xl font-black text-slate-900">Couldn&apos;t load your profile</h2>
+        <p className="text-slate-500 font-semibold">You can keep using the app. Try again when you&apos;re ready.</p>
+        <div className="flex items-center justify-center gap-3">
+          <Button type="button" onClick={() => refetchUserProfile()}>
+            Retry
+          </Button>
+          <Button type="button" variant="outline" onClick={() => navigate('/')}
+          >
+            Go Home
+          </Button>
+        </div>
       </div>
     );
   }
