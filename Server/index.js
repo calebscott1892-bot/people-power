@@ -10172,6 +10172,41 @@ fastify.get('/search/users', { config: { rateLimit: RATE_LIMITS.search } }, asyn
 });
 
 // Update or create the current user's profile with username uniqueness enforced.
+function toUploadsPath(input) {
+  if (input == null) return null;
+  const raw = String(input).trim();
+  if (!raw) return null;
+
+  const stripQueryAndHash = (value) => String(value || '').split(/[?#]/)[0];
+
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const u = new URL(raw);
+      const pathname = stripQueryAndHash(u.pathname || '');
+      const idx = pathname.indexOf('/uploads/');
+      if (idx === -1) return null;
+      const sliced = pathname.slice(idx);
+      return sliced.length > '/uploads/'.length ? sliced : null;
+    } catch {
+      // Fall through to string parsing below.
+    }
+  }
+
+  const cleaned = stripQueryAndHash(raw);
+  if (cleaned.startsWith('/uploads/')) {
+    return cleaned.length > '/uploads/'.length ? cleaned : null;
+  }
+  if (cleaned.startsWith('uploads/')) {
+    return cleaned.length > 'uploads/'.length ? `/${cleaned}` : null;
+  }
+  const idx = cleaned.indexOf('/uploads/');
+  if (idx !== -1) {
+    const sliced = cleaned.slice(idx);
+    return sliced.length > '/uploads/'.length ? sliced : null;
+  }
+  return null;
+}
+
 async function handleGetMyProfile(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
@@ -10330,6 +10365,16 @@ async function handlePostMyProfile(request, reply) {
     return reply.code(400).send({ error: 'Invalid profile payload' });
   }
 
+  const describeProfileMediaInput = (value) => {
+    if (value === undefined) return { provided: false, kind: 'unset' };
+    if (value === null) return { provided: true, kind: 'null' };
+    const raw = String(value || '').trim();
+    if (!raw) return { provided: true, kind: 'empty' };
+    if (toUploadsPath(raw)) return { provided: true, kind: 'uploads' };
+    if (/^https?:\/\//i.test(raw)) return { provided: true, kind: 'absolute-non-uploads' };
+    return { provided: true, kind: 'other' };
+  };
+
   const normalizedUsername = normalizeUsername(parsed.data.username);
   if (normalizedUsername && !isValidUsername(normalizedUsername)) {
     return reply.code(400).send({ error: 'Invalid username format' });
@@ -10425,6 +10470,27 @@ async function handlePostMyProfile(request, reply) {
       onboarding_completed_tutorials: [],
     };
     const next = buildNextProfile(existing);
+
+    // Enforce canonical /uploads/... persistence for media fields.
+    next.profile_photo_url = toUploadsPath(next.profile_photo_url) || null;
+    next.banner_url = toUploadsPath(next.banner_url) || null;
+
+    if (!isProd) {
+      fastify.log.info(
+        {
+          event: 'dev_profile_media_sanitize',
+          received: {
+            profile_photo_url: describeProfileMediaInput(parsed.data.profile_photo_url),
+            banner_url: describeProfileMediaInput(parsed.data.banner_url),
+          },
+          persisted: {
+            profile_photo_url: next.profile_photo_url,
+            banner_url: next.banner_url,
+          },
+        },
+        '[dev] profile media sanitize'
+      );
+    }
     const merged = {
       ...existing,
       ...next,
@@ -10482,6 +10548,27 @@ async function handlePostMyProfile(request, reply) {
     }
 
     const next = buildNextProfile(existing);
+
+    // Enforce canonical /uploads/... persistence for media fields.
+    next.profile_photo_url = toUploadsPath(next.profile_photo_url) || null;
+    next.banner_url = toUploadsPath(next.banner_url) || null;
+
+    if (!isProd) {
+      fastify.log.info(
+        {
+          event: 'dev_profile_media_sanitize',
+          received: {
+            profile_photo_url: describeProfileMediaInput(parsed.data.profile_photo_url),
+            banner_url: describeProfileMediaInput(parsed.data.banner_url),
+          },
+          persisted: {
+            profile_photo_url: next.profile_photo_url,
+            banner_url: next.banner_url,
+          },
+        },
+        '[dev] profile media sanitize'
+      );
+    }
 
     const now = nowIso();
     if (existing?.id) {
