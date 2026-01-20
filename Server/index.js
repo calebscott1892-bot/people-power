@@ -1975,12 +1975,31 @@ fastify.log.info({ strippedSslParams: stripped, rejectUnauthorized }, '[storage]
 function createPgPool({ useSsl }) {
   return new Pool({
     connectionString,
-    connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS,
+    connectionTimeoutMillis: (() => {
+      const raw = Number(process.env.PG_CONNECTION_TIMEOUT_MS);
+      if (Number.isFinite(raw) && raw > 0) return raw;
+      return isProd ? 45_000 : 5_000;
+    })(),
+    max: (() => {
+      const raw = Number(process.env.PG_POOL_MAX);
+      if (Number.isFinite(raw) && raw > 0) return raw;
+      return isProd ? 5 : 10;
+    })(),
+    idleTimeoutMillis: (() => {
+      const raw = Number(process.env.PG_IDLE_TIMEOUT_MS);
+      if (Number.isFinite(raw) && raw > 0) return raw;
+      return 30_000;
+    })(),
+    allowExitOnIdle: true,
+    keepAlive: true,
     ...(useSsl
       ? {
-          ssl: rejectUnauthorized
-            ? { rejectUnauthorized: true }
-            : { rejectUnauthorized: false },
+          // Render Postgres often requires TLS; prefer permissive verification in production.
+          // Local dev can opt back into strict verification via DATABASE_SSL_REJECT_UNAUTHORIZED=true.
+          ssl:
+            rejectUnauthorized && !isProd
+              ? { rejectUnauthorized: true }
+              : { rejectUnauthorized: false },
         }
       : null),
   });
@@ -2257,6 +2276,9 @@ async function writeMigrationLog({
 
 let movementsColumnsCache = null;
 
+let ensureVotesTablePromise = null;
+let ensureMovementsTablePromise = null;
+
 async function getMovementsColumns() {
   if (movementsColumnsCache) return movementsColumnsCache;
   const result = await pool.query(
@@ -2295,16 +2317,25 @@ function cleanText(value, maxLen = 4000) {
 
 async function ensureVotesTable() {
   if (!hasDatabaseUrl) return;
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS movement_votes (
-      movement_id TEXT NOT NULL,
-      voter_email TEXT NOT NULL,
-      value SMALLINT NOT NULL CHECK (value IN (-1, 1)),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (movement_id, voter_email)
-    );
-  `);
+  if (ensureVotesTablePromise) return ensureVotesTablePromise;
+  ensureVotesTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS movement_votes (
+        movement_id TEXT NOT NULL,
+        voter_email TEXT NOT NULL,
+        value SMALLINT NOT NULL CHECK (value IN (-1, 1)),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (movement_id, voter_email)
+      );
+    `);
+  })();
+  try {
+    return await ensureVotesTablePromise;
+  } catch (e) {
+    ensureVotesTablePromise = null;
+    throw e;
+  }
 }
 
 // Schema bootstrap:
@@ -2314,43 +2345,55 @@ async function ensureVotesTable() {
 async function ensureMovementsTable() {
   if (!hasDatabaseUrl) return;
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS movements (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      description TEXT NULL,
-      summary TEXT NULL,
-      tags TEXT[] NULL,
-      category TEXT NULL,
-      visibility TEXT NOT NULL DEFAULT 'public',
-      author_email TEXT NULL,
-      creator_email TEXT NULL,
-      created_by_email TEXT NULL,
-      description_html TEXT NULL,
-      location_city TEXT NULL,
-      location_country TEXT NULL,
-      location_lat DOUBLE PRECISION NULL,
-      location_lon DOUBLE PRECISION NULL,
-      media_urls JSONB NULL,
-      claims JSONB NULL,
-      momentum_score INT NOT NULL DEFAULT 0,
-      verified_participants INT NOT NULL DEFAULT 0,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
+  if (ensureMovementsTablePromise) return ensureMovementsTablePromise;
 
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_created_at ON movements (created_at DESC)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_visibility ON movements (visibility)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_author_email ON movements (LOWER(author_email))');
+  ensureMovementsTablePromise = (async () => {
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS movements (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NULL,
+        summary TEXT NULL,
+        tags TEXT[] NULL,
+        category TEXT NULL,
+        visibility TEXT NOT NULL DEFAULT 'public',
+        author_email TEXT NULL,
+        creator_email TEXT NULL,
+        created_by_email TEXT NULL,
+        description_html TEXT NULL,
+        location_city TEXT NULL,
+        location_country TEXT NULL,
+        location_lat DOUBLE PRECISION NULL,
+        location_lon DOUBLE PRECISION NULL,
+        media_urls JSONB NULL,
+        claims JSONB NULL,
+        momentum_score INT NOT NULL DEFAULT 0,
+        verified_participants INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_created_at ON movements (created_at DESC)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_visibility ON movements (visibility)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_author_email ON movements (LOWER(author_email))');
+
+    try {
+      await ensureMovementExtrasColumns();
+    } catch {
+      // best-effort
+    }
+
+    movementsColumnsCache = null;
+  })();
 
   try {
-    await ensureMovementExtrasColumns();
-  } catch {
-    // best-effort
+    return await ensureMovementsTablePromise;
+  } catch (e) {
+    ensureMovementsTablePromise = null;
+    throw e;
   }
-
-  movementsColumnsCache = null;
 }
 
 async function ensureReportsTable() {
@@ -2621,87 +2664,111 @@ async function ensureMessagesTables() {
   await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_to TEXT[] NOT NULL DEFAULT '{}'");
 }
 
+let ensureUserFollowsTablePromise = null;
+let ensureUserProfilesTablePromise = null;
+let ensureUserBlocksTablePromise = null;
+
 async function ensureUserFollowsTable() {
   if (!hasDatabaseUrl) return;
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS user_follows (
-      follower_email TEXT NOT NULL,
-      following_email TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (follower_email, following_email)
-    );
-  `);
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_follows_follower ON user_follows (follower_email)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_follows_following ON user_follows (following_email)');
+  if (ensureUserFollowsTablePromise) return ensureUserFollowsTablePromise;
+  ensureUserFollowsTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_follows (
+        follower_email TEXT NOT NULL,
+        following_email TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (follower_email, following_email)
+      );
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_follows_follower ON user_follows (follower_email)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_follows_following ON user_follows (following_email)');
+  })();
+  try {
+    return await ensureUserFollowsTablePromise;
+  } catch (e) {
+    ensureUserFollowsTablePromise = null;
+    throw e;
+  }
 }
 
 async function ensureUserProfilesTable() {
   if (!hasDatabaseUrl) return;
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS user_profiles (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NULL,
-      user_email TEXT NOT NULL UNIQUE,
-      display_name TEXT NULL,
-      username TEXT NULL,
-      bio TEXT NULL,
-      profile_photo_url TEXT NULL,
-      banner_url TEXT NULL,
-      location JSONB NULL,
-      catchment_radius_km INT NULL,
-      skills TEXT[] NULL,
-      ai_features_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-      birthdate DATE NULL,
-      age_verified BOOLEAN NOT NULL DEFAULT FALSE,
-      onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
-      onboarding_current_step INT NOT NULL DEFAULT 0,
-      onboarding_interests TEXT[] NOT NULL DEFAULT '{}',
-      onboarding_completed_tutorials TEXT[] NOT NULL DEFAULT '{}',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS user_id TEXT NULL');
-  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS banner_offset_y DOUBLE PRECISION NULL');
-  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS is_private BOOLEAN NOT NULL DEFAULT FALSE');
-  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS last_seen_update_version TEXT NULL');
-  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS has_seen_tutorial_v2 BOOLEAN NOT NULL DEFAULT FALSE');
-  await pool.query(
-    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS movement_group_opt_out BOOLEAN NOT NULL DEFAULT FALSE'
-  );
-  await pool.query(
-    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS email_notifications_opt_in BOOLEAN NOT NULL DEFAULT FALSE'
-  );
-  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS birthdate DATE NULL');
-  await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS age_verified BOOLEAN NOT NULL DEFAULT FALSE');
-  await pool.query(
-    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE'
-  );
-  await pool.query(
-    'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_current_step INT NOT NULL DEFAULT 0'
-  );
-  await pool.query(
-    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_interests TEXT[] NOT NULL DEFAULT '{}'"
-  );
-  await pool.query(
-    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_completed_tutorials TEXT[] NOT NULL DEFAULT '{}'"
-  );
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles (user_id)');
-  try {
+  if (ensureUserProfilesTablePromise) return ensureUserProfilesTablePromise;
+
+  ensureUserProfilesTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_profiles (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NULL,
+        user_email TEXT NOT NULL UNIQUE,
+        display_name TEXT NULL,
+        username TEXT NULL,
+        bio TEXT NULL,
+        profile_photo_url TEXT NULL,
+        banner_url TEXT NULL,
+        location JSONB NULL,
+        catchment_radius_km INT NULL,
+        skills TEXT[] NULL,
+        ai_features_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        birthdate DATE NULL,
+        age_verified BOOLEAN NOT NULL DEFAULT FALSE,
+        onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
+        onboarding_current_step INT NOT NULL DEFAULT 0,
+        onboarding_interests TEXT[] NOT NULL DEFAULT '{}',
+        onboarding_completed_tutorials TEXT[] NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS user_id TEXT NULL');
+    await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS banner_offset_y DOUBLE PRECISION NULL');
+    await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS is_private BOOLEAN NOT NULL DEFAULT FALSE');
+    await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS last_seen_update_version TEXT NULL');
+    await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS has_seen_tutorial_v2 BOOLEAN NOT NULL DEFAULT FALSE');
     await pool.query(
-      'CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_user_id_unique ON user_profiles (user_id) WHERE user_id IS NOT NULL'
+      'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS movement_group_opt_out BOOLEAN NOT NULL DEFAULT FALSE'
     );
-  } catch (e) {
-    fastify.log.warn({ err: e }, 'Failed to ensure unique user_id index');
-  }
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles (user_email)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_username ON user_profiles (username)');
-  try {
     await pool.query(
-      'CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_username_lower ON user_profiles (LOWER(username)) WHERE username IS NOT NULL'
+      'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS email_notifications_opt_in BOOLEAN NOT NULL DEFAULT FALSE'
     );
+    await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS birthdate DATE NULL');
+    await pool.query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS age_verified BOOLEAN NOT NULL DEFAULT FALSE');
+    await pool.query(
+      'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE'
+    );
+    await pool.query(
+      'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_current_step INT NOT NULL DEFAULT 0'
+    );
+    await pool.query(
+      "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_interests TEXT[] NOT NULL DEFAULT '{}'"
+    );
+    await pool.query(
+      "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_completed_tutorials TEXT[] NOT NULL DEFAULT '{}'"
+    );
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles (user_id)');
+    try {
+      await pool.query(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_user_id_unique ON user_profiles (user_id) WHERE user_id IS NOT NULL'
+      );
+    } catch (e) {
+      fastify.log.warn({ err: e }, 'Failed to ensure unique user_id index');
+    }
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles (user_email)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_username ON user_profiles (username)');
+    try {
+      await pool.query(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_username_lower ON user_profiles (LOWER(username)) WHERE username IS NOT NULL'
+      );
+    } catch (e) {
+      fastify.log.warn({ err: e }, 'Failed to ensure unique username index');
+    }
+  })();
+
+  try {
+    return await ensureUserProfilesTablePromise;
   } catch (e) {
-    fastify.log.warn({ err: e }, 'Failed to ensure unique username index');
+    ensureUserProfilesTablePromise = null;
+    throw e;
   }
 }
 
@@ -2749,16 +2816,25 @@ async function ensureLeadershipRolesTable() {
 
 async function ensureUserBlocksTable() {
   if (!hasDatabaseUrl) return;
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS user_blocks (
-      blocker_email TEXT NOT NULL,
-      blocked_email TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (blocker_email, blocked_email)
-    );
-  `);
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_blocks_blocker ON user_blocks (blocker_email)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks (blocked_email)');
+  if (ensureUserBlocksTablePromise) return ensureUserBlocksTablePromise;
+  ensureUserBlocksTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_blocks (
+        blocker_email TEXT NOT NULL,
+        blocked_email TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (blocker_email, blocked_email)
+      );
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_blocks_blocker ON user_blocks (blocker_email)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks (blocked_email)');
+  })();
+  try {
+    return await ensureUserBlocksTablePromise;
+  } catch (e) {
+    ensureUserBlocksTablePromise = null;
+    throw e;
+  }
 }
 
 async function getUserBlockSets(email) {
@@ -2852,6 +2928,90 @@ async function ensurePublicKeysTable() {
     );
   `);
 }
+
+let dbInitPromise = null;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function initDbSchemaOnce() {
+  if (!hasDatabaseUrl) return;
+
+  // Fast connectivity check (fail fast; init has its own retry/backoff).
+  await withTimeout(pool.query('SELECT 1'), 5000, 'db_init_select_1');
+
+  // Hot-path tables (first-load UX depends on these).
+  await ensureUserProfilesTable();
+  await ensureUserFollowsTable();
+  await ensureUserBlocksTable();
+  await ensureMovementsTable();
+  await ensureVotesTable();
+  await ensurePublicKeysTable();
+}
+
+async function initDbSchemaWithRetry() {
+  const delays = [500, 1500, 3000];
+  let lastErr = null;
+  for (let attempt = 0; attempt < delays.length + 1; attempt += 1) {
+    try {
+      await initDbSchemaOnce();
+      return;
+    } catch (e) {
+      lastErr = e;
+      // Recreate pool once between attempts (stale pools happen after deploy/idle).
+      try {
+        pool = createPgPool({ useSsl: shouldUseSsl });
+      } catch {
+        // ignore
+      }
+      const wait = delays[attempt] ?? 0;
+      fastify.log.warn(
+        { err: e, attempt: attempt + 1, retry_in_ms: wait },
+        'DB init attempt failed'
+      );
+      if (wait) await sleep(wait);
+    }
+  }
+  throw lastErr;
+}
+
+async function ensureDbReady(request, reply, { error } = {}) {
+  if (!hasDatabaseUrl) return true;
+
+  if (!dbInitPromise) {
+    dbInitPromise = initDbSchemaWithRetry();
+  }
+
+  try {
+    // Never block a request for long periods waiting on init.
+    await withTimeout(dbInitPromise, 2500, 'db_init');
+    return true;
+  } catch (e) {
+    const requestId = request?.id ? String(request.id) : null;
+    fastify.log.error({ err: e, request_id: requestId }, 'DB not ready');
+    reply.code(503).send({
+      error: error || 'Database unavailable',
+      request_id: requestId,
+    });
+    return false;
+  }
+}
+
+// Health endpoint: quick DB probe (no auth)
+fastify.get('/health/db', async (request, reply) => {
+  const requestId = request?.id ? String(request.id) : null;
+  if (!hasDatabaseUrl) {
+    return reply.code(200).send({ ok: true, db: false, mode: String(storageMode || 'memory') });
+  }
+  try {
+    await withTimeout(pool.query('SELECT 1'), 1500, 'health_db');
+    return reply.code(200).send({ ok: true, db: true, mode: String(storageMode || 'postgres') });
+  } catch (e) {
+    fastify.log.error({ err: e, request_id: requestId }, 'Health DB probe failed');
+    return reply.code(503).send({ ok: false, db: false, request_id: requestId });
+  }
+});
 
 async function ensureMovementFollowsTable() {
   if (!hasDatabaseUrl) return;
@@ -4567,7 +4727,6 @@ fastify.post('/me/public-key', async (request, reply) => {
   }
 
   try {
-    await ensurePublicKeysTable();
     await pool.query(
       `INSERT INTO user_public_keys (email, public_key)
        VALUES ($1, $2)
@@ -4595,7 +4754,6 @@ fastify.get('/public-keys/:email', async (request, reply) => {
   }
 
   try {
-    await ensurePublicKeysTable();
     const result = await pool.query('SELECT public_key FROM user_public_keys WHERE email = $1 LIMIT 1', [email]);
     const key = result.rows?.[0]?.public_key || null;
     if (!key) return reply.code(404).send({ error: 'Public key not found' });
@@ -4611,6 +4769,10 @@ fastify.get('/public-keys/:email', async (request, reply) => {
 // engagement counts can appear "stuck" across the app.
 fastify.get('/movements', async (request, reply) => {
   try {
+    if (hasDatabaseUrl) {
+      if (!(await ensureDbReady(request, reply, { error: 'Failed to load movements' }))) return;
+    }
+
     function parseIntParam(value, fallback, { min = 0, max = 500 } = {}) {
       const n = Number.parseInt(String(value ?? ''), 10);
       if (!Number.isFinite(n)) return fallback;
@@ -4733,8 +4895,6 @@ fastify.get('/movements', async (request, reply) => {
     }
 
     try {
-      await ensureMovementsTable();
-      await ensureVotesTable();
       const values = [];
       let whereClause = '';
       if (mineEmail) {
@@ -4793,9 +4953,10 @@ fastify.get('/movements', async (request, reply) => {
       const enriched = await attachCreatorProfilesToMovements(page);
       return reply.send(enriched.map((m) => projectRecord(m, fields)));
     } catch (e) {
+      const requestId = request?.id ? String(request.id) : null;
       if (isProd) {
-        fastify.log.error({ err: e }, 'DB query failed for GET /movements');
-        return reply.code(500).send({ error: 'Failed to load movements' });
+        fastify.log.error({ err: e, request_id: requestId }, 'DB query failed for GET /movements');
+        return reply.code(500).send({ error: 'Failed to load movements', request_id: requestId });
       }
       fastify.log.warn({ err: e }, 'DB query failed for GET /movements; using memory fallback');
       const merged = memoryMovements
@@ -4822,9 +4983,10 @@ fastify.get('/movements', async (request, reply) => {
       return reply.send(enriched.map((m) => projectRecord(m, fields)));
     }
   } catch (err) {
+    const requestId = request?.id ? String(request.id) : null;
     fastify.log.error({ err }, 'GET /movements failed');
     if (isProd) {
-      return reply.code(500).send({ error: 'Failed to load movements' });
+      return reply.code(500).send({ error: 'Failed to load movements', request_id: requestId });
     }
     return reply.send({
       ok: true,
@@ -6298,7 +6460,6 @@ fastify.post('/movements/:id/group-chat', { config: { rateLimit: RATE_LIMITS.con
     );
     if (existing.rows?.[0]) return reply.send(existing.rows[0]);
 
-    await ensurePublicKeysTable();
     const keyRes = await pool.query(
       'SELECT email FROM user_public_keys WHERE email = ANY($1::text[])',
       [participants]
@@ -8809,7 +8970,6 @@ fastify.post('/conversations/group', { config: { rateLimit: RATE_LIMITS.conversa
 
   try {
     await ensureMessagesTables();
-    await ensurePublicKeysTable();
     const keyRes = await pool.query(
       'SELECT email FROM user_public_keys WHERE email = ANY($1::text[])',
       [participants]
@@ -9737,6 +9897,8 @@ fastify.get('/me/following-users', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
+  if (!(await ensureDbReady(request, reply, { error: 'Failed to load following users' }))) return;
+
   const myEmail = normalizeEmail(authedUser.email);
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
 
@@ -9784,14 +9946,17 @@ fastify.get('/me/following-users', async (request, reply) => {
     });
     return reply.send({ users });
   } catch (e) {
+    const requestId = request?.id ? String(request.id) : null;
     fastify.log.error({ err: e }, 'Failed to load following users');
-    return reply.code(500).send({ error: 'Failed to load following users' });
+    return reply.code(500).send({ error: 'Failed to load following users', request_id: requestId });
   }
 });
 
 fastify.get('/me/followers', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
+
+  if (!(await ensureDbReady(request, reply, { error: 'Failed to load followers' }))) return;
 
   const myEmail = normalizeEmail(authedUser.email);
   if (!myEmail) return reply.code(400).send({ error: 'User email is required' });
@@ -9843,8 +10008,9 @@ fastify.get('/me/followers', async (request, reply) => {
     });
     return reply.send({ users });
   } catch (e) {
+    const requestId = request?.id ? String(request.id) : null;
     fastify.log.error({ err: e }, 'Failed to load followers');
-    return reply.code(500).send({ error: 'Failed to load followers' });
+    return reply.code(500).send({ error: 'Failed to load followers', request_id: requestId });
   }
 });
 
@@ -10211,6 +10377,8 @@ async function handleGetMyProfile(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
+  if (!(await ensureDbReady(request, reply, { error: 'Failed to load profile' }))) return;
+
   const userIdRaw = authedUser?.id != null ? String(authedUser.id).trim() : '';
   const userId = userIdRaw || null;
   const email = normalizeEmail(authedUser.email);
@@ -10261,7 +10429,6 @@ async function handleGetMyProfile(request, reply) {
   }
 
   try {
-    await ensureUserProfilesTable();
     let row = null;
     if (userId) {
       const byId = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId]);
@@ -12226,36 +12393,21 @@ const start = async () => {
       );
     }
     initRealtimeServer();
+
+    // Start DB initialization once (DDL runs during startup only, with retry/backoff).
+    // Do not block the server from listening; handlers will gate on ensureDbReady().
+    if (hasDatabaseUrl && !dbInitPromise) {
+      dbInitPromise = initDbSchemaWithRetry().catch((e) => {
+        fastify.log.error({ err: e }, 'DB init failed after retries');
+        throw e;
+      });
+    }
+
+    // Non-hot-path tables: best effort at startup (do not run these in request handlers).
     if (hasDatabaseUrl) {
-      try {
-        await ensureVotesTable();
-      } catch (e) {
-        fastify.log.warn({ err: e }, 'Failed to ensure votes table at startup');
-      }
-
-      try {
-        await ensureReportsTable();
-      } catch (e) {
-        fastify.log.warn({ err: e }, 'Failed to ensure reports table at startup');
-      }
-
-      try {
-        await ensureMessagesTables();
-      } catch (e) {
-        fastify.log.warn({ err: e }, 'Failed to ensure messages tables at startup');
-      }
-
-      try {
-        await ensureUserBlocksTable();
-      } catch (e) {
-        fastify.log.warn({ err: e }, 'Failed to ensure user blocks table at startup');
-      }
-
-      try {
-        await ensureMovementExtrasTables();
-      } catch (e) {
-        fastify.log.warn({ err: e }, 'Failed to ensure movement extras tables at startup');
-      }
+      ensureReportsTable().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure reports table at startup'));
+      ensureMessagesTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure messages tables at startup'));
+      ensureMovementExtrasTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure movement extras tables at startup'));
     }
     console.info(`[pp-server] listening host=${HOST} port=${PORT} C4_PROOF_PACK=${process.env.C4_PROOF_PACK||"0"}`);
     fastify
