@@ -206,14 +206,29 @@ async function verifySupabaseJwtAndGetUser(authHeader) {
   if (!token) return null;
   if (!supabase?.auth?.getUser) return null;
   const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data?.user) return null;
+  if (error || !data?.user) {
+    const status = typeof error?.status === 'number' ? error.status : undefined;
+    if (status && status !== 401 && status !== 403) {
+      const err = new Error('Supabase auth unavailable');
+      err.cause = error;
+      err.status = status;
+      throw err;
+    }
+    return null;
+  }
   return { id: data.user.id, email: data.user.email };
 }
 
 // POST /auth/sync: Upsert user in SQLite after verifying JWT
 fastify.post('/auth/sync', async (request, reply) => {
   const authHeader = request.headers['authorization'] || '';
-  const user = await verifySupabaseJwtAndGetUser(authHeader);
+  let user;
+  try {
+    user = await verifySupabaseJwtAndGetUser(authHeader);
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Supabase auth lookup failed');
+    return reply.code(503).send({ error: 'Authentication service unavailable' });
+  }
   if (!user) return reply.code(401).send({ error: 'Invalid or missing Supabase JWT' });
   const now = new Date().toISOString();
   sqliteDb.prepare(`INSERT INTO users (id, email, created_at, last_seen)
@@ -238,7 +253,13 @@ if (!PROOF_MODE) {
       // Otherwise, fall through to normal logic
     }
     const authHeader = request.headers['authorization'] || '';
-    const user = await verifySupabaseJwtAndGetUser(authHeader);
+    let user;
+    try {
+      user = await verifySupabaseJwtAndGetUser(authHeader);
+    } catch (e) {
+      fastify.log.error({ err: e }, 'Supabase auth lookup failed');
+      return reply.code(503).send({ error: 'Authentication service unavailable' });
+    }
     if (!user) return reply.code(401).send({ error: 'Invalid or missing Supabase JWT' });
     let row = sqliteDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     if (!row) {
@@ -1488,14 +1509,42 @@ fastify.addHook('onError', (request, reply, error, done) => {
 
 const profanityFilter = new BadWordsFilter();
 
-// Server-side verification of Supabase JWTs.
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY environment variables');
+const SUPABASE_URL =
+  process.env.SUPABASE_URL ||
+  process.env.VITE_SUPABASE_URL;
+
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE;
+
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_ANON ||
+  process.env.VITE_SUPABASE_ANON_KEY;
+
+if (!SUPABASE_URL) {
+  throw new Error("Missing SUPABASE_URL");
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabaseKey = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
+
+if (!supabaseKey) {
+  throw new Error("Missing Supabase key (service role or anon)");
+}
+
+const supabase = createClient(SUPABASE_URL, supabaseKey);
+
+// Startup auth config log (no secrets printed).
+try {
+  const issuer = `${String(SUPABASE_URL).replace(/\/$/, '')}/auth/v1`;
+  const keyMode = SUPABASE_SERVICE_ROLE_KEY ? 'service_role' : 'anon_fallback';
+  const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
+  console.log(`[startup][auth] verifier=supabase.auth.getUser issuer=${issuer} url=${SUPABASE_URL} keyMode=${keyMode} timeoutMs=${timeoutMs}`);
+} catch {
+  // ignore
+}
 
 // Comma-separated list of admin emails.
 // Example: ADMIN_EMAILS="admin@example.com,other@example.com"
@@ -4293,6 +4342,19 @@ async function requireVerifiedUser(request, reply) {
   }
 
   if (error || !data?.user) {
+    const status = typeof error?.status === 'number' ? error.status : undefined;
+    // Only treat auth failures as invalid tokens when Supabase explicitly says so.
+    if (status === 401 || status === 403) {
+      reply.code(401).send({ error: 'Invalid session' });
+      return null;
+    }
+
+    if (error) {
+      fastify.log.error({ err: error, status }, 'Supabase auth returned non-auth error');
+      reply.code(503).send({ error: 'Authentication service unavailable' });
+      return null;
+    }
+
     reply.code(401).send({ error: 'Invalid session' });
     return null;
   }
