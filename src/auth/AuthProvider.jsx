@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
+import toast from 'react-hot-toast';
 const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
 import { SERVER_BASE } from '@/api/serverBase';
 import { fetchMyProfile } from '@/api/userProfileClient';
@@ -149,6 +150,19 @@ export function AuthProvider({ children }) {
         return s?.access_token ? String(s.access_token) : null;
       },
       getSession: () => sessionRef.current,
+      getSessionAsync: async () => {
+        const supabase = getSupabaseClient();
+        if (!supabase) return null;
+        const { data } = await supabase.auth.getSession();
+        return data?.session ?? null;
+      },
+      getAccessTokenAsync: async () => {
+        const supabase = getSupabaseClient();
+        if (!supabase) return null;
+        const { data } = await supabase.auth.getSession();
+        const s = data?.session ?? null;
+        return s?.access_token ? String(s.access_token) : null;
+      },
       refreshSession: async () => {
         const supabase = getSupabaseClient();
         if (!supabase) return null;
@@ -160,20 +174,19 @@ export function AuthProvider({ children }) {
         try {
           const msg = String(message || '').trim() || 'Your session has expired. Please sign in again.';
           sessionStorage.setItem('pp_session_expired_toast', msg);
+          try {
+            toast.error(msg);
+          } catch {
+            // ignore
+          }
         } catch {
           // ignore
         }
 
-        // Clear local auth state so protected routes redirect predictably.
-        setSession(null);
-        setUser(null);
-        setServerStaffRole(null);
-
-        const from =
-          typeof window !== 'undefined'
-            ? `${window.location.pathname}${window.location.search ?? ''}${window.location.hash ?? ''}`
-            : '/';
-        navigate('/login', { replace: true, state: { from, reason: 'session_expired', message } });
+        // IMPORTANT: do not force sign-out or navigation here.
+        // Backend 401s during local dev are frequently caused by missing Authorization headers
+        // or a Supabase URL/key mismatch. Keeping the Supabase session intact makes debugging
+        // much easier and prevents instant logout loops.
       },
     });
 
@@ -441,7 +454,6 @@ export function AuthProvider({ children }) {
     isEmailVerified,
     isAuthReady,
     // proof
-    isProof,
     refreshProofUser
   ]);
 

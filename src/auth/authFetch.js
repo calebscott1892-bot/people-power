@@ -1,13 +1,16 @@
 import { SERVER_BASE } from '@/api/serverBase';
-import { getSupabaseClient } from '@/api/supabaseClient';
 
 const AUTH_EXPIRED_EVENT = 'pp:auth-expired';
+const BACKEND_AUTH_FAILED_EVENT = 'backend-auth-failed';
+const DEV = !!import.meta?.env?.DEV;
 
 let installed = false;
 let originalFetch = null;
 
 let getAccessToken = () => null;
 let getSession = () => null;
+let getAccessTokenAsync = async () => null;
+let getSessionAsync = async () => null;
 let onAuthExpired = () => {};
 let refreshSession = async () => null;
 
@@ -17,7 +20,21 @@ function isBackendUrl(url) {
   // Same-origin relative requests should only be treated as backend if they
   // look like API calls. Avoid attaching auth headers to asset/document fetches.
   if (raw.startsWith('/')) {
-    return raw.startsWith('/me/') || raw.startsWith('/api/');
+    return (
+      raw.startsWith('/me/') ||
+      raw.startsWith('/api/') ||
+      raw.startsWith('/auth/') ||
+      raw.startsWith('/users/') ||
+      raw.startsWith('/movements') ||
+      raw.startsWith('/platform-acknowledgment') ||
+      raw.startsWith('/incidents') ||
+      raw.startsWith('/events') ||
+      raw.startsWith('/notifications') ||
+      raw.startsWith('/reports') ||
+      raw.startsWith('/resources') ||
+      raw.startsWith('/uploads') ||
+      raw.startsWith('/admin/')
+    );
   }
 
   // Absolute requests to the configured backend base.
@@ -50,6 +67,22 @@ function dispatchAuthExpired(message) {
       new CustomEvent(AUTH_EXPIRED_EVENT, {
         detail: {
           message,
+          at: Date.now(),
+        },
+      })
+    );
+  } catch {
+    // ignore
+  }
+}
+
+function dispatchBackendAuthFailed(detail) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent(BACKEND_AUTH_FAILED_EVENT, {
+        detail: {
+          ...(detail && typeof detail === 'object' ? detail : null),
           at: Date.now(),
         },
       })
@@ -97,6 +130,19 @@ function withAuthHeader(existingHeaders, token) {
   return headers;
 }
 
+function ensureJsonContentType(headers, requestInit) {
+  const h = new Headers(headers || {});
+  if (h.has('content-type')) return h;
+  const body = requestInit?.body;
+  if (typeof body !== 'string') return h;
+  const trimmed = body.trim();
+  // Heuristic: only auto-set JSON content-type for JSON-looking strings.
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    h.set('content-type', 'application/json');
+  }
+  return h;
+}
+
 function isSessionNearExpiry(session, withinSeconds = 60) {
   const expiresAt = session?.expires_at;
   if (!expiresAt) return false;
@@ -107,6 +153,8 @@ function isSessionNearExpiry(session, withinSeconds = 60) {
 export function configureAuthFetch(options) {
   getAccessToken = options?.getAccessToken || getAccessToken;
   getSession = options?.getSession || getSession;
+  getAccessTokenAsync = options?.getAccessTokenAsync || getAccessTokenAsync;
+  getSessionAsync = options?.getSessionAsync || getSessionAsync;
   onAuthExpired = options?.onAuthExpired || onAuthExpired;
   refreshSession = options?.refreshSession || refreshSession;
 }
@@ -138,7 +186,7 @@ export function installAuthFetch() {
     const { url, requestInit } = normalizeFetchArgs(input, init);
 
     const isBackend = isBackendUrl(url);
-    const currentSession = isBackend ? getSession() : null;
+    const currentSession = isBackend ? (getSession() || (await getSessionAsync().catch(() => null))) : null;
 
     // Proactively refresh if we're about to expire (mobile background/resume case).
     if (isBackend && currentSession && isSessionNearExpiry(currentSession)) {
@@ -150,8 +198,31 @@ export function installAuthFetch() {
     }
 
     const attempt = async () => {
-      const tokenNow = isBackend ? getAccessToken() : null;
-      const headersNow = isBackend ? withAuthHeader(requestInit.headers, tokenNow) : requestInit.headers;
+      let tokenNow = isBackend ? getAccessToken() : null;
+      if (isBackend && !tokenNow) {
+        try {
+          tokenNow = await getAccessTokenAsync();
+        } catch {
+          // ignore
+        }
+      }
+
+      const authAttached = isBackend && !!tokenNow;
+      let headersNow = isBackend ? withAuthHeader(requestInit.headers, tokenNow) : requestInit.headers;
+      headersNow = isBackend ? ensureJsonContentType(headersNow, requestInit) : headersNow;
+
+      if (DEV && isBackend) {
+        try {
+          console.debug('[PeoplePower] backend request', {
+            url,
+            authAttached,
+            method: requestInit?.method || 'GET',
+          });
+        } catch {
+          // ignore
+        }
+      }
+
       return originalFetch(input, {
         ...requestInit,
         headers: headersNow,
@@ -162,6 +233,14 @@ export function installAuthFetch() {
 
     // If we got a clear auth failure, try one refresh+retry before forcing logout.
     if (isBackend && (res.status === 401 || res.status === 403)) {
+      if (DEV) {
+        try {
+          console.debug('[PeoplePower] backend auth response', { url, status: res.status });
+        } catch {
+          // ignore
+        }
+      }
+
       const text = await readResponseTextSafe(res);
       const isAuthFailure =
         res.status === 401 ||
@@ -180,15 +259,9 @@ export function installAuthFetch() {
         if (!handlingAuthFailure) {
           handlingAuthFailure = true;
 
-          const message = 'Your session has expired. Please sign in again.';
+          const message = 'Backend authentication failed (401). Check that requests include an Authorization header and that the backend points at the same Supabase project.';
+          dispatchBackendAuthFailed({ message, url, status: res.status });
           dispatchAuthExpired(message);
-
-          try {
-            const supabase = getSupabaseClient();
-            await supabase?.auth?.signOut?.();
-          } catch {
-            // ignore
-          }
 
           try {
             await onAuthExpired({ message });

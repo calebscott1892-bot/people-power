@@ -288,6 +288,7 @@ export default function Login() {
               <div className="space-y-1">
                 <div className="text-sm font-bold text-slate-800">Email</div>
                 <Input
+                  data-testid="login-email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   type="email"
@@ -300,6 +301,7 @@ export default function Login() {
               <div className="space-y-1">
                 <div className="text-sm font-bold text-slate-800">Password</div>
                 <Input
+                  data-testid="login-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   type="password"
@@ -325,7 +327,7 @@ export default function Login() {
                 </div>
               )}
 
-              <Button type="submit" className="w-full" disabled={loading || (!isSupabaseConfigured && !isProof)}>
+              <Button data-testid="login-submit" type="submit" className="w-full" disabled={loading || (!isSupabaseConfigured && !isProof)}>
                 {loading ? 'Working…' : mode === 'signup' ? 'Create account' : 'Sign in'}
               </Button>
 

@@ -1,7 +1,7 @@
 const DEV_BACKEND =
   typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_BACKEND_BASE
     ? String(import.meta.env.VITE_BACKEND_BASE).replace('localhost', '127.0.0.1')
-    : `http://127.0.0.1:${(typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_BACKEND_PORT) ? import.meta.env.VITE_BACKEND_PORT : 8787}`;
+    : `http://127.0.0.1:${(typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_BACKEND_PORT) ? import.meta.env.VITE_BACKEND_PORT : 3001}`;
 const PROD_BACKEND = 'https://people-power.onrender.com';
 
 function trimTrailingSlashes(value) {

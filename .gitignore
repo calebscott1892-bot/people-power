@@ -1,3 +1,4 @@
+.env.e2e
 # Proof-pack and dev DBs, cookies, logs
 cookies.txt
 Server/server/dev.db

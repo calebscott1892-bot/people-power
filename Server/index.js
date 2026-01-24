@@ -1,7 +1,16 @@
 
 // --- Initialization: Fastify, dotenv, uuid ---
 // --- Initialization: Fastify, dotenv, uuid ---
-require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+
+const path = require('path');
+
+// Deterministic env layering (dotenv default: does NOT override existing vars):
+// 1) Server/.env
+// 2) repo-root .env
+// 3) repo-root .env.local
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+require('dotenv').config({ path: path.join(__dirname, '..', '.env.local') });
 const fastify = require('fastify')({
   // NOTE: Safety: enforce a global payload ceiling to deter oversized bodies.
   bodyLimit: 10 * 1024 * 1024, // 10MB
@@ -17,6 +26,90 @@ const fastify = require('fastify')({
   disableRequestLogging: true,
 });
 
+const IS_NODE_PROD = String(process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
+
+// NOTE: declared early to avoid ReferenceError in route handlers registered before verifier assignment.
+let supabaseAuthVerifier = null;
+
+// --- Always-on minimal diagnostics (safe; no secrets) ---
+fastify.get('/__health', async (_request, reply) => {
+  return reply.send({ ok: true });
+});
+
+fastify.get('/__whoami', async (request, reply) => {
+  const auth = String(request.headers.authorization || '');
+  const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+  return reply.send({
+    ok: true,
+    hasAuthHeader: !!auth,
+    tokenLen: token.length,
+    dotCount: (token.match(/\./g) || []).length,
+  });
+});
+
+// DEV-only auth diagnostics: verifies whether a provided Bearer token is usable with Supabase.
+// Safe for local debugging because it NEVER returns the token itself.
+if (!IS_NODE_PROD) {
+  fastify.get('/__debug/auth-check', async (request, reply) => {
+    const auth = String(request.headers.authorization || '');
+    const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+    const dotCount = (token.match(/\./g) || []).length;
+
+    if (!token || dotCount !== 2) {
+      return reply.send({
+        ok: false,
+        reason: 'missing_or_malformed_token',
+        hasAuthHeader: !!auth,
+        tokenLen: token.length,
+        dotCount,
+      });
+    }
+
+    try {
+      if (!supabaseAuthVerifier?.auth?.getUser) {
+        return reply.send({
+          ok: false,
+          reason: 'supabase_client_unavailable',
+          hasAuthHeader: true,
+          tokenLen: token.length,
+          dotCount,
+        });
+      }
+
+      const { data, error } = await supabaseAuthVerifier.auth.getUser(token);
+      if (error || !data?.user) {
+        return reply.code(403).send({
+          ok: false,
+          reason: 'supabase_rejected_token',
+          hasAuthHeader: true,
+          tokenLen: token.length,
+          dotCount,
+          error: {
+            status: typeof error?.status === 'number' ? error.status : null,
+            message: error?.message ? String(error.message) : 'unknown_error',
+          },
+        });
+      }
+
+      return reply.send({
+        ok: true,
+        user: {
+          id: String(data.user.id || ''),
+          email: String(data.user.email || ''),
+        },
+      });
+    } catch (e) {
+      return reply.code(500).send({
+        ok: false,
+        reason: 'exception',
+        error: {
+          message: e?.message ? String(e.message) : String(e),
+        },
+      });
+    }
+  });
+}
+
 
 // --- Register cookie parser early (needed for proof-only session auth) ---
 fastify.register(require('@fastify/cookie'));
@@ -26,11 +119,7 @@ const {
   getDb,
   ensureUsersTable,
   ensureProofUsersTable,
-  createProofUser,
-  getProofUserByEmail,
-  getProofUserById,
   DB_PATH,
-  resolveDbPathFromEnv,
 } = require('./sqlite');
 const sqliteDb = getDb();
 ensureUsersTable(sqliteDb);
@@ -204,8 +293,8 @@ if (PROOF_MODE) {
 async function verifySupabaseJwtAndGetUser(authHeader) {
   const token = (authHeader || '').replace(/^Bearer /i, '').trim();
   if (!token) return null;
-  if (!supabase?.auth?.getUser) return null;
-  const { data, error } = await supabase.auth.getUser(token);
+  if (!supabaseAuthVerifier?.auth?.getUser) return null;
+  const { data, error } = await supabaseAuthVerifier.auth.getUser(token);
   if (error || !data?.user) {
     const status = typeof error?.status === 'number' ? error.status : undefined;
     if (status && status !== 401 && status !== 403) {
@@ -718,13 +807,12 @@ const { z } = require('zod');
 const BadWordsFilter = require('bad-words');
 const { createClient } = require('@supabase/supabase-js');
 const { randomUUID } = require('crypto');
-const path = require('path');
 const fs = require('fs');
 const { pipeline } = require('stream/promises');
 const { WebSocketServer } = require('ws');
 
 const HOST = process.env.HOST || '127.0.0.1';
-const PORT = Number(process.env.C4_BACKEND_PORT || process.env.PORT || 8787);
+const PORT = Number(process.env.PEOPLEPOWER_BACKEND_PORT || process.env.C4_BACKEND_PORT || process.env.PORT || 3001);
 
 // ...existing code...
 // All await statements must be inside async functions or route handlers.
@@ -1536,12 +1624,42 @@ if (!supabaseKey) {
 
 const supabase = createClient(SUPABASE_URL, supabaseKey);
 
-// Startup auth config log (no secrets printed).
+// Token verifier: prefer the same Supabase project the frontend is using (VITE_*).
+// This prevents confusing local-dev 401 loops when Server/.env and root .env point at different projects.
+const FRONTEND_SUPABASE_URL = process.env.VITE_SUPABASE_URL;
+const FRONTEND_SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY;
+
+// Default (all envs): verify using the backend's configured Supabase.
+supabaseAuthVerifier = supabase;
+let verifierMode = 'server_key_verifier';
+
+// Local dev only: if the SPA is configured with VITE_SUPABASE_*, prefer that project for JWT verification.
+if (!IS_NODE_PROD && FRONTEND_SUPABASE_URL && FRONTEND_SUPABASE_ANON_KEY) {
+  if (
+    process.env.SUPABASE_URL &&
+    String(process.env.SUPABASE_URL) !== String(FRONTEND_SUPABASE_URL)
+  ) {
+    try {
+      console.warn(
+        '[startup][auth] WARNING: SUPABASE_URL differs from VITE_SUPABASE_URL; using VITE_SUPABASE_* for token verification to match the SPA.'
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  supabaseAuthVerifier = createClient(String(FRONTEND_SUPABASE_URL), String(FRONTEND_SUPABASE_ANON_KEY));
+  verifierMode = 'vite_anon_verifier';
+}
+
+// Startup auth verifier log (no secrets; single line).
 try {
-  const issuer = `${String(SUPABASE_URL).replace(/\/$/, '')}/auth/v1`;
-  const keyMode = SUPABASE_SERVICE_ROLE_KEY ? 'service_role' : 'anon_fallback';
-  const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
-  console.log(`[startup][auth] verifier=supabase.auth.getUser issuer=${issuer} url=${SUPABASE_URL} keyMode=${keyMode} timeoutMs=${timeoutMs}`);
+  const verifierUrl = verifierMode === 'vite_anon_verifier' ? FRONTEND_SUPABASE_URL : SUPABASE_URL;
+  const verifierHost = verifierUrl ? new URL(String(verifierUrl)).host : 'missing';
+  const nodeEnv = String(process.env.NODE_ENV || '');
+  console.log(
+    `[startup][auth] verifierHost=${verifierHost} verifierMode=${verifierMode} nodeEnv=${nodeEnv || 'unset'} isProd=${IS_NODE_PROD}`
+  );
 } catch {
   // ignore
 }
@@ -1933,12 +2051,6 @@ const shouldUseSsl =
 
 const rejectUnauthorized =
   String(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED ?? 'true').toLowerCase() !== 'false';
-
-const PG_CONNECTION_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.PG_CONNECTION_TIMEOUT_MS);
-  const fallback = isProd ? 20_000 : 5_000;
-  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
-})();
 
 function storageStartupLine({ mode, databaseHost }) {
   const m = String(mode || 'unknown');
@@ -4326,13 +4438,18 @@ async function requireVerifiedUser(request, reply) {
     return null;
   }
 
+  if (!supabaseAuthVerifier?.auth?.getUser) {
+    reply.code(503).send({ error: 'Authentication service unavailable' });
+    return null;
+  }
+
   let data;
   let error;
   try {
     // Avoid hanging requests (which can surface as upstream 503s without CORS).
     const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
     ({ data, error } = await Promise.race([
-      supabase.auth.getUser(token),
+      supabaseAuthVerifier.auth.getUser(token),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
     ]));
   } catch (e) {
