@@ -71,6 +71,16 @@ function normalizeProfileMediaForClient(profile) {
   };
 }
 
+function normalizeProfileMediaForPersistence(value) {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  // Production persistent form: absolute URL (Supabase Storage).
+  if (/^https?:\/\//i.test(raw)) return raw;
+  // Local dev/back-compat: allow /uploads paths.
+  return toUploadsPath(raw);
+}
+
 async function safeReadJson(res) {
   try {
     return await res.json();
@@ -87,12 +97,12 @@ export async function upsertMyProfile(payload, options) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/me/profile`;
   const nextPayload = payload && typeof payload === 'object' ? { ...payload } : {};
-  // Persist canonical path-only uploads URLs.
+  // Persist absolute URLs (Supabase Storage) when provided.
   if ('profile_photo_url' in nextPayload) {
-    nextPayload.profile_photo_url = toUploadsPath(nextPayload.profile_photo_url) || null;
+    nextPayload.profile_photo_url = normalizeProfileMediaForPersistence(nextPayload.profile_photo_url);
   }
   if ('banner_url' in nextPayload) {
-    nextPayload.banner_url = toUploadsPath(nextPayload.banner_url) || null;
+    nextPayload.banner_url = normalizeProfileMediaForPersistence(nextPayload.banner_url);
   }
 
   const res = await httpFetch(url, {

@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { entities } from '@/api/appClient';
-import { uploadFile } from '@/api/uploadsClient';
+import { uploadAvatar, uploadBanner } from '@/api/uploadsClient';
 import { upsertMyProfile } from '@/api/userProfileClient';
 import ExpressionRewardsPanel from '@/components/challenges/ExpressionRewardsPanel';
 import { unlockExpressionReward } from '@/api/userChallengeStatsClient';
@@ -245,9 +245,8 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       // - Uploads file via POST /uploads (kind=banner) in src/api/uploadsClient.js
       // - Persists returned URL into user_profiles.banner_url via POST /me/profile (upsertMyProfile)
       // - Banner renders on Profile/UserProfile as a CSS background image
-      const uploaded = await uploadFile(file, {
+      const uploaded = await uploadBanner(file, {
         accessToken,
-        kind: 'banner',
         allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
       });
       const nextUrl = uploaded?.url ? String(uploaded.url) : '';
@@ -296,9 +295,8 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       try {
         const accessToken = session?.access_token ? String(session.access_token) : null;
         if (!accessToken) throw new Error('Please sign in to upload an image');
-        const uploaded = await uploadFile(pendingPhotoFile, {
+        const uploaded = await uploadAvatar(pendingPhotoFile, {
           accessToken,
-          kind: 'avatar',
           allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
         });
         const uploadedUrl = uploaded?.url ? String(uploaded.url) : '';

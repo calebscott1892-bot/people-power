@@ -114,28 +114,39 @@ if (!IS_NODE_PROD) {
 // --- Register cookie parser early (needed for proof-only session auth) ---
 fastify.register(require('@fastify/cookie'));
 
-// --- SQLite users table ---
-const {
-  getDb,
-  ensureUsersTable,
-  ensureProofUsersTable,
-  DB_PATH,
-} = require('./sqlite');
-const sqliteDb = getDb();
-ensureUsersTable(sqliteDb);
+// --- SQLite (PROOF/DEV ONLY) ---
+// Total-persistence constraint: Render filesystem is ephemeral.
+// SQLite is therefore never used in production/Render code paths.
+const IS_RENDER = String(process.env.RENDER || '').trim().toLowerCase() === 'true' || String(process.env.RENDER || '').trim() === '1';
+const ENABLE_SQLITE = !IS_NODE_PROD && !IS_RENDER;
 
-// Explicit proof-pack sqlite log
-if (process.env.C4_PROOF_PACK === '1') {
-  const info = sqliteDb.prepare('PRAGMA table_info(users)').all();
-  const columns = info.map(c => c.name).join(',');
-  console.log(`[proof-sqlite] path=${DB_PATH} columns=${columns}`);
+let sqliteDb = null;
+let ensureProofUsersTable = null;
+let DB_PATH = null;
+
+if (ENABLE_SQLITE) {
+  const sqlite = require('./sqlite');
+  DB_PATH = sqlite.DB_PATH;
+  ensureProofUsersTable = sqlite.ensureProofUsersTable;
+  sqliteDb = sqlite.getDb();
+  sqlite.ensureUsersTable(sqliteDb);
+
+  // Explicit proof-pack sqlite log (dev/proof only)
+  if (process.env.C4_PROOF_PACK === '1') {
+    try {
+      const info = sqliteDb.prepare('PRAGMA table_info(users)').all();
+      const columns = info.map((c) => c.name).join(',');
+      console.log(`[proof-sqlite] path=${DB_PATH} columns=${columns}`);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 // --- PROOF PACK AUTH BRIDGE ---
 const bcrypt = require('bcryptjs');
 // const { randomUUID } = require('crypto');
-const IS_RENDER = String(process.env.RENDER || '').trim().toLowerCase() === 'true' || String(process.env.RENDER || '').trim() === '1';
-const PROOF_MODE = process.env.C4_PROOF_PACK === '1' && !IS_RENDER;
+const PROOF_MODE = process.env.C4_PROOF_PACK === '1' && ENABLE_SQLITE;
 if (PROOF_MODE) {
   ensureProofUsersTable(sqliteDb);
   // Cookie session: simple, httpOnly, not for prod
@@ -319,14 +330,39 @@ fastify.post('/auth/sync', async (request, reply) => {
     return reply.code(503).send({ error: 'Authentication service unavailable' });
   }
   if (!user) return reply.code(401).send({ error: 'Invalid or missing Supabase JWT' });
-  const now = new Date().toISOString();
-  sqliteDb.prepare(`INSERT INTO users (id, email, created_at, last_seen)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET email=excluded.email, last_seen=excluded.last_seen`).run(
-      user.id, user.email, now, now
+
+  // Persist user presence in Postgres (Supabase Postgres via DATABASE_URL).
+  if (!hasDatabaseUrl) {
+    if (IS_NODE_PROD || IS_RENDER) {
+      return reply.code(503).send({ error: 'Database unavailable' });
+    }
+    // Dev-only: if no Postgres configured, skip persistence.
+    return reply.send({ ok: true, user: { id: user.id, email: user.email } });
+  }
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    const now = nowIso();
+    await pool.query(
+      `INSERT INTO users (id, email, created_at, last_seen)
+       VALUES ($1, $2, $3, $3)
+       ON CONFLICT (id) DO UPDATE
+         SET email = EXCLUDED.email,
+             last_seen = EXCLUDED.last_seen`,
+      [String(user.id), String(user.email), now]
     );
-  const row = sqliteDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-  return reply.send({ user: row });
+    return reply.send({ ok: true, user: { id: String(user.id), email: String(user.email) } });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to persist user sync');
+    return reply.code(500).send({ error: 'Failed to sync user' });
+  }
 });
 
 if (!PROOF_MODE) {
@@ -335,9 +371,11 @@ if (!PROOF_MODE) {
     // Proof pack bypass: allow deterministic test user if C4_PROOF_PACK=1 and not production
     if (process.env.C4_PROOF_PACK === '1' && process.env.NODE_ENV !== 'production') {
       // Only use bypass if no users exist in DB
-      const userCount = sqliteDb.prepare('SELECT COUNT(*) AS n FROM users').get().n;
-      if (userCount === 0) {
+      if (sqliteDb) {
+        const userCount = sqliteDb.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+        if (userCount === 0) {
         return reply.send({ id: 'proof-pack-user', email: 'proofpack@example.com', role: 'user' });
+        }
       }
       // Otherwise, fall through to normal logic
     }
@@ -350,24 +388,15 @@ if (!PROOF_MODE) {
       return reply.code(503).send({ error: 'Authentication service unavailable' });
     }
     if (!user) return reply.code(401).send({ error: 'Invalid or missing Supabase JWT' });
-    let row = sqliteDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-    if (!row) {
-      // Upsert user into SQLite if not found (guarantee persistence)
-      const now = new Date().toISOString();
-      sqliteDb.prepare(`INSERT INTO users (id, email, created_at, last_seen)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET email=excluded.email, last_seen=excluded.last_seen`).run(
-          user.id, user.email, now, now
-        );
-      row = sqliteDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-    }
-    return reply.send({ user: row });
+    const role = getStaffRoleForEmail(normalizeEmail(user.email)) || 'user';
+    // Backwards-compatible response shape: { user: {...} }
+    return reply.send({ user: { id: String(user.id), email: String(user.email), role: String(role) } });
   });
 }
 
 // ✅ CORS: explicitly allow the SPA origins (prod + dev).
 // Registered BEFORE any routes so headers apply to 4xx/5xx as well.
-const explicitCorsOrigins = (process.env.CORS_ORIGINS || '')
+const explicitCorsOrigins = (process.env.CORS_ORIGINS || process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
@@ -4666,11 +4695,15 @@ fastify.register(require('@fastify/multipart'), {
   },
 });
 
-fastify.register(require('@fastify/static'), {
-  root: uploadsDir,
-  prefix: '/uploads/',
-  decorateReply: false,
-});
+// Production persistence: do not serve local filesystem uploads on Render.
+// Local dev still supports /uploads for convenience.
+if (!IS_NODE_PROD && !IS_RENDER) {
+  fastify.register(require('@fastify/static'), {
+    root: uploadsDir,
+    prefix: '/uploads/',
+    decorateReply: false,
+  });
+}
 
 function readMultipartField(fields, name) {
   if (!fields || !name) return null;
@@ -4686,144 +4719,168 @@ function readMultipartField(fields, name) {
   return null;
 }
 
-async function ensureMovementExtrasColumns() {
-  if (!hasDatabaseUrl) return;
-  try {
-    await pool.query("ALTER TABLE movements ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'public'");
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS description_html TEXT');
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_city TEXT');
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_country TEXT');
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_lat DOUBLE PRECISION');
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_lon DOUBLE PRECISION');
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS verified_participants INT NOT NULL DEFAULT 0');
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS media_urls JSONB');
-    await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS claims JSONB');
-    movementsColumnsCache = null;
-  } catch (e) {
-    fastify.log.warn({ err: e }, 'Failed to ensure movement extra columns');
-  }
-}
+    const UPLOAD_KINDS = new Set(['avatar', 'banner', 'movement-media']);
 
-function normalizeMovementVisibility(value) {
-  const raw = value == null ? '' : String(value).trim().toLowerCase();
-  if (raw === 'community' || raw === 'private' || raw === 'public') return raw;
-  return 'public';
-}
+    function normalizeUploadKind(value) {
+      const raw = value == null ? '' : String(value).trim().toLowerCase();
+      if (!raw) return null;
 
-function getMovementOwnerEmailFromRecord(movement) {
-  return normalizeEmail(movement?.author_email || movement?.creator_email || movement?.created_by_email || '');
-}
+      // Back-compat aliases.
+      if (raw === 'group_avatar') return 'avatar';
+      if (raw === 'movement') return 'movement-media';
+      if (raw === 'movement_media') return 'movement-media';
+      if (raw === 'movement-media') return 'movement-media';
 
-function canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds }) {
-  const visibility = normalizeMovementVisibility(movement?.visibility);
-  if (visibility === 'public') return true;
+      if (raw === 'avatar') return 'avatar';
+      if (raw === 'banner') return 'banner';
+      return null;
+    }
 
-  const viewer = viewerEmail ? normalizeEmail(viewerEmail) : null;
-  if (!viewer) return false;
+    function bucketForUploadKind(kind) {
+      const avatarsBucket = String(process.env.SUPABASE_BUCKET_AVATARS || 'avatars').trim() || 'avatars';
+      const bannersBucket = String(process.env.SUPABASE_BUCKET_BANNERS || 'banners').trim() || 'banners';
+      const movementBucket = String(process.env.SUPABASE_BUCKET_MOVEMENT_MEDIA || 'movement-media').trim() || 'movement-media';
 
-  const owner = getMovementOwnerEmailFromRecord(movement);
-  if (owner && viewer && owner === viewer) return true;
+      if (kind === 'avatar') return avatarsBucket;
+      if (kind === 'banner') return bannersBucket;
+      return movementBucket;
+    }
 
-  if (visibility === 'private') return false;
+    function objectPathForUploadKind({ kind, userId, movementId, storedName }) {
+      const uid = userId ? String(userId).trim() : 'unknown';
+      if (kind === 'avatar') return `${uid}/${storedName}`;
+      if (kind === 'banner') return `${uid}/${storedName}`;
+      const mid = movementId ? String(movementId).trim() : '';
+      return `${mid || uid}/${storedName}`;
+    }
 
-  const mid = String(movement?.id || '').trim();
-  return !!(mid && viewerFollowedMovementIds && viewerFollowedMovementIds.has(mid));
-}
+    async function handleUpload(request, reply) {
+      const authedUser = await requireVerifiedUser(request, reply);
+      if (!authedUser) return;
 
-async function getViewerFollowedMovementIds(viewerEmail) {
-  const email = normalizeEmail(viewerEmail);
-  if (!email) return new Set();
-
-  if (!hasDatabaseUrl) {
-    const set = new Set();
-    for (const [movementId, followers] of memoryMovementFollows.entries()) {
-      if (followers && typeof followers.has === 'function' && followers.has(email)) {
-        set.add(String(movementId));
+      const contentLengthHeader = request.headers?.['content-length'];
+      if (contentLengthHeader && Number(contentLengthHeader) > MAX_UPLOAD_BYTES) {
+        return reply.code(413).send({ error: 'File too large' });
       }
+
+      let file;
+      try {
+        file = await request.file();
+      } catch (e) {
+        fastify.log.warn({ err: e }, 'Upload parse failed');
+        return reply.code(400).send({ error: 'Invalid upload payload' });
+      }
+
+      if (!file) return reply.code(400).send({ error: 'file is required' });
+
+      // Enforce size limit
+      if (typeof file.file.truncated === 'boolean' && file.file.truncated) {
+        return reply.code(413).send({ error: 'File too large' });
+      }
+      if (file.file.bytesRead && file.file.bytesRead > MAX_UPLOAD_BYTES) {
+        return reply.code(413).send({ error: 'File too large' });
+      }
+
+      const mime = file.mimetype ? String(file.mimetype).toLowerCase() : '';
+      if (!mime) {
+        return reply.code(415).send({ error: 'Unsupported file type' });
+      }
+
+      const kindFromPath = request.params?.kind;
+      const kindFromQuery = request.query?.kind;
+      const kindFromField = readMultipartField(file.fields, 'kind');
+      const movementIdFromField = readMultipartField(file.fields, 'movement_id') || readMultipartField(file.fields, 'movementId');
+      const movementIdFromQuery = request.query?.movement_id || request.query?.movementId;
+
+      const rawKind = kindFromPath || kindFromQuery || kindFromField || null;
+      const normalizedKind = normalizeUploadKind(rawKind) || 'movement-media';
+
+      if (!UPLOAD_KINDS.has(normalizedKind)) {
+        return reply.code(400).send({ error: 'Invalid upload kind' });
+      }
+
+      // MIME allowlist:
+      // - avatar/banner: images only
+      // - movement-media: preserve broader allowlist (supports evidence/resources without breaking prod)
+      const imageOnly = normalizedKind === 'avatar' || normalizedKind === 'banner';
+      if (imageOnly) {
+        if (!IMAGE_ONLY_UPLOAD_MIME_TYPES.includes(mime)) {
+          return reply.code(415).send({ error: 'Unsupported image type' });
+        }
+      } else if (!ALLOWED_UPLOAD_MIME_TYPES.includes(mime)) {
+        return reply.code(415).send({ error: 'Unsupported file type' });
+      }
+
+      const originalName = String(file.filename || 'upload');
+      const ext = path.extname(originalName).slice(0, 12);
+      const storedName = `${randomUUID()}${ext}`;
+
+      const canUseSupabaseStorage = !!SUPABASE_SERVICE_ROLE_KEY;
+      if ((IS_NODE_PROD || IS_RENDER) && !canUseSupabaseStorage) {
+        return reply.code(503).send({ error: 'Upload storage unavailable' });
+      }
+
+      if (canUseSupabaseStorage) {
+        try {
+          const chunks = [];
+          for await (const chunk of file.file) chunks.push(Buffer.from(chunk));
+          const buffer = Buffer.concat(chunks);
+
+          const userId = authedUser?.id ? String(authedUser.id) : 'unknown';
+          const movementId = movementIdFromField || movementIdFromQuery || null;
+
+          const bucket = bucketForUploadKind(normalizedKind);
+          const objectPath = objectPathForUploadKind({ kind: normalizedKind, userId, movementId, storedName });
+
+          const uploadRes = await supabase.storage.from(bucket).upload(objectPath, buffer, {
+            contentType: mime || undefined,
+            upsert: false,
+          });
+
+          if (uploadRes.error) {
+            fastify.log.error({ err: uploadRes.error, bucket }, 'Supabase storage upload failed');
+            return reply.code(500).send({ error: 'Failed to store upload' });
+          }
+
+          const publicRes = supabase.storage.from(bucket).getPublicUrl(objectPath);
+          const publicUrl = publicRes?.data?.publicUrl ? String(publicRes.data.publicUrl) : null;
+
+          return reply.send({
+            ok: true,
+            kind: normalizedKind,
+            bucket,
+            path: objectPath,
+            url: publicUrl,
+            filename: originalName,
+            mime: file.mimetype,
+          });
+        } catch (e) {
+          fastify.log.error({ err: e }, 'Supabase storage upload exception');
+          return reply.code(500).send({ error: 'Failed to store upload' });
+        }
+      }
+
+      // Local dev fallback: write to disk and serve via /uploads.
+      const targetPath = path.join(uploadsDir, storedName);
+      try {
+        await pipeline(file.file, fs.createWriteStream(targetPath));
+      } catch (e) {
+        fastify.log.error({ err: e }, 'Upload write failed');
+        return reply.code(500).send({ error: 'Failed to store upload' });
+      }
+
+      return reply.send({
+        ok: true,
+        kind: normalizedKind,
+        url: `/uploads/${storedName}`,
+        filename: originalName,
+        mime: file.mimetype,
+      });
     }
-    return set;
-  }
 
-  try {
-    await ensureMovementFollowsTable();
-    const res = await pool.query('SELECT movement_id FROM movement_follows WHERE follower_email = $1', [String(email)]);
-    const ids = new Set();
-    for (const r of res.rows || []) {
-      if (r?.movement_id) ids.add(String(r.movement_id));
-    }
-    return ids;
-  } catch (e) {
-    if (isProd) {
-      fastify.log.error({ err: e }, 'Failed to load viewer followed movement ids');
-      throw e;
-    }
-    return new Set();
-  }
-}
+    fastify.post('/uploads', { config: { rateLimit: RATE_LIMITS.upload } }, handleUpload);
+    fastify.post('/uploads/:kind', { config: { rateLimit: RATE_LIMITS.upload } }, handleUpload);
 
-fastify.post('/uploads', { config: { rateLimit: RATE_LIMITS.upload } }, async (request, reply) => {
-  const authedUser = await requireVerifiedUser(request, reply);
-  if (!authedUser) return;
-
-  const contentLengthHeader = request.headers?.['content-length'];
-  if (contentLengthHeader && Number(contentLengthHeader) > MAX_UPLOAD_BYTES) {
-    return reply.code(413).send({ error: 'File too large' });
-  }
-
-  let file;
-  try {
-    file = await request.file();
-  } catch (e) {
-    fastify.log.warn({ err: e }, 'Upload parse failed');
-    return reply.code(400).send({ error: 'Invalid upload payload' });
-  }
-
-  if (!file) return reply.code(400).send({ error: 'file is required' });
-
-  // Enforce size limit
-  if (typeof file.file.truncated === 'boolean' && file.file.truncated) {
-    return reply.code(413).send({ error: 'File too large' });
-  }
-  if (file.file.bytesRead && file.file.bytesRead > MAX_UPLOAD_BYTES) {
-    return reply.code(413).send({ error: 'File too large' });
-  }
-
-  // Enforce MIME type
-  const mime = file.mimetype ? String(file.mimetype).toLowerCase() : '';
-  if (!mime) {
-    return reply.code(415).send({ error: 'Unsupported file type' });
-  }
-  const kind = readMultipartField(file.fields, 'kind');
-  const normalizedKind = kind ? String(kind).trim().toLowerCase() : null;
-  const imageOnlyKind = normalizedKind === 'avatar' || normalizedKind === 'banner' || normalizedKind === 'group_avatar';
-  if (imageOnlyKind) {
-    if (!IMAGE_ONLY_UPLOAD_MIME_TYPES.includes(mime)) {
-      return reply.code(415).send({ error: 'Unsupported image type' });
-    }
-  } else if (!ALLOWED_UPLOAD_MIME_TYPES.includes(mime)) {
-    return reply.code(415).send({ error: 'Unsupported file type' });
-  }
-
-  const originalName = String(file.filename || 'upload');
-  const ext = path.extname(originalName).slice(0, 12);
-  const storedName = `${randomUUID()}${ext}`;
-  const targetPath = path.join(uploadsDir, storedName);
-
-  try {
-    await pipeline(file.file, fs.createWriteStream(targetPath));
-  } catch (e) {
-    fastify.log.error({ err: e }, 'Upload write failed');
-    return reply.code(500).send({ error: 'Failed to store upload' });
-  }
-
-  return reply.send({
-    ok: true,
-    kind: normalizedKind || null,
-    url: `/uploads/${storedName}`,
-    filename: originalName,
-    mime: file.mimetype,
-  });
-});
 
 // Platform role declaration acknowledgment
 fastify.get('/platform-acknowledgment/me', async (request, reply) => {
@@ -5471,7 +5528,7 @@ fastify.post('/movements/:id/follow', async (request, reply) => {
   }
 });
 
-fastify.get('/followed-movements', async (request, reply) => {
+async function handleFollowedMovements(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -5533,7 +5590,11 @@ fastify.get('/followed-movements', async (request, reply) => {
     fastify.log.error({ err: e }, 'Failed to load followed movements');
     return reply.code(500).send({ error: 'Failed to load followed movements' });
   }
-});
+}
+
+fastify.get('/followed-movements', handleFollowedMovements);
+// Backwards-compatible alias for older clients.
+fastify.get('/me/followed-movements', handleFollowedMovements);
 
 fastify.get('/movements/:id/comment-settings', async (request, reply) => {
   const id = request.params?.id ? String(request.params.id) : null;
@@ -10517,38 +10578,32 @@ fastify.get('/search/users', { config: { rateLimit: RATE_LIMITS.search } }, asyn
 });
 
 // Update or create the current user's profile with username uniqueness enforced.
-function toUploadsPath(input) {
+function normalizeMediaUrlForPersistence(input) {
   if (input == null) return null;
   const raw = String(input).trim();
   if (!raw) return null;
 
-  const stripQueryAndHash = (value) => String(value || '').split(/[?#]/)[0];
+  // Preferred persistent form: absolute URL (e.g. Supabase Storage public URL).
+  if (/^https?:\/\//i.test(raw)) return raw;
 
-  if (/^https?:\/\//i.test(raw)) {
-    try {
-      const u = new URL(raw);
-      const pathname = stripQueryAndHash(u.pathname || '');
-      const idx = pathname.indexOf('/uploads/');
-      if (idx === -1) return null;
-      const sliced = pathname.slice(idx);
+  // Dev/back-compat only: allow /uploads/... paths.
+  const stripQueryAndHash = (value) => String(value || '').split(/[?#]/)[0];
+  const cleaned = stripQueryAndHash(raw);
+
+  if (!IS_NODE_PROD && !IS_RENDER) {
+    if (cleaned.startsWith('/uploads/')) {
+      return cleaned.length > '/uploads/'.length ? cleaned : null;
+    }
+    if (cleaned.startsWith('uploads/')) {
+      return cleaned.length > 'uploads/'.length ? `/${cleaned}` : null;
+    }
+    const idx = cleaned.indexOf('/uploads/');
+    if (idx !== -1) {
+      const sliced = cleaned.slice(idx);
       return sliced.length > '/uploads/'.length ? sliced : null;
-    } catch {
-      // Fall through to string parsing below.
     }
   }
 
-  const cleaned = stripQueryAndHash(raw);
-  if (cleaned.startsWith('/uploads/')) {
-    return cleaned.length > '/uploads/'.length ? cleaned : null;
-  }
-  if (cleaned.startsWith('uploads/')) {
-    return cleaned.length > 'uploads/'.length ? `/${cleaned}` : null;
-  }
-  const idx = cleaned.indexOf('/uploads/');
-  if (idx !== -1) {
-    const sliced = cleaned.slice(idx);
-    return sliced.length > '/uploads/'.length ? sliced : null;
-  }
   return null;
 }
 
@@ -10687,6 +10742,8 @@ async function handlePostMyProfile(request, reply) {
     username: z.string().max(MAX_TEXT_LENGTHS.profileUsername).optional().nullable(),
     bio: z.string().max(MAX_TEXT_LENGTHS.profileBio).optional().nullable(),
     profile_photo_url: z.string().max(MAX_TEXT_LENGTHS.profilePhotoUrl).optional().nullable(),
+    // Alias for some clients/specs.
+    avatar_url: z.string().max(MAX_TEXT_LENGTHS.profilePhotoUrl).optional().nullable(),
     banner_url: z.string().max(MAX_TEXT_LENGTHS.profileBannerUrl).optional().nullable(),
     banner_offset_y: z.number().min(-1).max(1).optional().nullable(),
     is_private: z.boolean().optional(),
@@ -10716,7 +10773,7 @@ async function handlePostMyProfile(request, reply) {
     if (value === null) return { provided: true, kind: 'null' };
     const raw = String(value || '').trim();
     if (!raw) return { provided: true, kind: 'empty' };
-    if (toUploadsPath(raw)) return { provided: true, kind: 'uploads' };
+    if (!IS_NODE_PROD && !IS_RENDER && raw.startsWith('/uploads/')) return { provided: true, kind: 'uploads' };
     if (/^https?:\/\//i.test(raw)) return { provided: true, kind: 'absolute-non-uploads' };
     return { provided: true, kind: 'other' };
   };
@@ -10744,7 +10801,12 @@ async function handlePostMyProfile(request, reply) {
     display_name: parsed.data.display_name != null ? cleanText(parsed.data.display_name, MAX_TEXT_LENGTHS.profileDisplayName) : existing?.display_name ?? null,
     username: normalizedUsername ?? existing?.username ?? null,
     bio: parsed.data.bio != null ? cleanText(parsed.data.bio, MAX_TEXT_LENGTHS.profileBio) : existing?.bio ?? null,
-    profile_photo_url: parsed.data.profile_photo_url != null ? String(parsed.data.profile_photo_url).trim() || null : existing?.profile_photo_url ?? null,
+    profile_photo_url:
+      parsed.data.profile_photo_url != null
+        ? (String(parsed.data.profile_photo_url).trim() || null)
+        : (parsed.data.avatar_url != null
+            ? (String(parsed.data.avatar_url).trim() || null)
+            : (existing?.profile_photo_url ?? null)),
     banner_url: parsed.data.banner_url != null ? String(parsed.data.banner_url).trim() || null : existing?.banner_url ?? null,
     banner_offset_y:
       parsed.data.banner_offset_y != null
@@ -10817,9 +10879,9 @@ async function handlePostMyProfile(request, reply) {
     };
     const next = buildNextProfile(existing);
 
-    // Enforce canonical /uploads/... persistence for media fields.
-    next.profile_photo_url = toUploadsPath(next.profile_photo_url) || null;
-    next.banner_url = toUploadsPath(next.banner_url) || null;
+    // Persist absolute URLs (Supabase Storage) in production; /uploads only in local dev.
+    next.profile_photo_url = normalizeMediaUrlForPersistence(next.profile_photo_url) || null;
+    next.banner_url = normalizeMediaUrlForPersistence(next.banner_url) || null;
 
     if (!isProd) {
       fastify.log.info(
@@ -10895,9 +10957,9 @@ async function handlePostMyProfile(request, reply) {
 
     const next = buildNextProfile(existing);
 
-    // Enforce canonical /uploads/... persistence for media fields.
-    next.profile_photo_url = toUploadsPath(next.profile_photo_url) || null;
-    next.banner_url = toUploadsPath(next.banner_url) || null;
+    // Persist absolute URLs (Supabase Storage) in production; /uploads only in local dev.
+    next.profile_photo_url = normalizeMediaUrlForPersistence(next.profile_photo_url) || null;
+    next.banner_url = normalizeMediaUrlForPersistence(next.banner_url) || null;
 
     if (!isProd) {
       fastify.log.info(

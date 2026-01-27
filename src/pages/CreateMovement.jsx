@@ -13,7 +13,7 @@ import { checkLeadershipCap, registerLeadershipRole } from '@/components/governa
 import MovementCard from '@/components/home/MovementCard';
 import LocationPicker from '@/components/profile/LocationPicker';
 import AIMovementAssistant from '@/components/creation/AIMovementAssistant';
-import { uploadFile } from '@/api/uploadsClient';
+import { uploadFile, uploadMovementMedia } from '@/api/uploadsClient';
 import toast from 'react-hot-toast';
 import Filter from 'bad-words';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
@@ -337,7 +337,7 @@ export default function CreateMovement() {
       let finalCoverUrl = coverUrl;
       if (!finalCoverUrl && coverFile) {
         try {
-          const uploaded = await uploadFile(coverFile, {
+          const uploaded = await uploadMovementMedia(coverFile, {
             accessToken,
             maxBytes: MAX_UPLOAD_BYTES,
             allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,

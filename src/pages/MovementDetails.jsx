@@ -73,7 +73,7 @@ import { filterNotifications, upsertNotification } from '@/api/notificationsClie
 
 import { fetchEventRsvpSummary, setMyEventAttendance, setMyEventRsvp } from '@/api/eventRsvpsClient';
 import { fetchPetitionSignatureSummary, signPetition, withdrawPetitionSignature } from '@/api/petitionSignaturesClient';
-import { uploadFile } from '@/api/uploadsClient';
+import { uploadMovementMedia } from '@/api/uploadsClient';
 import { getServerBaseUrl } from '@/api/serverBase';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
@@ -1530,8 +1530,9 @@ export default function MovementDetails() {
           allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
         });
         if (validationError) throw new Error(validationError);
-        const uploaded = await uploadFile(file, {
+        const uploaded = await uploadMovementMedia(file, {
           accessToken,
+          movement_id: movementId,
           maxBytes: MAX_UPLOAD_BYTES,
           allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
         });
@@ -1646,8 +1647,9 @@ export default function MovementDetails() {
         });
         if (validationError) throw new Error(validationError);
 
-        const uploaded = await uploadFile(file, {
+        const uploaded = await uploadMovementMedia(file, {
           accessToken,
+          movement_id: movementId,
           maxBytes: MAX_UPLOAD_BYTES,
           allowedMimeTypes: ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
         });

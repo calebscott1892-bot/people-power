@@ -41,7 +41,7 @@ import {
 import { isEncryptedBody, packEncryptedPayload, unpackEncryptedPayload } from '@/lib/e2eeFormat';
 import { toast } from 'sonner';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
-import { uploadFile } from '@/api/uploadsClient';
+import { uploadAvatar, uploadFile } from '@/api/uploadsClient';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
 import { fetchMovementEvidencePage } from '@/api/movementExtrasClient';
@@ -1421,11 +1421,10 @@ function MessagesInner() {
 
       let avatarUrl = groupAvatarPreview || null;
       if (groupAvatarFile) {
-        const uploaded = await uploadFile(groupAvatarFile, {
+        const uploaded = await uploadAvatar(groupAvatarFile, {
           accessToken,
           maxBytes: MAX_UPLOAD_BYTES,
           allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
-          kind: 'group_avatar',
         });
         avatarUrl = uploaded?.url ? String(uploaded.url) : null;
       }

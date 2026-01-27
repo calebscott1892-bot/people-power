@@ -19,7 +19,7 @@ function isLocalhost() {
 // 1) If VITE_API_BASE_URL is defined -> ALWAYS use that
 // 2) If running on localhost -> use http://localhost:3001
 // 3) Otherwise -> use Render backend directly (no /api proxy)
-const envBaseRaw = import.meta?.env?.VITE_API_BASE_URL;
+const envBaseRaw = import.meta?.env?.VITE_API_BASE_URL || import.meta?.env?.VITE_BACKEND_BASE;
 const envBase = envBaseRaw ? String(envBaseRaw).trim() : '';
 
 // Production safety: prevent accidentally routing through Cloudflare Pages `/api/*` proxy.

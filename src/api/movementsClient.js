@@ -110,7 +110,7 @@ export async function fetchMyFollowedMovements(options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   if (!accessToken) throw new Error('Authentication required');
 
-  const url = `${SERVER_BASE.replace(/\/$/, '')}/me/followed-movements`;
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/followed-movements`;
   const res = await httpFetch(url, {
     cache: 'no-store',
     headers: {
