@@ -48,4 +48,4 @@ Server/dev.db-wal
 
 # Playwright
 /test-results/
-/playwright-report/
+/playwright-report/avatar.png
