@@ -47,6 +47,33 @@ fastify.get('/__whoami', async (request, reply) => {
   });
 });
 
+// --- DB diagnostics (safe; no secrets) ---
+// Confirms whether DATABASE_URL is present and parses non-sensitive connection details.
+fastify.get('/__db', async (_request, reply) => {
+  const raw = String(process.env.DATABASE_URL || '').trim();
+  const hasDatabaseUrl = !!raw;
+
+  let parsed = null;
+  if (raw) {
+    try {
+      const u = new URL(raw);
+      const dbName = (u.pathname || '').replace(/^\//, '') || null;
+      parsed = {
+        protocol: u.protocol || null,        // postgres: / postgresql:
+        hostname: u.hostname || null,
+        port: u.port || null,
+        database: dbName,
+        sslmode: u.searchParams?.get('sslmode') || null,
+        looksSupabase: (u.hostname || '').toLowerCase().includes('supabase.com'),
+      };
+    } catch (e) {
+      parsed = { error: 'DATABASE_URL is not a valid URL' };
+    }
+  }
+
+  return reply.send({ ok: true, hasDatabaseUrl, parsed });
+});
+
 // DEV-only auth diagnostics: verifies whether a provided Bearer token is usable with Supabase.
 // Safe for local debugging because it NEVER returns the token itself.
 if (!IS_NODE_PROD) {
