@@ -3438,6 +3438,25 @@ async function ensureMovementFollowsTable() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_movement_follows_follower ON movement_follows (follower_email)');
 }
 
+async function getViewerFollowedMovementIds(viewerEmail) {
+  if (!viewerEmail) return new Set();
+  const email = typeof normalizeEmail === 'function' ? normalizeEmail(viewerEmail) : String(viewerEmail || '').trim();
+  if (!email) return new Set();
+
+  try {
+    await ensureMovementFollowsTable();
+    const res = await poolQueryWithRetry({
+      text: 'SELECT movement_id FROM movement_follows WHERE follower_email = $1',
+      values: [email],
+    });
+    const rows = Array.isArray(res?.rows) ? res.rows : [];
+    return new Set(rows.map((r) => String(r.movement_id)));
+  } catch (e) {
+    fastify.log.warn({ err: e }, 'Failed to load viewer movement follows');
+    return new Set();
+  }
+}
+
 async function ensureMovementCommentsTables() {
   if (!hasDatabaseUrl) return;
 
