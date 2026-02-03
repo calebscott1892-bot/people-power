@@ -4227,6 +4227,71 @@ function normalizeUsername(value) {
   return s || null;
 }
 
+function getSupabasePublicStorageBase() {
+  const explicit = String(process.env.SUPABASE_PUBLIC_STORAGE_BASE || '').trim();
+  if (explicit) return explicit.replace(/\/$/, '');
+  const supabaseUrl = String(process.env.SUPABASE_URL || '').trim();
+  if (!supabaseUrl) return null;
+  return `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public`;
+}
+
+function bucketForMediaKind(kind) {
+  const avatarsBucket = String(process.env.SUPABASE_BUCKET_AVATARS || 'avatars').trim() || 'avatars';
+  const bannersBucket = String(process.env.SUPABASE_BUCKET_BANNERS || 'banners').trim() || 'banners';
+  const movementBucket =
+    String(process.env.SUPABASE_BUCKET_MOVEMENT_MEDIA || 'movement-media').trim() || 'movement-media';
+  if (kind === 'avatar') return avatarsBucket;
+  if (kind === 'banner') return bannersBucket;
+  return movementBucket;
+}
+
+function toPublicMediaUrl(value, { kindHint } = {}) {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  // Already absolute.
+  if (/^https?:\/\//i.test(raw)) return raw;
+
+  const stripQueryAndHash = (s) => String(s || '').split(/[?#]/)[0];
+  const cleaned = stripQueryAndHash(raw);
+
+  // Normalize /uploads references.
+  let uploadsPath = null;
+  if (cleaned.startsWith('/uploads/')) uploadsPath = cleaned;
+  else if (cleaned.startsWith('uploads/')) uploadsPath = `/${cleaned}`;
+  else {
+    const idx = cleaned.indexOf('/uploads/');
+    if (idx !== -1) uploadsPath = cleaned.slice(idx);
+  }
+
+  if (!uploadsPath) return raw;
+
+  const base = getSupabasePublicStorageBase();
+  if (!base) {
+    fastify.log.warn({ value: raw }, 'Cannot convert /uploads URL: missing SUPABASE_PUBLIC_STORAGE_BASE/SUPABASE_URL');
+    return uploadsPath;
+  }
+
+  const rest = uploadsPath.slice('/uploads/'.length).replace(/^\/+/, '');
+  if (!rest) return null;
+
+  const kind = kindHint === 'avatar' || kindHint === 'banner' || kindHint === 'movement-media' ? kindHint : null;
+  const bucket = bucketForMediaKind(kind || 'movement-media');
+  if (!kind) {
+    fastify.log.warn({ value: raw }, 'Uploads bucket not inferred; defaulting to movement-media');
+  }
+
+  return `${base}/${bucket}/${rest}`;
+}
+
+function toPublicMediaUrls(value, { kindHint } = {}) {
+  if (!Array.isArray(value)) return value;
+  return value
+    .map((v) => toPublicMediaUrl(v, { kindHint }))
+    .filter(Boolean);
+}
+
 function isValidUsername(value) {
   if (!value) return false;
   return /^[a-z0-9_]{3,32}$/.test(String(value));
@@ -4259,6 +4324,10 @@ function sanitizeUserProfileRecord(record) {
   delete out.precise_location;
 
   if (out.location) out.location = sanitizeProfileLocation(out.location);
+
+  // Ensure any legacy /uploads values are returned as durable public URLs.
+  if ('profile_photo_url' in out) out.profile_photo_url = toPublicMediaUrl(out.profile_photo_url, { kindHint: 'avatar' });
+  if ('banner_url' in out) out.banner_url = toPublicMediaUrl(out.banner_url, { kindHint: 'banner' });
 
   // Never export sensitive scoring / internal flags even if they exist.
   for (const key of Object.keys(out)) {
@@ -4296,6 +4365,61 @@ function sanitizePublicUserProfileRecord(record) {
   delete out.onboarding_current_step;
   delete out.onboarding_interests;
   delete out.onboarding_completed_tutorials;
+  return out;
+}
+
+function normalizeMediaUrlForPersistence(input, { kindHint } = {}) {
+  if (input == null) return null;
+  const raw = String(input).trim();
+  if (!raw) return null;
+
+  // Preferred persistent form: absolute URL (e.g. Supabase Storage public URL).
+  if (/^https?:\/\//i.test(raw)) return raw;
+
+  const converted = toPublicMediaUrl(raw, { kindHint });
+  if (!converted) return null;
+
+  // Never persist local /uploads paths in production/Render.
+  if ((IS_NODE_PROD || IS_RENDER) && String(converted).startsWith('/uploads/')) return null;
+  return converted;
+}
+
+function formatConversationForClient(convo) {
+  if (!convo || typeof convo !== 'object') return convo;
+  const out = { ...convo };
+  if ('group_avatar_url' in out) out.group_avatar_url = toPublicMediaUrl(out.group_avatar_url, { kindHint: 'avatar' });
+  return out;
+}
+
+function formatMovementForClient(record) {
+  if (!record || typeof record !== 'object') return record;
+  const out = { ...record };
+  if ('media_urls' in out) {
+    if (Array.isArray(out.media_urls)) {
+      out.media_urls = toPublicMediaUrls(out.media_urls, { kindHint: 'movement-media' });
+    } else if (typeof out.media_urls === 'string') {
+      try {
+        const parsed = JSON.parse(out.media_urls);
+        if (Array.isArray(parsed)) out.media_urls = toPublicMediaUrls(parsed, { kindHint: 'movement-media' });
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return out;
+}
+
+function formatEvidenceForClient(record) {
+  if (!record || typeof record !== 'object') return record;
+  const out = { ...record };
+  if ('url' in out) out.url = toPublicMediaUrl(out.url, { kindHint: 'movement-media' });
+  return out;
+}
+
+function formatResourceForClient(record) {
+  if (!record || typeof record !== 'object') return record;
+  const out = { ...record };
+  if ('file_url' in out) out.file_url = toPublicMediaUrl(out.file_url, { kindHint: 'movement-media' });
   return out;
 }
 
@@ -4367,7 +4491,7 @@ async function attachCreatorProfilesToMovements(movements) {
     const profile = email ? lookup.get(email) : null;
     const displayName = profile?.display_name ?? null;
     const username = profile?.username ?? null;
-    const photo = profile?.profile_photo_url ?? null;
+    const photo = toPublicMediaUrl(profile?.profile_photo_url ?? null, { kindHint: 'avatar' });
     const creatorUserId = profile?.user_id ?? null;
     return {
       ...movement,
@@ -4559,7 +4683,9 @@ function canPostToGroup(convo, email) {
 function normalizeGroupAvatarUrl(value) {
   const raw = safeString(value, { max: MAX_TEXT_LENGTHS.profilePhotoUrl });
   if (!raw) return null;
-  if (raw.startsWith('/uploads/')) return raw;
+  if (raw.startsWith('/uploads/') || raw.startsWith('uploads/') || raw.includes('/uploads/')) {
+    return toPublicMediaUrl(raw, { kindHint: 'avatar' });
+  }
   try {
     const u = new URL(raw);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
@@ -5450,7 +5576,7 @@ fastify.get('/movements', async (request, reply) => {
 
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
-      return reply.send(enriched.map((m) => projectRecord(m, fields)));
+      return reply.send(enriched.map((m) => projectRecord(formatMovementForClient(m), fields)));
     }
 
     try {
@@ -5510,7 +5636,7 @@ fastify.get('/movements', async (request, reply) => {
       merged = merged.filter(canViewMovement).sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
-      return reply.send(enriched.map((m) => projectRecord(m, fields)));
+      return reply.send(enriched.map((m) => projectRecord(formatMovementForClient(m), fields)));
     } catch (e) {
       const requestId = request?.id ? String(request.id) : null;
       if (isProd) {
@@ -5539,7 +5665,7 @@ fastify.get('/movements', async (request, reply) => {
         .sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
-      return reply.send(enriched.map((m) => projectRecord(m, fields)));
+      return reply.send(enriched.map((m) => projectRecord(formatMovementForClient(m), fields)));
     }
   } catch (err) {
     const requestId = request?.id ? String(request.id) : null;
@@ -5603,7 +5729,7 @@ fastify.get('/movements/:id', async (request, reply) => {
       score: summary.score,
       verified_participants: memoryCountApprovedEvidenceParticipants(found?.id),
     }]))[0];
-    return enriched;
+    return formatMovementForClient(enriched);
   }
 
   try {
@@ -5657,7 +5783,7 @@ fastify.get('/movements/:id', async (request, reply) => {
     if (isNotVisibleForViewer(row)) return reply.code(404).send({ error: 'Movement not found' });
     if (isHiddenForViewer(row)) return reply.code(404).send({ error: 'Movement not found' });
     const enriched = (await attachCreatorProfilesToMovements([row]))[0];
-    return enriched;
+    return formatMovementForClient(enriched);
   } catch (e) {
     if (isProd) {
       fastify.log.error({ err: e }, 'DB query failed for GET /movements/:id');
@@ -5702,7 +5828,7 @@ fastify.get('/movements/:id', async (request, reply) => {
               score: summary.score,
               verified_participants: memoryCountApprovedEvidenceParticipants(fromMemory?.id),
             }]))[0];
-            return enriched;
+            return formatMovementForClient(enriched);
           }
         }
         return reply.code(404).send({ error: 'Movement not found' });
@@ -5710,7 +5836,7 @@ fastify.get('/movements/:id', async (request, reply) => {
       if (isNotVisibleForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
       if (isHiddenForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
       const enriched = (await attachCreatorProfilesToMovements([found]))[0];
-      return enriched;
+      return formatMovementForClient(enriched);
     } catch (e2) {
       fastify.log.error({ err: e2 }, 'DB fallback failed for GET /movements/:id');
       return reply.code(500).send({ error: 'Failed to load movement' });
@@ -5873,7 +5999,7 @@ async function handleFollowedMovements(request, reply) {
       const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || '');
       return !isBlockedForViewer(authorEmail, viewerBlocks);
     });
-    return reply.send({ movements });
+    return reply.send({ movements: movements.map(formatMovementForClient) });
   }
 
   try {
@@ -5912,7 +6038,7 @@ async function handleFollowedMovements(request, reply) {
       const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || '');
       return !isBlockedForViewer(authorEmail, viewerBlocks);
     });
-    return reply.send({ movements: filtered });
+    return reply.send({ movements: filtered.map(formatMovementForClient) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load followed movements');
     return reply.code(500).send({ error: 'Failed to load followed movements' });
@@ -6364,7 +6490,7 @@ fastify.get('/movements/:id/resources', async (request, reply) => {
     if (blockMemoryFallbackInProd(request, reply, 'movement resources list')) return;
     const list = memoryListExtras(memoryMovementResourcesByMovement, id).sort(sortByCreatedDesc);
     const page = list.slice(offset, offset + limit);
-    return reply.send({ resources: page.map((r) => projectRecord(r, fields)) });
+    return reply.send({ resources: page.map((r) => projectRecord(formatResourceForClient(r), fields)) });
   }
 
   try {
@@ -6374,7 +6500,7 @@ fastify.get('/movements/:id/resources', async (request, reply) => {
       [String(id), limit, offset]
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
-    return reply.send({ resources: rows.map((r) => projectRecord(r, fields)) });
+    return reply.send({ resources: rows.map((r) => projectRecord(formatResourceForClient(r), fields)) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load movement resources');
     return reply.code(500).send({ error: 'Failed to load resources' });
@@ -6424,7 +6550,9 @@ fastify.post('/movements/:id/resources', async (request, reply) => {
     movement_id: String(id),
     title: cleanText(parsed.data.title),
     url: parsed.data.url ? String(parsed.data.url).trim() : null,
-    file_url: parsed.data.file_url ? String(parsed.data.file_url).trim() : null,
+    file_url: parsed.data.file_url
+      ? normalizeMediaUrlForPersistence(String(parsed.data.file_url).trim(), { kindHint: 'movement-media' })
+      : null,
     file_name: parsed.data.file_name ? cleanText(parsed.data.file_name) : null,
     mime_type: parsed.data.mime_type ? cleanText(parsed.data.mime_type) : null,
     file_size: typeof parsed.data.file_size === 'number' ? parsed.data.file_size : null,
@@ -6435,9 +6563,14 @@ fastify.post('/movements/:id/resources', async (request, reply) => {
     created_at: nowIso(),
   };
 
+  if (parsed.data.file_url && !row.file_url) {
+    return reply.code(400).send({ error: 'file_url must be a valid public URL or durable upload' });
+  }
+
   if (!hasDatabaseUrl) {
     if (blockMemoryFallbackInProd(request, reply, 'movement resources create')) return;
-    return reply.code(201).send({ resource: memoryAppendExtra(memoryMovementResourcesByMovement, id, row) });
+    const saved = memoryAppendExtra(memoryMovementResourcesByMovement, id, row);
+    return reply.code(201).send({ resource: formatResourceForClient(saved) });
   }
 
   try {
@@ -6461,7 +6594,7 @@ fastify.post('/movements/:id/resources', async (request, reply) => {
         row.created_by_email,
       ]
     );
-    return reply.code(201).send({ resource: inserted.rows?.[0] || row });
+    return reply.code(201).send({ resource: formatResourceForClient(inserted.rows?.[0] || row) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create movement resource');
     return reply.code(500).send({ error: 'Failed to add resource' });
@@ -6481,7 +6614,7 @@ fastify.post('/resources/:id/download', async (request, reply) => {
     if (!existing) return reply.code(404).send({ error: 'Resource not found' });
     const nextCount = Math.max(0, Number(existing.download_count || 0)) + 1;
     const updated = memoryUpdateResourceById(resourceId, { download_count: nextCount });
-    return reply.send({ resource: updated || { ...existing, download_count: nextCount } });
+    return reply.send({ resource: formatResourceForClient(updated || { ...existing, download_count: nextCount }) });
   }
 
   try {
@@ -6495,7 +6628,7 @@ fastify.post('/resources/:id/download', async (request, reply) => {
     );
     const row = updated.rows?.[0] || null;
     if (!row) return reply.code(404).send({ error: 'Resource not found' });
-    return reply.send({ resource: row });
+    return reply.send({ resource: formatResourceForClient(row) });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to increment resource download');
     return reply.code(500).send({ error: 'Failed to record download' });
@@ -6658,7 +6791,7 @@ fastify.get('/movements/:id/evidence', async (request, reply) => {
     if (blockMemoryFallbackInProd(request, reply, 'movement evidence list')) return;
     const list = memoryListExtras(memoryMovementEvidenceByMovement, id).sort(sortByCreatedDesc);
     const filtered = status === 'all' ? list : list.filter((e) => String(e?.status || 'pending') === status);
-    const page = filtered.slice(offset, offset + limit).map((e) => projectRecord(e, fields));
+    const page = filtered.slice(offset, offset + limit).map((e) => projectRecord(formatEvidenceForClient(e), fields));
     const emails = Array.from(new Set(page.map((e) => normalizeEmail(e?.submitter_email)).filter(Boolean)));
     const lookup = await getPublicProfilesByEmail(emails);
     const withIds = page.map((e) => {
@@ -6690,7 +6823,7 @@ fastify.get('/movements/:id/evidence', async (request, reply) => {
       values
     );
     const rows = Array.isArray(res.rows) ? res.rows : [];
-    const projected = rows.map((e) => projectRecord(e, fields));
+    const projected = rows.map((e) => projectRecord(formatEvidenceForClient(e), fields));
     const emails = Array.from(new Set(projected.map((e) => normalizeEmail(e?.submitter_email)).filter(Boolean)));
     const lookup = await getPublicProfilesByEmail(emails);
     const withIds = projected.map((e) => {
@@ -6777,6 +6910,14 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
     }
   }
 
+  let persistedUrl = mediaType === 'text' ? null : url;
+  if (persistedUrl && String(persistedUrl).startsWith('/uploads/')) {
+    persistedUrl = normalizeMediaUrlForPersistence(persistedUrl, { kindHint: 'movement-media' });
+    if (!persistedUrl) {
+      return reply.code(400).send({ error: 'Uploads are not available; provide a public URL' });
+    }
+  }
+
   const ownerEmail = await getMovementOwnerEmail(id);
   const isOwner = !!(ownerEmail && email === ownerEmail);
   if (ownerEmail && (await areUsersBlockedEitherDirection(email, ownerEmail))) {
@@ -6790,7 +6931,7 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
     submitter_email: email,
     status: isOwner ? 'approved' : 'pending',
     media_type: mediaType,
-    url: mediaType === 'text' ? null : url,
+    url: persistedUrl,
     text: mediaType === 'text' ? cleanText(rawText, 1200) : null,
     caption: parsed.data.caption ? cleanText(parsed.data.caption, 500) : null,
     file_name: parsed.data.file_name ? cleanText(parsed.data.file_name, 260) : null,
@@ -6807,7 +6948,8 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
     if (String(saved?.status || '') === 'approved') {
       updateMemoryMovementVerifiedParticipants(id);
     }
-    return reply.code(201).send({ evidence: { ...saved, submitter_user_id: submitterUserId } });
+    const formatted = formatEvidenceForClient(saved);
+    return reply.code(201).send({ evidence: { ...formatted, submitter_user_id: submitterUserId } });
   }
 
   try {
@@ -6836,7 +6978,8 @@ fastify.post('/movements/:id/evidence', { config: { rateLimit: RATE_LIMITS.evide
     if (String(evidence?.status || '') === 'approved') {
       await updateMovementVerifiedParticipants(id);
     }
-    return reply.code(201).send({ evidence: { ...evidence, submitter_user_id: submitterUserId } });
+    const formatted = formatEvidenceForClient(evidence);
+    return reply.code(201).send({ evidence: { ...formatted, submitter_user_id: submitterUserId } });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to submit movement evidence');
     return reply.code(500).send({ error: 'Failed to submit evidence' });
@@ -6890,7 +7033,8 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
     });
     updateMemoryMovementVerifiedParticipants(movementId);
     const row = updated || { id: evidenceId };
-    return reply.send({ evidence: { ...row, verified_by_user_id: verifierUserId } });
+    const formatted = formatEvidenceForClient(row);
+    return reply.send({ evidence: { ...formatted, verified_by_user_id: verifierUserId } });
   }
 
   try {
@@ -6919,7 +7063,8 @@ fastify.post('/movements/:id/evidence/:evidenceId/verify', async (request, reply
     const row = updated.rows?.[0] || null;
     if (!row) return reply.code(404).send({ error: 'Evidence not found' });
     await updateMovementVerifiedParticipants(movementId);
-    return reply.send({ evidence: { ...row, verified_by_user_id: verifierUserId } });
+    const formatted = formatEvidenceForClient(row);
+    return reply.send({ evidence: { ...formatted, verified_by_user_id: verifierUserId } });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to verify movement evidence');
     return reply.code(500).send({ error: 'Failed to verify evidence' });
@@ -8252,7 +8397,10 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     location_lat: roundCoord(raw.location_lat),
     location_lon: roundCoord(raw.location_lon),
     media_urls: Array.isArray(raw.media_urls)
-      ? raw.media_urls.map((u) => String(u).slice(0, MAX_TEXT_LENGTHS.movementMediaUrl))
+      ? raw.media_urls
+          .map((u) => String(u).trim().slice(0, MAX_TEXT_LENGTHS.movementMediaUrl))
+          .filter(Boolean)
+          .map((u) => normalizeMediaUrlForPersistence(u, { kindHint: 'movement-media' }))
       : undefined,
     claims: Array.isArray(raw.claims)
       ? raw.claims.map((c) => ({
@@ -8263,7 +8411,10 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
             ? c.evidence
                 .filter((e) => e && typeof e === 'object')
                 .map((e) => ({
-                  url: String(e.url || '').slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+                  url: normalizeMediaUrlForPersistence(
+                    String(e.url || '').trim().slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+                    { kindHint: 'movement-media' }
+                  ),
                   filename: e.filename
                     ? String(e.filename).slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceFilename)
                     : undefined,
@@ -8275,6 +8426,17 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
         }))
       : undefined,
   };
+
+  if (Array.isArray(raw.media_urls)) {
+    const input = raw.media_urls
+      .map((u) => String(u).trim().slice(0, MAX_TEXT_LENGTHS.movementMediaUrl))
+      .filter(Boolean);
+    const normalized = (payload.media_urls || []).filter(Boolean);
+    if (input.length && normalized.length !== input.length) {
+      return reply.code(400).send({ error: 'media_urls must be valid public URLs or durable uploads' });
+    }
+    payload.media_urls = normalized.length ? normalized : [];
+  }
 
   if (!hasDatabaseUrl) {
     const created = {
@@ -8317,7 +8479,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       '[audit] movement_create'
     );
     const enriched = (await attachCreatorProfilesToMovements([created]))[0] || created;
-    return reply.code(201).send(enriched);
+    return reply.code(201).send(formatMovementForClient(enriched));
   }
 
   try {
@@ -8355,7 +8517,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       '[audit] movement_create'
     );
     const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
-    return reply.code(201).send(enriched);
+    return reply.code(201).send(formatMovementForClient(enriched));
   } catch (e) {
     const requestId = request?.id ? String(request.id) : null;
     const diag = formatDbDiagnostic(getDbDiagnostic(e));
@@ -8400,7 +8562,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       'Movement created'
     );
     const enriched = (await attachCreatorProfilesToMovements([created]))[0] || created;
-    return reply.code(201).send(enriched);
+    return reply.code(201).send(formatMovementForClient(enriched));
   }
 });
 
@@ -8480,7 +8642,10 @@ fastify.patch('/movements/:id', async (request, reply) => {
     location_lon: raw.location_lon != null ? roundCoord(raw.location_lon) : undefined,
     media_urls: raw.media_urls != null
       ? (Array.isArray(raw.media_urls)
-        ? raw.media_urls.map((u) => String(u).slice(0, MAX_TEXT_LENGTHS.movementMediaUrl)).filter(Boolean)
+        ? raw.media_urls
+            .map((u) => String(u).trim().slice(0, MAX_TEXT_LENGTHS.movementMediaUrl))
+            .filter(Boolean)
+            .map((u) => normalizeMediaUrlForPersistence(u, { kindHint: 'movement-media' }))
         : null)
       : undefined,
     claims: raw.claims != null
@@ -8493,7 +8658,10 @@ fastify.patch('/movements/:id', async (request, reply) => {
               ? c.evidence
                   .filter((e) => e && typeof e === 'object')
                   .map((e) => ({
-                    url: String(e.url || '').slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+                    url: normalizeMediaUrlForPersistence(
+                      String(e.url || '').trim().slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceUrl),
+                      { kindHint: 'movement-media' }
+                    ),
                     filename: e.filename
                       ? String(e.filename).slice(0, MAX_TEXT_LENGTHS.movementClaimEvidenceFilename)
                       : undefined,
@@ -8506,6 +8674,17 @@ fastify.patch('/movements/:id', async (request, reply) => {
         : null)
       : undefined,
   };
+
+  if (raw.media_urls != null && Array.isArray(raw.media_urls)) {
+    const input = raw.media_urls
+      .map((u) => String(u).trim().slice(0, MAX_TEXT_LENGTHS.movementMediaUrl))
+      .filter(Boolean);
+    const normalized = (payload.media_urls || []).filter(Boolean);
+    if (input.length && normalized.length !== input.length) {
+      return reply.code(400).send({ error: 'media_urls must be valid public URLs or durable uploads' });
+    }
+    payload.media_urls = normalized.length ? normalized : [];
+  }
 
   const staffRole = getStaffRoleForEmail(email);
 
@@ -8526,7 +8705,7 @@ fastify.patch('/movements/:id', async (request, reply) => {
     next.updated_at = nowIso();
     memoryMovements[memIdx] = next;
     const enriched = (await attachCreatorProfilesToMovements([next]))[0] || next;
-    return reply.send(enriched);
+    return reply.send(formatMovementForClient(enriched));
   }
 
   if (!hasDatabaseUrl) {
@@ -8593,7 +8772,7 @@ fastify.patch('/movements/:id', async (request, reply) => {
     const updated = updatedRes.rows?.[0] || null;
     if (!updated) return reply.code(500).send({ error: 'Failed to update movement' });
     const enriched = (await attachCreatorProfilesToMovements([updated]))[0] || updated;
-    return reply.send(enriched);
+    return reply.send(formatMovementForClient(enriched));
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to update movement');
     return reply.code(500).send({ error: 'Failed to update movement' });
@@ -9320,7 +9499,10 @@ fastify.get('/conversations', async (request, reply) => {
           ? list.filter((c) => c?.request_status !== 'pending' && c?.request_status !== 'declined')
           : list;
 
-      const page = filtered.slice(offset, offset + limit).map((c) => projectRecord(c, fields));
+      const page = filtered
+        .slice(offset, offset + limit)
+        .map(formatConversationForClient)
+        .map((c) => projectRecord(c, fields));
       return reply.send(page);
     }
 
@@ -9363,7 +9545,7 @@ fastify.get('/conversations', async (request, reply) => {
 
     const rows = result.rows || [];
     const filtered = Array.isArray(rows) ? rows.filter((c) => !shouldHideDirectConversation(c)) : [];
-    const annotated = filtered.map(annotateConversation);
+    const annotated = filtered.map(annotateConversation).map(formatConversationForClient);
     return reply.send(annotated.map((c) => projectRecord(c, fields)));
   } catch (e) {
     const isTimeout = e && (e.code === 'PP_TIMEOUT' || e.name === 'TimeoutError');
@@ -10866,7 +11048,7 @@ fastify.get('/search/users', { config: { rateLimit: RATE_LIMITS.search } }, asyn
         user_id: profile?.user_id ?? null,
         display_name: profile?.display_name ?? null,
         username: profile?.username ?? null,
-        profile_photo_url: profile?.profile_photo_url ?? null,
+        profile_photo_url: toPublicMediaUrl(profile?.profile_photo_url ?? null, { kindHint: 'avatar' }),
         location: profile?.location ? sanitizeProfileLocation(profile.location) : null,
         is_admin: isAdmin,
       };
@@ -10905,34 +11087,6 @@ fastify.get('/search/users', { config: { rateLimit: RATE_LIMITS.search } }, asyn
 });
 
 // Update or create the current user's profile with username uniqueness enforced.
-function normalizeMediaUrlForPersistence(input) {
-  if (input == null) return null;
-  const raw = String(input).trim();
-  if (!raw) return null;
-
-  // Preferred persistent form: absolute URL (e.g. Supabase Storage public URL).
-  if (/^https?:\/\//i.test(raw)) return raw;
-
-  // Dev/back-compat only: allow /uploads/... paths.
-  const stripQueryAndHash = (value) => String(value || '').split(/[?#]/)[0];
-  const cleaned = stripQueryAndHash(raw);
-
-  if (!IS_NODE_PROD && !IS_RENDER) {
-    if (cleaned.startsWith('/uploads/')) {
-      return cleaned.length > '/uploads/'.length ? cleaned : null;
-    }
-    if (cleaned.startsWith('uploads/')) {
-      return cleaned.length > 'uploads/'.length ? `/${cleaned}` : null;
-    }
-    const idx = cleaned.indexOf('/uploads/');
-    if (idx !== -1) {
-      const sliced = cleaned.slice(idx);
-      return sliced.length > '/uploads/'.length ? sliced : null;
-    }
-  }
-
-  return null;
-}
 
 async function handleGetMyProfile(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
@@ -11207,8 +11361,9 @@ async function handlePostMyProfile(request, reply) {
     const next = buildNextProfile(existing);
 
     // Persist absolute URLs (Supabase Storage) in production; /uploads only in local dev.
-    next.profile_photo_url = normalizeMediaUrlForPersistence(next.profile_photo_url) || null;
-    next.banner_url = normalizeMediaUrlForPersistence(next.banner_url) || null;
+    next.profile_photo_url =
+      normalizeMediaUrlForPersistence(next.profile_photo_url, { kindHint: 'avatar' }) || null;
+    next.banner_url = normalizeMediaUrlForPersistence(next.banner_url, { kindHint: 'banner' }) || null;
 
     if (!isProd) {
       fastify.log.info(
@@ -11285,8 +11440,9 @@ async function handlePostMyProfile(request, reply) {
     const next = buildNextProfile(existing);
 
     // Persist absolute URLs (Supabase Storage) in production; /uploads only in local dev.
-    next.profile_photo_url = normalizeMediaUrlForPersistence(next.profile_photo_url) || null;
-    next.banner_url = normalizeMediaUrlForPersistence(next.banner_url) || null;
+    next.profile_photo_url =
+      normalizeMediaUrlForPersistence(next.profile_photo_url, { kindHint: 'avatar' }) || null;
+    next.banner_url = normalizeMediaUrlForPersistence(next.banner_url, { kindHint: 'banner' }) || null;
 
     if (!isProd) {
       fastify.log.info(
