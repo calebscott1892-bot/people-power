@@ -3457,6 +3457,70 @@ async function getViewerFollowedMovementIds(viewerEmail) {
   }
 }
 
+function canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds } = {}) {
+  try {
+    const m = movement && typeof movement === 'object' ? movement : null;
+    if (!m) return true;
+
+    const visibilityKeys = [
+      'visibility',
+      'is_private',
+      'private',
+      'followers_only',
+      'is_followers_only',
+      'audience',
+    ];
+
+    const hasAnyVisibilityField = visibilityKeys.some((k) => Object.prototype.hasOwnProperty.call(m, k) && m[k] != null);
+    if (!hasAnyVisibilityField) return true;
+
+    const truthy = (v) => v === true || v === 1 || v === '1' || String(v || '').trim().toLowerCase() === 'true';
+
+    let normalized = null; // 'public' | 'followers' | 'private'
+    if (truthy(m.is_private) || truthy(m.private)) normalized = 'private';
+    if (!normalized && (truthy(m.followers_only) || truthy(m.is_followers_only))) normalized = 'followers';
+
+    const rawText = [m.visibility, m.audience]
+      .filter((v) => v != null)
+      .map((v) => String(v).trim().toLowerCase())
+      .filter(Boolean)
+      .join(' ');
+
+    if (!normalized && rawText) {
+      if (/\bprivate\b/.test(rawText)) normalized = 'private';
+      else if (/follow|followers/.test(rawText)) normalized = 'followers';
+      else if (/\bpublic\b/.test(rawText)) normalized = 'public';
+    }
+
+    // Unknown/unsupported visibility values: allow by default.
+    if (!normalized || normalized === 'public') return true;
+
+    const normalizeMaybe = (email) => (typeof normalizeEmail === 'function' ? normalizeEmail(email) : String(email || '').trim());
+    const viewer = viewerEmail ? normalizeMaybe(viewerEmail) : null;
+
+    const movementId = m.id ?? m.movement_id ?? m.movementId;
+    const movementIdStr = movementId != null ? String(movementId) : null;
+
+    if (normalized === 'followers') {
+      if (!viewer) return false;
+      if (!movementIdStr) return false;
+      const set = viewerFollowedMovementIds instanceof Set ? viewerFollowedMovementIds : new Set();
+      return set.has(movementIdStr);
+    }
+
+    if (normalized === 'private') {
+      if (!viewer) return false;
+      const creator = normalizeMaybe(m.creator_email || m.author_email || '');
+      if (!creator) return false;
+      return creator === viewer;
+    }
+
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 async function ensureMovementCommentsTables() {
   if (!hasDatabaseUrl) return;
 
@@ -5343,7 +5407,11 @@ fastify.get('/movements', async (request, reply) => {
     const canViewMovement = (movement) => {
       // Visibility
       if (!mineEmail) {
-        if (!canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds })) return false;
+        const canSee =
+          typeof canViewerSeeMovementByVisibility === 'function'
+            ? canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds })
+            : true;
+        if (!canSee) return false;
       }
 
       // Blocks
@@ -5513,7 +5581,11 @@ fastify.get('/movements/:id', async (request, reply) => {
   };
 
   const isNotVisibleForViewer = (movement) => {
-    return !canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds });
+    const canSee =
+      typeof canViewerSeeMovementByVisibility === 'function'
+        ? canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds })
+        : true;
+    return !canSee;
   };
 
   if (!hasDatabaseUrl) {
