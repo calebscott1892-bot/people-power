@@ -31,6 +31,31 @@ const IS_NODE_PROD = String(process.env.NODE_ENV || '').trim().toLowerCase() ===
 // NOTE: declared early to avoid ReferenceError in route handlers registered before verifier assignment.
 let supabaseAuthVerifier = null;
 
+// --- DB state (declared early so diagnostics can't TDZ-crash) ---
+// hasDatabaseUrl means ONLY: “DATABASE_URL string exists”.
+// dbReady means ONLY: “PG ping succeeded recently”.
+const DATABASE_URL = process.env.DATABASE_URL;
+let hasDatabaseUrl = !!String(DATABASE_URL || '').trim();
+let dbReady = false;
+let dbLastError = null;
+let dbLastErrorAt = null;
+let dbLastSuccessAt = null;
+let dbNextRetryInMs = null;
+let dbRetryTimer = null;
+let dbRetryDelayMs = 0;
+let dbProbeInProgress = false;
+
+const DB_UNAVAILABLE_CODE = 'PP_DB_UNAVAILABLE';
+
+function createDbUnavailableError() {
+  const err = new Error('Database unavailable');
+  err.code = DB_UNAVAILABLE_CODE;
+  err.statusCode = 503;
+  return err;
+}
+
+let storageMode = 'memory';
+
 // --- Always-on minimal diagnostics (safe; no secrets) ---
 fastify.get('/__health', async (_request, reply) => {
   return reply.send({ ok: true });
@@ -71,7 +96,23 @@ fastify.get('/__db', async (_request, reply) => {
     }
   }
 
-  return reply.send({ ok: true, hasDatabaseUrl, parsed });
+  // dbReady is a runtime signal (can be false even when DATABASE_URL is set).
+  // NOTE: dbReady/dbLast* are declared later in this file; this handler only
+  // executes after startup, when those bindings exist.
+  return reply.send({
+    ok: true,
+    hasDatabaseUrl,
+    dbReady: !!dbReady,
+    parsed,
+    lastError: dbLastError
+      ? {
+          code: dbLastError.code || null,
+          message: dbLastError.message || null,
+          at: dbLastErrorAt || null,
+        }
+      : null,
+    nextRetryInMs: typeof dbNextRetryInMs === 'number' ? dbNextRetryInMs : null,
+  });
 });
 
 // DEV-only auth diagnostics: verifies whether a provided Bearer token is usable with Supabase.
@@ -140,6 +181,15 @@ if (!IS_NODE_PROD) {
 
 // --- Register cookie parser early (needed for proof-only session auth) ---
 fastify.register(require('@fastify/cookie'));
+
+// Global error mapping: any accidental DB access while dbReady=false becomes a fast 503.
+fastify.setErrorHandler((err, _request, reply) => {
+  if (err?.code === DB_UNAVAILABLE_CODE) {
+    if (reply.sent) return;
+    return reply.code(503).send({ error: 'Database unavailable' });
+  }
+  return reply.send(err);
+});
 
 // --- SQLite (PROOF/DEV ONLY) ---
 // Total-persistence constraint: Render filesystem is ephemeral.
@@ -359,11 +409,9 @@ fastify.post('/auth/sync', async (request, reply) => {
   if (!user) return reply.code(401).send({ error: 'Invalid or missing Supabase JWT' });
 
   // Persist user presence in Postgres (Supabase Postgres via DATABASE_URL).
-  if (!hasDatabaseUrl) {
-    if (IS_NODE_PROD || IS_RENDER) {
-      return reply.code(503).send({ error: 'Database unavailable' });
-    }
-    // Dev-only: if no Postgres configured, skip persistence.
+  if (!hasDatabaseUrl || !dbReady) {
+    if (IS_NODE_PROD || IS_RENDER) return reply.code(503).send({ error: 'Database unavailable' });
+    // Dev-only: if Postgres is not configured/reachable, skip persistence.
     return reply.send({ ok: true, user: { id: user.id, email: user.email } });
   }
 
@@ -676,6 +724,12 @@ function initRealtimeServer() {
             return;
           }
 
+          // DB configured but currently unavailable: do not attempt any queries.
+          if (!dbReady) {
+            wsSafeSend(ws, { type: 'error', error: 'Database unavailable' });
+            return;
+          }
+
           await ensureMessagesTables();
           const res = await pool.query(
             `SELECT m.id, m.conversation_id, m.sender_email, c.participant_emails, c.request_status, c.blocked_by_email
@@ -747,6 +801,12 @@ function initRealtimeServer() {
               by: byEmail,
               ts: Date.now(),
             });
+            return;
+          }
+
+          // DB configured but currently unavailable: do not attempt any queries.
+          if (!dbReady) {
+            wsSafeSend(ws, { type: 'error', error: 'Database unavailable' });
             return;
           }
 
@@ -867,7 +927,17 @@ const fs = require('fs');
 const { pipeline } = require('stream/promises');
 const { WebSocketServer } = require('ws');
 
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = (() => {
+  const raw = String(process.env.HOST || '').trim();
+  if (raw) return raw;
+  const isHosted =
+    String(process.env.RENDER || '').toLowerCase() === 'true' ||
+    String(process.env.RENDER || '') === '1' ||
+    !!process.env.RENDER_SERVICE_ID ||
+    !!process.env.RENDER_EXTERNAL_URL;
+  // Render/prod must bind publicly for “No open ports detected” prevention.
+  return IS_NODE_PROD || isHosted ? '0.0.0.0' : '127.0.0.1';
+})();
 const PORT = Number(process.env.PEOPLEPOWER_BACKEND_PORT || process.env.C4_BACKEND_PORT || process.env.PORT || 3001);
 
 // ...existing code...
@@ -877,7 +947,7 @@ const PORT = Number(process.env.PEOPLEPOWER_BACKEND_PORT || process.env.C4_BACKE
 fastify.post('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   const { name, enabled, rollout_percentage, description } = request.body || {};
   if (!name) return reply.code(400).send({ error: 'Flag name required' });
   await ensureFeatureFlagsTable();
@@ -898,7 +968,7 @@ fastify.post('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } 
 fastify.delete('/admin/feature-flags/:id', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   const id = String(request.params.id);
   await ensureFeatureFlagsTable();
   await pool.query('DELETE FROM feature_flags WHERE id = $1', [id]);
@@ -909,7 +979,7 @@ fastify.delete('/admin/feature-flags/:id', { config: { rateLimit: RATE_LIMITS.ad
 fastify.get('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   await ensureFeatureFlagsTable();
   const res = await pool.query('SELECT * FROM feature_flags ORDER BY updated_at DESC');
   return reply.send({ flags: res.rows });
@@ -917,8 +987,9 @@ fastify.get('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }
 
 // Fetch all feature flags (public, for frontend)
 fastify.get('/feature-flags', async (_request, reply) => {
-  if (!hasDatabaseUrl) {
-    if (isProd) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) {
+    // If a DB is configured but temporarily down, fail fast.
+    if (hasDatabaseUrl || isProd) return reply.code(503).send({ error: 'Database unavailable' });
     return reply.send({ flags: [] });
   }
   await ensureFeatureFlagsTable();
@@ -930,7 +1001,7 @@ fastify.get('/feature-flags', async (_request, reply) => {
 fastify.get('/admin/challenges', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   await ensureChallengesTable();
   const res = await pool.query('SELECT * FROM challenges ORDER BY updated_at DESC');
   return reply.send({ challenges: res.rows || [] });
@@ -939,7 +1010,7 @@ fastify.get('/admin/challenges', { config: { rateLimit: RATE_LIMITS.admin } }, a
 fastify.post('/admin/challenges', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
 
   const schema = z.object({
     id: z.string().optional(),
@@ -1002,7 +1073,7 @@ fastify.post('/admin/challenges', { config: { rateLimit: RATE_LIMITS.admin } }, 
 fastify.delete('/admin/challenges/:id', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   const id = String(request.params?.id || '').trim();
   if (!id) return reply.code(400).send({ error: 'Challenge id is required' });
   await ensureChallengesTable();
@@ -1015,8 +1086,8 @@ fastify.delete('/admin/challenges/:id', { config: { rateLimit: RATE_LIMITS.admin
 
 // Public challenges feed (non-admin)
 fastify.get('/challenges', async (_request, reply) => {
-  if (!hasDatabaseUrl) {
-    if (isProd) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) {
+    if (hasDatabaseUrl || isProd) return reply.code(503).send({ error: 'Database unavailable' });
     return reply.send({ challenges: [] });
   }
   await ensureChallengesTable();
@@ -1033,7 +1104,7 @@ fastify.get('/challenges', async (_request, reply) => {
 });
 // --- Feature Flags Table ---
 async function ensureFeatureFlagsTable() {
-  if (!hasDatabaseUrl) return;
+  if (!isDbAvailable()) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS feature_flags (
       id TEXT PRIMARY KEY,
@@ -1050,7 +1121,7 @@ async function ensureFeatureFlagsTable() {
 }
 
 async function ensureChallengesTable() {
-  if (!hasDatabaseUrl) return;
+  if (!isDbAvailable()) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS challenges (
       id TEXT PRIMARY KEY,
@@ -1074,7 +1145,7 @@ async function ensureChallengesTable() {
 fastify.get('/admin/research-mode-configs', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   await ensureResearchModeConfigTable();
   const res = await pool.query('SELECT * FROM research_mode_configs ORDER BY updated_at DESC');
   return reply.send({ configs: res.rows });
@@ -1084,7 +1155,7 @@ fastify.get('/admin/research-mode-configs', { config: { rateLimit: RATE_LIMITS.a
 fastify.post('/admin/research-mode-configs', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   const { scope, scope_id, enabled_features } = request.body || {};
   if (!['user','movement','global'].includes(scope)) return reply.code(400).send({ error: 'Invalid scope' });
   if ((scope === 'user' || scope === 'movement') && !scope_id) return reply.code(400).send({ error: 'scope_id required' });
@@ -1106,7 +1177,7 @@ fastify.post('/admin/research-mode-configs', { config: { rateLimit: RATE_LIMITS.
 fastify.delete('/admin/research-mode-configs/:id', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   const id = String(request.params.id);
   await ensureResearchModeConfigTable();
   await pool.query('DELETE FROM research_mode_configs WHERE id = $1', [id]);
@@ -1116,7 +1187,10 @@ fastify.delete('/admin/research-mode-configs/:id', { config: { rateLimit: RATE_L
 // Fetch merged research flags for a user or movement (public, but only returns enabled features)
 fastify.get('/research-flags', async (request, reply) => {
   const { user_id, movement_id } = request.query || {};
-  if (!hasDatabaseUrl) return reply.send({ enabled: false, features: [] });
+  if (!isDbAvailable()) {
+    if (hasDatabaseUrl || isProd) return reply.code(503).send({ error: 'Database unavailable' });
+    return reply.send({ enabled: false, features: [] });
+  }
   await ensureResearchModeConfigTable();
   // Fetch global
   const configs = [];
@@ -1136,7 +1210,7 @@ fastify.get('/research-flags', async (request, reply) => {
 });
 // --- Research Mode Config Table ---
 async function ensureResearchModeConfigTable() {
-  if (!hasDatabaseUrl) return;
+  if (!isDbAvailable()) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS research_mode_configs (
       id TEXT PRIMARY KEY,
@@ -1155,7 +1229,7 @@ async function ensureResearchModeConfigTable() {
 fastify.get('/admin/community-health', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {
   const authedUser = await requireAdminUser(request, reply);
   if (!authedUser) return;
-  if (!hasDatabaseUrl) return reply.code(503).send({ error: 'Database unavailable' });
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
   // Time windows
   const now = new Date();
   const since7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -1653,9 +1727,7 @@ fastify.addHook('onError', (request, reply, error, done) => {
 
 const profanityFilter = new BadWordsFilter();
 
-const SUPABASE_URL =
-  process.env.SUPABASE_URL ||
-  process.env.VITE_SUPABASE_URL;
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 
 const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
@@ -1663,22 +1735,32 @@ const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE ||
   process.env.SUPABASE_SERVICE;
 
-const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ||
-  process.env.SUPABASE_ANON ||
-  process.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON || process.env.VITE_SUPABASE_ANON_KEY;
+
+let supabaseAdmin = null;
+let supabaseVerifier = null;
+let supabase = null;
 
 if (!SUPABASE_URL) {
-  throw new Error("Missing SUPABASE_URL");
+  // Do not crash boot; keep diagnostics endpoints online.
+  fastify.log.warn('[startup][supabase] SUPABASE_URL missing; auth/uploads will be unavailable');
+} else {
+  if (SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+      supabaseAdmin = createClient(String(SUPABASE_URL), String(SUPABASE_SERVICE_ROLE_KEY));
+    } catch (e) {
+      fastify.log.warn({ err: e }, '[startup][supabase] failed to create admin client');
+    }
+  }
+  if (SUPABASE_ANON_KEY) {
+    try {
+      supabaseVerifier = createClient(String(SUPABASE_URL), String(SUPABASE_ANON_KEY));
+    } catch (e) {
+      fastify.log.warn({ err: e }, '[startup][supabase] failed to create verifier client');
+    }
+  }
+  supabase = supabaseAdmin || supabaseVerifier;
 }
-
-const supabaseKey = SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
-
-if (!supabaseKey) {
-  throw new Error("Missing Supabase key (service role or anon)");
-}
-
-const supabase = createClient(SUPABASE_URL, supabaseKey);
 
 // Token verifier: prefer the same Supabase project the frontend is using (VITE_*).
 // This prevents confusing local-dev 401 loops when Server/.env and root .env point at different projects.
@@ -1686,8 +1768,8 @@ const FRONTEND_SUPABASE_URL = process.env.VITE_SUPABASE_URL;
 const FRONTEND_SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY;
 
 // Default (all envs): verify using the backend's configured Supabase.
-supabaseAuthVerifier = supabase;
-let verifierMode = 'server_key_verifier';
+supabaseAuthVerifier = supabaseVerifier || supabaseAdmin;
+let verifierMode = supabaseAuthVerifier === supabaseVerifier ? 'server_anon_verifier' : 'server_admin_verifier';
 
 // Local dev only: if the SPA is configured with VITE_SUPABASE_*, prefer that project for JWT verification.
 if (!IS_NODE_PROD && FRONTEND_SUPABASE_URL && FRONTEND_SUPABASE_ANON_KEY) {
@@ -1704,8 +1786,12 @@ if (!IS_NODE_PROD && FRONTEND_SUPABASE_URL && FRONTEND_SUPABASE_ANON_KEY) {
     }
   }
 
-  supabaseAuthVerifier = createClient(String(FRONTEND_SUPABASE_URL), String(FRONTEND_SUPABASE_ANON_KEY));
-  verifierMode = 'vite_anon_verifier';
+  try {
+    supabaseAuthVerifier = createClient(String(FRONTEND_SUPABASE_URL), String(FRONTEND_SUPABASE_ANON_KEY));
+    verifierMode = 'vite_anon_verifier';
+  } catch (e) {
+    fastify.log.warn({ err: e }, '[startup][auth] failed to create VITE verifier client');
+  }
 }
 
 // Startup auth verifier log (no secrets; single line).
@@ -2063,9 +2149,9 @@ const ALLOWED_CHALLENGE_CATEGORIES = new Set([
   'wellbeing',
 ]);
 
-const DATABASE_URL = process.env.DATABASE_URL;
-let storageMode = 'memory';
-let hasDatabaseUrl = !!DATABASE_URL;
+function isDbAvailable() {
+  return !!(hasDatabaseUrl && dbReady);
+}
 
 function safeParseDatabaseUrl(raw) {
   try {
@@ -2195,7 +2281,9 @@ function createPgPool({ useSsl }) {
     connectionTimeoutMillis: (() => {
       const raw = Number(process.env.PG_CONNECTION_TIMEOUT_MS);
       if (Number.isFinite(raw) && raw > 0) return raw;
-      return isProd ? 45_000 : 5_000;
+      // Keep this short in production so Render sees an open port quickly,
+      // and let the background retry loop handle transient DB outages.
+      return isProd ? 10_000 : 5_000;
     })(),
     max: (() => {
       const raw = Number(process.env.PG_POOL_MAX);
@@ -2222,7 +2310,20 @@ function createPgPool({ useSsl }) {
   });
 }
 
-let pool = createPgPool({ useSsl: shouldUseSsl });
+function wrapPoolQueryGuard(p) {
+  if (!p || p.__ppWrapped) return p;
+  const rawQuery = p.query.bind(p);
+  p.query = (...args) => {
+    if (!dbReady && !dbProbeInProgress) {
+      return Promise.reject(createDbUnavailableError());
+    }
+    return rawQuery(...args);
+  };
+  p.__ppWrapped = true;
+  return p;
+}
+
+let pool = wrapPoolQueryGuard(createPgPool({ useSsl: shouldUseSsl }));
 
 async function poolQueryOnce(config) {
   return pool.query(config);
@@ -2234,7 +2335,7 @@ async function poolQueryWithRetry(config) {
   } catch {
     // Connection pools can become stale (deploys, idle timeouts). Recreate and retry once.
     try {
-      pool = createPgPool({ useSsl: shouldUseSsl });
+      pool = wrapPoolQueryGuard(createPgPool({ useSsl: shouldUseSsl }));
     } catch {
       // ignore
     }
@@ -2248,31 +2349,41 @@ async function checkDatabaseConnection() {
   // before binding the health endpoint.
   if (process.env.C4_BACKEND_PORT || process.env.C4_DB_PATH) {
     storageMode = 'memory';
-    hasDatabaseUrl = false;
+    dbReady = false;
     console.info(storageStartupLine({ mode: storageMode, databaseHost: databaseUrlHostForLog }));
     return;
   }
 
+  // Re-check env at runtime (Render can inject env vars after build).
+  hasDatabaseUrl = !!String(process.env.DATABASE_URL || '').trim();
+
   if (!hasDatabaseUrl) {
-    if (isProd) {
-      console.error('[storage] FATAL: DATABASE_URL is missing; aborting startup.');
-      process.exit(1);
-    }
+    // Never crash the server on missing DB config; serve diagnostics and return 503
+    // from DB-backed routes instead.
     storageMode = 'memory';
-    console.warn('[storage] DEV: DATABASE_URL missing; using memory storage fallback.');
+    dbReady = false;
+    if (isProd) console.warn('[storage] WARN: DATABASE_URL is missing; running in degraded mode.');
+    else console.warn('[storage] DEV: DATABASE_URL missing; using memory storage fallback.');
     console.info(storageStartupLine({ mode: storageMode, databaseHost: databaseUrlHostForLog }));
     return;
   }
   try {
-    await pool.query('SELECT 1');
+    dbProbeInProgress = true;
+    // Keep this probe bounded; connectionTimeoutMillis also applies.
+    await withTimeout(pool.query('SELECT 1'), 8_000, 'startup_db_select_1');
     storageMode = 'postgres';
-    hasDatabaseUrl = true;
+    dbReady = true;
+    dbLastError = null;
+    dbLastErrorAt = null;
+    dbLastSuccessAt = nowIso();
     const parsed = safeParseDatabaseUrl(DATABASE_URL);
     const host = parsed?.host ? String(parsed.host) : 'unknown';
     console.info(storageStartupLine({ mode: storageMode, databaseHost: host }));
   } catch (err) {
     const message = err?.message ? String(err.message) : 'unknown error';
     const code = err?.code ? String(err.code) : 'unknown';
+    dbLastError = { code, message };
+    dbLastErrorAt = nowIso();
 
     // DEV resiliency: some providers require SSL even when the connection string
     // can't be parsed by URL() (e.g., unescaped special chars in passwords).
@@ -2280,10 +2391,13 @@ async function checkDatabaseConnection() {
     if (!isProd && !shouldUseSsl && /ssl|tls/i.test(message)) {
       try {
         console.warn('[storage] DEV: Postgres requires SSL; retrying with SSL enabled');
-        pool = createPgPool({ useSsl: true });
-        await pool.query('SELECT 1');
+        pool = wrapPoolQueryGuard(createPgPool({ useSsl: true }));
+        await withTimeout(pool.query('SELECT 1'), 8_000, 'startup_db_select_1_ssl_retry');
         storageMode = 'postgres';
-        hasDatabaseUrl = true;
+        dbReady = true;
+        dbLastError = null;
+        dbLastErrorAt = null;
+        dbLastSuccessAt = nowIso();
         const parsed = safeParseDatabaseUrl(DATABASE_URL);
         const host = parsed?.host ? String(parsed.host) : 'unknown';
         console.info(storageStartupLine({ mode: storageMode, databaseHost: host }));
@@ -2295,36 +2409,105 @@ async function checkDatabaseConnection() {
       }
     }
 
+    // Non-fatal: server must still bind its port on Render.
     if (isProd) {
-      console.error(`[storage] FATAL: Postgres connection failed; aborting startup: ${code} ${message}`);
-      process.exit(1);
+      console.warn(`[storage] WARN: Postgres connection failed; running degraded: ${code} ${message}`);
+    } else {
+      console.error(`[storage] DEV: Postgres connection failed, falling back to memory: ${code} ${message}`);
+    }
+    storageMode = 'memory';
+    dbReady = false;
+    console.info(storageStartupLine({ mode: storageMode, databaseHost: databaseUrlHostForLog }));
+  } finally {
+    dbProbeInProgress = false;
+  }
+}
+
+function startDbConnectionLoop() {
+  if (!hasDatabaseUrl) {
+    // Nothing to do; stay degraded.
+    return;
+  }
+  if (dbRetryTimer) return;
+
+  // Backoff: 2–5s base, exponential up to 30s.
+  dbRetryDelayMs = 0;
+
+  const tick = async () => {
+    try {
+      await checkDatabaseConnection();
+    } catch (e) {
+      // checkDatabaseConnection is designed to be non-throwing, but stay safe.
+      fastify.log.warn({ err: e }, 'DB connectivity check threw unexpectedly');
     }
 
-    console.error(`[storage] DEV: Postgres connection failed, falling back to memory: ${code} ${message}`);
-    storageMode = 'memory';
-    hasDatabaseUrl = false;
-    console.info(storageStartupLine({ mode: storageMode, databaseHost: databaseUrlHostForLog }));
-  }
+    // On first successful connect, kick off schema init + non-hot-path ensures.
+    if (isDbAvailable() && !dbInitPromise) {
+      dbInitPromise = initDbSchemaWithRetry().catch((e) => {
+        fastify.log.error({ err: e }, 'DB init failed after retries');
+        // Keep running; subsequent requests will return 503 via ensureDbReady().
+      });
+
+      ensureReportsTable().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure reports table at startup'));
+      ensureMessagesTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure messages tables at startup'));
+      ensureMovementExtrasTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure movement extras tables at startup'));
+    }
+
+    if (isDbAvailable()) {
+      dbNextRetryInMs = null;
+      dbRetryTimer = null;
+      return;
+    }
+
+    const nextBase = dbRetryDelayMs ? Math.min(dbRetryDelayMs * 2, 30_000) : 2_000;
+    const jitter = Math.floor(Math.random() * 3_000); // +0..3s (keeps within required 2-5s on first attempt)
+    dbRetryDelayMs = nextBase;
+    const next = Math.min(nextBase + jitter, 30_000);
+    dbNextRetryInMs = next;
+    dbRetryTimer = setTimeout(() => {
+      dbRetryTimer = null;
+      tick();
+    }, next);
+  };
+
+  // Fire ASAP after server starts.
+  dbRetryTimer = setTimeout(() => {
+    dbRetryTimer = null;
+    tick();
+  }, 1);
 }
 
 function blockMemoryFallbackInProd(request, reply, label) {
   if (!isProd) return false;
-  if (hasDatabaseUrl) return false;
+  if (isDbAvailable()) return false;
   fastify.log.error({ path: request?.routerPath || request?.url }, `[storage] FATAL: ${label} memory fallback blocked in production`);
-  reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+  reply.code(503).send({ error: 'Database unavailable' });
   return true;
 }
 
-// Production safety net: never serve from memory when DB is unavailable.
-// (In production we already fail-fast on startup, but this prevents any accidental
-// runtime fallback paths from returning stale/local data.)
+// DB-down gate:
+// - If DATABASE_URL is present but Postgres is unreachable (dbReady=false), DB-backed routes must fail fast (503)
+//   without attempting any queries.
+// - In production, also gate when DATABASE_URL is missing (never silently serve memory fallback).
 fastify.addHook('onRequest', async (request, reply) => {
-  if (!isProd) return;
-  if (hasDatabaseUrl) return;
+  const shouldGate = (isProd && !isDbAvailable()) || (hasDatabaseUrl && !dbReady);
+  if (!shouldGate) return;
+  if (isDbAvailable()) return;
   const url = String(request?.url || '');
-  if (url.startsWith('/health')) return;
-  fastify.log.error({ url }, '[storage] FATAL: memory fallback blocked in production');
-  return reply.code(503).send({ error: 'STORAGE_UNAVAILABLE' });
+  // Allow always-on diagnostics and non-DB endpoints even when Postgres is down.
+  if (
+    url === '/__health' ||
+    url === '/__db' ||
+    url === '/__whoami' ||
+    url.startsWith('/health') ||
+    url === '/auth/me' ||
+    url.startsWith('/auth/proof') ||
+    url.startsWith('/uploads')
+  ) {
+    return;
+  }
+  fastify.log.warn({ url }, '[storage] database unavailable; gating request');
+  return reply.code(503).send({ error: 'Database unavailable' });
 });
 
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -3153,7 +3336,7 @@ function sleep(ms) {
 }
 
 async function initDbSchemaOnce() {
-  if (!hasDatabaseUrl) return;
+  if (!hasDatabaseUrl || !dbReady) return;
 
   // Fast connectivity check (fail fast; init has its own retry/backoff).
   await withTimeout(pool.query('SELECT 1'), 5000, 'db_init_select_1');
@@ -3178,7 +3361,7 @@ async function initDbSchemaWithRetry() {
       lastErr = e;
       // Recreate pool once between attempts (stale pools happen after deploy/idle).
       try {
-        pool = createPgPool({ useSsl: shouldUseSsl });
+        pool = wrapPoolQueryGuard(createPgPool({ useSsl: shouldUseSsl }));
       } catch {
         // ignore
       }
@@ -3194,7 +3377,11 @@ async function initDbSchemaWithRetry() {
 }
 
 async function ensureDbReady(request, reply, { error } = {}) {
-  if (!hasDatabaseUrl) return true;
+  if (!hasDatabaseUrl || !dbReady) {
+    const requestId = request?.id ? String(request.id) : null;
+    reply.code(503).send({ error: error || 'Database unavailable', request_id: requestId });
+    return false;
+  }
 
   if (!dbInitPromise) {
     dbInitPromise = initDbSchemaWithRetry();
@@ -3215,18 +3402,25 @@ async function ensureDbReady(request, reply, { error } = {}) {
   }
 }
 
+// Spec helper: explicit gate for routes that must persist.
+function requireDbReady(reply) {
+  if (!hasDatabaseUrl || !dbReady) {
+    reply.code(503).send({ error: 'Database unavailable' });
+    return false;
+  }
+  return true;
+}
+
 // Health endpoint: quick DB probe (no auth)
 fastify.get('/health/db', async (request, reply) => {
   const requestId = request?.id ? String(request.id) : null;
-  if (!hasDatabaseUrl) {
-    return reply.code(200).send({ ok: true, db: false, mode: String(storageMode || 'memory') });
-  }
+  if (!hasDatabaseUrl) return reply.code(200).send({ ok: true, hasDatabaseUrl: false, dbReady: false, db: false });
   try {
     await withTimeout(pool.query('SELECT 1'), 1500, 'health_db');
-    return reply.code(200).send({ ok: true, db: true, mode: String(storageMode || 'postgres') });
+    return reply.code(200).send({ ok: true, hasDatabaseUrl: true, dbReady: true, db: true });
   } catch (e) {
     fastify.log.error({ err: e, request_id: requestId }, 'Health DB probe failed');
-    return reply.code(503).send({ ok: false, db: false, request_id: requestId });
+    return reply.code(503).send({ ok: false, hasDatabaseUrl: true, dbReady: false, db: false, request_id: requestId });
   }
 });
 
@@ -4842,7 +5036,7 @@ function readMultipartField(fields, name) {
       const ext = path.extname(originalName).slice(0, 12);
       const storedName = `${randomUUID()}${ext}`;
 
-      const canUseSupabaseStorage = !!SUPABASE_SERVICE_ROLE_KEY;
+      const canUseSupabaseStorage = !!(SUPABASE_SERVICE_ROLE_KEY && supabaseAdmin && supabaseAdmin.storage);
       if ((IS_NODE_PROD || IS_RENDER) && !canUseSupabaseStorage) {
         return reply.code(503).send({ error: 'Upload storage unavailable' });
       }
@@ -4859,7 +5053,7 @@ function readMultipartField(fields, name) {
           const bucket = bucketForUploadKind(normalizedKind);
           const objectPath = objectPathForUploadKind({ kind: normalizedKind, userId, movementId, storedName });
 
-          const uploadRes = await supabase.storage.from(bucket).upload(objectPath, buffer, {
+          const uploadRes = await supabaseAdmin.storage.from(bucket).upload(objectPath, buffer, {
             contentType: mime || undefined,
             upsert: false,
           });
@@ -4869,7 +5063,7 @@ function readMultipartField(fields, name) {
             return reply.code(500).send({ error: 'Failed to store upload' });
           }
 
-          const publicRes = supabase.storage.from(bucket).getPublicUrl(objectPath);
+          const publicRes = supabaseAdmin.storage.from(bucket).getPublicUrl(objectPath);
           const publicUrl = publicRes?.data?.publicUrl ? String(publicRes.data.publicUrl) : null;
 
           return reply.send({
@@ -4905,8 +5099,23 @@ function readMultipartField(fields, name) {
       });
     }
 
+    function handleUploadWithKind(kind) {
+      return async (request, reply) => {
+        request.params = { ...(request.params || {}), kind };
+        return handleUpload(request, reply);
+      };
+    }
+
+    // Back-compat + explicit routes expected by the frontend.
     fastify.post('/uploads', { config: { rateLimit: RATE_LIMITS.upload } }, handleUpload);
     fastify.post('/uploads/:kind', { config: { rateLimit: RATE_LIMITS.upload } }, handleUpload);
+    fastify.post('/uploads/avatar', { config: { rateLimit: RATE_LIMITS.upload } }, handleUploadWithKind('avatar'));
+    fastify.post('/uploads/banner', { config: { rateLimit: RATE_LIMITS.upload } }, handleUploadWithKind('banner'));
+    fastify.post(
+      '/uploads/movement-media',
+      { config: { rateLimit: RATE_LIMITS.upload } },
+      handleUploadWithKind('movement-media')
+    );
 
 
 // Platform role declaration acknowledgment
@@ -12654,42 +12863,24 @@ const start = async () => {
       });
     }
   try {
-    await checkDatabaseConnection();
+    initRealtimeServer();
+
+    console.info(`[pp-server] listening host=${HOST} port=${PORT} C4_PROOF_PACK=${process.env.C4_PROOF_PACK||"0"}`);
+    await fastify.listen({ port: PORT, host: HOST });
+    fastify.log.info(`People Power API listening on http://${HOST}:${PORT}`);
+
+    // DB boot MUST be non-blocking so Render always detects an open port.
+    // Connectivity + schema init runs in the background with bounded retries.
+    startDbConnectionLoop();
+
     if (isProd) {
       console.info(
         `[storage] effective mode=${String(storageMode)} has_db=${hasDatabaseUrl ? 'true' : 'false'} database_host=${databaseUrlHostForLog}`
       );
     }
-    initRealtimeServer();
-
-    // Start DB initialization once (DDL runs during startup only, with retry/backoff).
-    // Do not block the server from listening; handlers will gate on ensureDbReady().
-    if (hasDatabaseUrl && !dbInitPromise) {
-      dbInitPromise = initDbSchemaWithRetry().catch((e) => {
-        fastify.log.error({ err: e }, 'DB init failed after retries');
-        throw e;
-      });
-    }
-
-    // Non-hot-path tables: best effort at startup (do not run these in request handlers).
-    if (hasDatabaseUrl) {
-      ensureReportsTable().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure reports table at startup'));
-      ensureMessagesTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure messages tables at startup'));
-      ensureMovementExtrasTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure movement extras tables at startup'));
-    }
-    console.info(`[pp-server] listening host=${HOST} port=${PORT} C4_PROOF_PACK=${process.env.C4_PROOF_PACK||"0"}`);
-    fastify
-      .listen({ port: PORT, host: HOST })
-      .then(() => {
-        fastify.log.info(`People Power API listening on http://${HOST}:${PORT}`);
-      })
-      .catch((err) => {
-        fastify.log.error(err);
-        process.exit(1);
-      });
   } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
+    fastify.log.error({ err }, 'Server failed to start');
+    throw err;
   }
 };
 

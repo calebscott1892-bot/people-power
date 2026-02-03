@@ -22,6 +22,18 @@ function isLocalhost() {
 const envBaseRaw = import.meta?.env?.VITE_API_BASE_URL || import.meta?.env?.VITE_BACKEND_BASE;
 const envBase = envBaseRaw ? String(envBaseRaw).trim() : '';
 
+// Hard safety: never allow the Render management API domain.
+// If this happens, it means env vars were mis-set (e.g. using a deploy hook URL).
+if (envBase) {
+  const lower = envBase.toLowerCase();
+  if (lower.includes('api.render.com') || lower.includes('render.com/deploy') || lower.includes('/deploy/')) {
+    throw new Error(
+      '[PeoplePower] Invalid API base URL: must not use Render management endpoints (api.render.com). ' +
+        'Set VITE_API_BASE_URL (or VITE_BACKEND_BASE) to the backend origin, e.g. https://people-power.onrender.com'
+    );
+  }
+}
+
 // Production safety: prevent accidentally routing through Cloudflare Pages `/api/*` proxy.
 if (import.meta?.env?.PROD && envBase) {
   const isAbsoluteHttp = /^https?:\/\//i.test(envBase);
