@@ -454,17 +454,9 @@ if (!PROOF_MODE) {
       }
       // Otherwise, fall through to normal logic
     }
-    const authHeader = request.headers['authorization'] || '';
-    let user;
-    try {
-      user = await verifySupabaseJwtAndGetUser(authHeader);
-    } catch (e) {
-      fastify.log.error({ err: e }, 'Supabase auth lookup failed');
-      return reply.code(503).send({ error: 'Authentication service unavailable' });
-    }
-    if (!user) return reply.code(401).send({ error: 'Invalid or missing Supabase JWT' });
+    const user = await requireSupabaseUser(request, reply);
+    if (!user) return;
     const role = getStaffRoleForEmail(normalizeEmail(user.email)) || 'user';
-    // Backwards-compatible response shape: { user: {...} }
     return reply.send({ user: { id: String(user.id), email: String(user.email), role: String(role) } });
   });
 }
@@ -4945,6 +4937,79 @@ async function requireVerifiedUser(request, reply) {
   return user;
 }
 
+function extractBearerJwt(request) {
+  const authHeader = request?.headers?.authorization ? String(request.headers.authorization) : '';
+  const trimmed = authHeader.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^bearer\s+(.+)$/i);
+  if (!match) return null;
+  const jwt = String(match[1] || '').trim();
+  return jwt || null;
+}
+
+async function requireSupabaseUser(request, reply, { diagnostics = false } = {}) {
+  const requestId = request?.id ? String(request.id) : null;
+  const authHeader = request?.headers?.authorization ? String(request.headers.authorization) : '';
+  const trimmed = authHeader.trim();
+  const startsWithBearer = /^bearer\s+/i.test(trimmed);
+  const jwt = extractBearerJwt(request);
+  const tokenLen = jwt ? jwt.length : 0;
+  const dotCount = jwt ? (String(jwt).match(/\./g) || []).length : 0;
+
+  const logAuthFailure = (reason) => {
+    if (!diagnostics) return;
+    fastify.log.warn(
+      {
+        event: 'auth_failed',
+        reason: String(reason || 'unknown'),
+        request_id: requestId,
+        path: safePathFromRequest(request),
+        hasAuthHeader: !!authHeader,
+        trimmedLen: trimmed.length,
+        startsWithBearer,
+        tokenLen,
+        dotCount,
+      },
+      'Supabase auth verification failed'
+    );
+  };
+
+  if (!jwt) {
+    logAuthFailure('missing_or_malformed_authorization');
+    reply.code(401).send({ error: 'Authentication required', request_id: requestId });
+    return null;
+  }
+
+  if (!supabaseAdmin?.auth?.getUser) {
+    // Misconfiguration or startup failure.
+    fastify.log.error({ request_id: requestId }, 'Supabase admin auth client unavailable');
+    reply.code(503).send({ error: 'Authentication service unavailable', request_id: requestId });
+    return null;
+  }
+
+  let data;
+  let error;
+  try {
+    const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
+    ({ data, error } = await Promise.race([
+      supabaseAdmin.auth.getUser(jwt),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
+    ]));
+  } catch (e) {
+    fastify.log.error({ err: e, request_id: requestId }, 'Supabase admin auth lookup failed');
+    reply.code(503).send({ error: 'Authentication service unavailable', request_id: requestId });
+    return null;
+  }
+
+  if (error || !data?.user) {
+    logAuthFailure('invalid_session');
+    reply.code(401).send({ error: 'Invalid session', request_id: requestId });
+    return null;
+  }
+
+  return data.user;
+}
+
 function withTimeout(promise, ms, label) {
   const timeoutMs = Number(ms);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
@@ -5185,7 +5250,7 @@ function readMultipartField(fields, name) {
     }
 
     async function handleUpload(request, reply) {
-      const authedUser = await requireVerifiedUser(request, reply);
+      const authedUser = await requireSupabaseUser(request, reply, { diagnostics: true });
       if (!authedUser) return;
 
       const contentLengthHeader = request.headers?.['content-length'];
