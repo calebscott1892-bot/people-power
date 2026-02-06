@@ -72,6 +72,27 @@ fastify.get('/__whoami', async (request, reply) => {
   });
 });
 
+// Non-secret JWT diagnostics: never returns token; only returns token shape + standard JWT fields.
+// Guarded by ENABLE_DIAG_ENDPOINT=true (or admin-only).
+fastify.get('/__authdiag', async (request, reply) => {
+  const requestId = request?.id ? String(request.id) : null;
+  const enabled = ['1', 'true', 'yes'].includes(String(process.env.ENABLE_DIAG_ENDPOINT || '').trim().toLowerCase());
+
+  if (!enabled) {
+    const user = await requireSupabaseUser(request, reply, { diagnostics: true });
+    if (!user) return;
+    const email = normalizeEmail(user?.email || '');
+    if (!email || !ADMIN_EMAILS.has(String(email).toLowerCase())) {
+      return reply.code(404).send({ error: 'Not found' });
+    }
+  }
+
+  const jwt = extractBearerJwt(request);
+  const diag = getJwtDiagnostics(jwt);
+  const path = request?.routerPath || request?.raw?.url || request?.url || null;
+  return reply.send({ ok: true, request_id: requestId, path, diagnostics: diag });
+});
+
 // --- DB diagnostics (safe; no secrets) ---
 // Confirms whether DATABASE_URL is present and parses non-sensitive connection details.
 fastify.get('/__db', async (_request, reply) => {
@@ -3390,6 +3411,16 @@ async function initDbSchemaWithRetry() {
 async function ensureDbReady(request, reply, { error } = {}) {
   if (!hasDatabaseUrl || !dbReady) {
     const requestId = request?.id ? String(request.id) : null;
+    fastify.log.warn(
+      {
+        request_id: requestId,
+        route: `${String(request?.method || 'GET')} ${String(request?.routerPath || safePathFromRequest(request) || '')}`,
+        hasDatabaseUrl: !!hasDatabaseUrl,
+        dbReady: !!dbReady,
+        lastError: dbLastError ? { code: dbLastError.code || null, message: dbLastError.message || null } : null,
+      },
+      'DB unavailable for request'
+    );
     reply.code(503).send({ error: error || 'Database unavailable', request_id: requestId });
     return false;
   }
@@ -3404,12 +3435,51 @@ async function ensureDbReady(request, reply, { error } = {}) {
     return true;
   } catch (e) {
     const requestId = request?.id ? String(request.id) : null;
-    fastify.log.error({ err: e, request_id: requestId }, 'DB not ready');
+    const lookedLikeTimeout = e?.code === 'PP_TIMEOUT' || /timeout/i.test(String(e?.message || ''));
+    fastify.log.error(
+      {
+        request_id: requestId,
+        route: `${String(request?.method || 'GET')} ${String(request?.routerPath || safePathFromRequest(request) || '')}`,
+        sql_label: 'db_init',
+        looked_like_pool_timeout: lookedLikeTimeout,
+        err_code: e?.code,
+        err_message: e?.message,
+        err_detail: e?.detail,
+        err_hint: e?.hint,
+        stack: e?.stack,
+      },
+      'DB not ready'
+    );
     reply.code(503).send({
       error: error || 'Database unavailable',
       request_id: requestId,
     });
     return false;
+  }
+}
+
+async function dbQueryWithRequestDiagnostics(request, { sql_label, query } = {}) {
+  const requestId = request?.id ? String(request.id) : null;
+  const route = `${String(request?.method || 'GET')} ${String(request?.routerPath || safePathFromRequest(request) || '')}`;
+  try {
+    return await poolQueryWithRetry(query);
+  } catch (e) {
+    const lookedLikeTimeout = e?.code === 'PP_TIMEOUT' || /timeout/i.test(String(e?.message || ''));
+    fastify.log.error(
+      {
+        request_id: requestId,
+        route,
+        sql_label: sql_label ? String(sql_label) : null,
+        looked_like_pool_timeout: lookedLikeTimeout,
+        err_code: e?.code,
+        err_message: e?.message,
+        err_detail: e?.detail,
+        err_hint: e?.hint,
+        stack: e?.stack,
+      },
+      'DB query failed'
+    );
+    throw e;
   }
 }
 
@@ -4405,19 +4475,27 @@ function formatConversationForClient(convo) {
 function formatMovementForClient(record) {
   if (!record || typeof record !== 'object') return record;
   const out = { ...record };
-  if ('media_urls' in out) {
-    if (Array.isArray(out.media_urls)) {
-      out.media_urls = toPublicMediaUrls(out.media_urls, { kindHint: 'movement-media' });
-    } else if (typeof out.media_urls === 'string') {
+
+  const normalizeArrayField = (value, { transform } = {}) => {
+    if (Array.isArray(value)) return typeof transform === 'function' ? transform(value) : value;
+    if (typeof value === 'string') {
       try {
-        const parsed = JSON.parse(out.media_urls);
-        if (Array.isArray(parsed)) out.media_urls = toPublicMediaUrls(parsed, { kindHint: 'movement-media' });
-        else out.media_urls = [];
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return typeof transform === 'function' ? transform(parsed) : parsed;
       } catch {
-        out.media_urls = [];
+        // ignore
       }
+      return [];
     }
-  }
+    return [];
+  };
+
+  // Contract: never null.
+  out.media_urls = normalizeArrayField(out.media_urls, {
+    transform: (arr) => toPublicMediaUrls(arr, { kindHint: 'movement-media' }),
+  });
+  out.claims = normalizeArrayField(out.claims);
+
   return out;
 }
 
@@ -4902,55 +4980,13 @@ async function getDbVoteSummary(movementId, voterEmail) {
 }
 
 async function requireVerifiedUser(request, reply) {
-  const authHeader = request.headers?.authorization ? String(request.headers.authorization) : '';
-  const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : null;
-  if (!token) {
-    reply.code(401).send({ error: 'Authentication required' });
-    return null;
-  }
+  const requestId = request?.id ? String(request.id) : null;
+  const user = await requireSupabaseUser(request, reply);
+  if (!user) return null;
 
-  if (!supabaseAuthVerifier?.auth?.getUser) {
-    reply.code(503).send({ error: 'Authentication service unavailable' });
-    return null;
-  }
-
-  let data;
-  let error;
-  try {
-    // Avoid hanging requests (which can surface as upstream 503s without CORS).
-    const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
-    ({ data, error } = await Promise.race([
-      supabaseAuthVerifier.auth.getUser(token),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
-    ]));
-  } catch (e) {
-    fastify.log.error({ err: e }, 'Supabase auth lookup failed');
-    reply.code(500).send({ error: 'Authentication service unavailable' });
-    return null;
-  }
-
-  if (error || !data?.user) {
-    const status = typeof error?.status === 'number' ? error.status : undefined;
-    // Only treat auth failures as invalid tokens when Supabase explicitly says so.
-    if (status === 401 || status === 403) {
-      reply.code(401).send({ error: 'Invalid session' });
-      return null;
-    }
-
-    if (error) {
-      fastify.log.error({ err: error, status }, 'Supabase auth returned non-auth error');
-      reply.code(503).send({ error: 'Authentication service unavailable' });
-      return null;
-    }
-
-    reply.code(401).send({ error: 'Invalid session' });
-    return null;
-  }
-
-  const user = data.user;
   const emailVerified = !!(user.email_confirmed_at || user.confirmed_at);
   if (!emailVerified) {
-    reply.code(403).send({ error: 'Email verification required' });
+    reply.code(403).send({ error: 'Email verification required', request_id: requestId });
     return null;
   }
 
@@ -4967,6 +5003,74 @@ function extractBearerJwt(request) {
   return jwt || null;
 }
 
+function safeBase64UrlDecodeToString(input) {
+  const raw = String(input || '');
+  if (!raw) return null;
+  try {
+    const b64 = raw.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    return Buffer.from(b64 + pad, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+function safeParseJwtPayload(jwt) {
+  const token = jwt ? String(jwt).trim() : '';
+  if (!token) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const payloadJson = safeBase64UrlDecodeToString(parts[1]);
+  if (!payloadJson) return null;
+  try {
+    const parsed = JSON.parse(payloadJson);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function getJwtDiagnostics(jwt) {
+  const token = jwt ? String(jwt) : '';
+  const tokenLen = token.length;
+  const dotCount = token ? (token.match(/\./g) || []).length : 0;
+  const base = {
+    tokenLen,
+    dotCount,
+    iss: null,
+    aud: null,
+    iat: null,
+    exp: null,
+    secondsRemaining: null,
+    issuerMismatch: null,
+    audienceMismatch: null,
+  };
+
+  if (!token) return base;
+
+  const payload = safeParseJwtPayload(token);
+  const iss = payload?.iss != null ? String(payload.iss) : null;
+  const aud = payload?.aud != null ? payload.aud : null;
+  const iat = typeof payload?.iat === 'number' ? payload.iat : null;
+  const exp = typeof payload?.exp === 'number' ? payload.exp : null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const secondsRemaining = exp != null ? exp - nowSec : null;
+
+  const expectedIssuer = SUPABASE_URL ? `${String(SUPABASE_URL).replace(/\/+$/, '')}/auth/v1` : null;
+  const expectedAud = process.env.SUPABASE_JWT_AUD || process.env.SUPABASE_AUD || process.env.JWT_AUD || null;
+
+  const issuerMismatch = iss && expectedIssuer ? iss !== expectedIssuer : null;
+
+  let audienceMismatch = null;
+  if (expectedAud && aud != null) {
+    if (typeof aud === 'string') audienceMismatch = aud !== String(expectedAud);
+    else if (Array.isArray(aud)) audienceMismatch = !aud.map((a) => String(a)).includes(String(expectedAud));
+    else audienceMismatch = true;
+  }
+
+  return { ...base, iss, aud, iat, exp, secondsRemaining, issuerMismatch, audienceMismatch };
+}
+
 async function requireSupabaseUser(request, reply, { diagnostics = false } = {}) {
   const requestId = request?.id ? String(request.id) : null;
   const authHeader = request?.headers?.authorization ? String(request.headers.authorization) : '';
@@ -4976,7 +5080,9 @@ async function requireSupabaseUser(request, reply, { diagnostics = false } = {})
   const tokenLen = jwt ? jwt.length : 0;
   const dotCount = jwt ? (String(jwt).match(/\./g) || []).length : 0;
 
-  const logAuthFailure = (reason) => {
+  const jwtDiag = getJwtDiagnostics(jwt);
+
+  const logAuthFailure = (reason, err) => {
     if (!diagnostics) return;
     fastify.log.warn(
       {
@@ -4989,6 +5095,15 @@ async function requireSupabaseUser(request, reply, { diagnostics = false } = {})
         startsWithBearer,
         tokenLen,
         dotCount,
+        iss: jwtDiag?.iss ?? null,
+        aud: jwtDiag?.aud ?? null,
+        iat: jwtDiag?.iat ?? null,
+        exp: jwtDiag?.exp ?? null,
+        secondsRemaining: jwtDiag?.secondsRemaining ?? null,
+        issuerMismatch: jwtDiag?.issuerMismatch ?? null,
+        audienceMismatch: jwtDiag?.audienceMismatch ?? null,
+        err_code: err?.code,
+        err_message: err?.message,
       },
       'Supabase auth verification failed'
     );
@@ -5000,9 +5115,16 @@ async function requireSupabaseUser(request, reply, { diagnostics = false } = {})
     return null;
   }
 
+  if (typeof jwtDiag?.secondsRemaining === 'number' && jwtDiag.secondsRemaining <= 0) {
+    logAuthFailure('expired_token');
+    reply.code(401).send({ error: 'Invalid session', request_id: requestId });
+    return null;
+  }
+
   if (!supabaseAdmin?.auth?.getUser) {
     // Misconfiguration or startup failure.
     fastify.log.error({ request_id: requestId }, 'Supabase admin auth client unavailable');
+    logAuthFailure('service_unavailable');
     reply.code(503).send({ error: 'Authentication service unavailable', request_id: requestId });
     return null;
   }
@@ -5011,18 +5133,17 @@ async function requireSupabaseUser(request, reply, { diagnostics = false } = {})
   let error;
   try {
     const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
-    ({ data, error } = await Promise.race([
-      supabaseAdmin.auth.getUser(jwt),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
-    ]));
+    ({ data, error } = await withTimeout(supabaseAdmin.auth.getUser(jwt), timeoutMs, 'supabase_admin_get_user'));
   } catch (e) {
+    const reason = e?.code === 'PP_TIMEOUT' ? 'timeout' : 'service_unavailable';
+    logAuthFailure(reason, e);
     fastify.log.error({ err: e, request_id: requestId }, 'Supabase admin auth lookup failed');
     reply.code(503).send({ error: 'Authentication service unavailable', request_id: requestId });
     return null;
   }
 
   if (error || !data?.user) {
-    logAuthFailure('invalid_session');
+    logAuthFailure('invalid_session', error);
     reply.code(401).send({ error: 'Invalid session', request_id: requestId });
     return null;
   }
@@ -11283,14 +11404,26 @@ async function handleGetMyProfile(request, reply) {
   try {
     let row = null;
     if (userId) {
-      const byId = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId]);
+      const byId = await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_select_by_user_id',
+        query: { text: 'SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', values: [userId] },
+      });
       row = byId.rows?.[0] || null;
     }
     if (!row) {
-      const byEmail = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+      const byEmail = await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_select_by_email',
+        query: { text: 'SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', values: [email] },
+      });
       row = byEmail.rows?.[0] || null;
       if (row?.id && userId && !row.user_id) {
-        await pool.query('UPDATE user_profiles SET user_id = $1, updated_at = NOW() WHERE id = $2', [userId, row.id]);
+        await dbQueryWithRequestDiagnostics(request, {
+          sql_label: 'me_profile_backfill_user_id',
+          query: {
+            text: 'UPDATE user_profiles SET user_id = $1, updated_at = NOW() WHERE id = $2',
+            values: [userId, row.id],
+          },
+        });
         row = { ...row, user_id: userId };
       }
     }
@@ -11298,10 +11431,13 @@ async function handleGetMyProfile(request, reply) {
     if (!row) {
       const id = randomUUID();
       const now = nowIso();
-      await pool.query(
-        'INSERT INTO user_profiles (id, user_id, user_email, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)',
-        [id, userId, email, now]
-      );
+      await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_insert_stub',
+        query: {
+          text: 'INSERT INTO user_profiles (id, user_id, user_email, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)',
+          values: [id, userId, email, now],
+        },
+      });
       row = {
         id,
         user_id: userId,
@@ -11540,12 +11676,16 @@ async function handlePostMyProfile(request, reply) {
     return reply.send({ profile: sanitizeUserProfileRecord(merged) });
   }
 
+  if (!(await ensureDbReady(request, reply, { error: 'Failed to update profile' }))) return;
+
   try {
     await ensureUserProfilesTable();
 
     if (normalizedUsername) {
-      const dup = await pool.query(
-        `SELECT 1
+      const dup = await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_username_conflict_check',
+        query: {
+          text: `SELECT 1
          FROM user_profiles
          WHERE LOWER(username) = LOWER($1)
            AND NOT (
@@ -11553,8 +11693,9 @@ async function handlePostMyProfile(request, reply) {
              OR user_email = $3
            )
          LIMIT 1`,
-        [normalizedUsername, userId, email]
-      );
+          values: [normalizedUsername, userId, email],
+        },
+      });
       if (dup.rows?.length) {
         return reply.code(409).send({ error: 'USERNAME_TAKEN', message: 'That username is already taken.' });
       }
@@ -11562,14 +11703,26 @@ async function handlePostMyProfile(request, reply) {
 
     let existing = null;
     if (userId) {
-      const byId = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId]);
+      const byId = await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_select_by_user_id',
+        query: { text: 'SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', values: [userId] },
+      });
       existing = byId.rows?.[0] || null;
     }
     if (!existing) {
-      const byEmail = await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+      const byEmail = await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_select_by_email',
+        query: { text: 'SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', values: [email] },
+      });
       existing = byEmail.rows?.[0] || null;
       if (existing?.id && userId && !existing.user_id) {
-        await pool.query('UPDATE user_profiles SET user_id = $1, updated_at = NOW() WHERE id = $2', [userId, existing.id]);
+        await dbQueryWithRequestDiagnostics(request, {
+          sql_label: 'me_profile_backfill_user_id',
+          query: {
+            text: 'UPDATE user_profiles SET user_id = $1, updated_at = NOW() WHERE id = $2',
+            values: [userId, existing.id],
+          },
+        });
         existing = { ...existing, user_id: userId };
       }
     }
@@ -11600,8 +11753,10 @@ async function handlePostMyProfile(request, reply) {
 
     const now = nowIso();
     if (existing?.id) {
-      await pool.query(
-        `UPDATE user_profiles
+      await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_update',
+        query: {
+          text: `UPDATE user_profiles
          SET user_email = $2,
              user_id = $3,
              display_name = $4,
@@ -11627,73 +11782,83 @@ async function handlePostMyProfile(request, reply) {
              onboarding_completed_tutorials = $24,
              updated_at = $25
          WHERE id = $1`,
-        [
-          existing.id,
-          email,
-          userId,
-          next.display_name,
-          next.username,
-          next.bio,
-          next.profile_photo_url,
-          next.banner_url,
-          next.banner_offset_y,
-          next.is_private,
-          next.last_seen_update_version,
-          next.has_seen_tutorial_v2,
-          next.location,
-          next.catchment_radius_km,
-          next.skills,
-          next.ai_features_enabled,
-          next.movement_group_opt_out,
-          next.email_notifications_opt_in,
-          next.birthdate,
-          next.age_verified,
-          next.onboarding_completed,
-          next.onboarding_current_step,
-          next.onboarding_interests,
-          next.onboarding_completed_tutorials,
-          now,
-        ]
-      );
+          values: [
+            existing.id,
+            email,
+            userId,
+            next.display_name,
+            next.username,
+            next.bio,
+            next.profile_photo_url,
+            next.banner_url,
+            next.banner_offset_y,
+            next.is_private,
+            next.last_seen_update_version,
+            next.has_seen_tutorial_v2,
+            next.location,
+            next.catchment_radius_km,
+            next.skills,
+            next.ai_features_enabled,
+            next.movement_group_opt_out,
+            next.email_notifications_opt_in,
+            next.birthdate,
+            next.age_verified,
+            next.onboarding_completed,
+            next.onboarding_current_step,
+            next.onboarding_interests,
+            next.onboarding_completed_tutorials,
+            now,
+          ],
+        },
+      });
     } else {
       const id = randomUUID();
-      await pool.query(
-        `INSERT INTO user_profiles
+      await dbQueryWithRequestDiagnostics(request, {
+        sql_label: 'me_profile_insert',
+        query: {
+          text: `INSERT INTO user_profiles
          (id, user_id, user_email, display_name, username, bio, profile_photo_url, banner_url, banner_offset_y, is_private, last_seen_update_version, has_seen_tutorial_v2, location, catchment_radius_km, skills, ai_features_enabled, movement_group_opt_out, email_notifications_opt_in, birthdate, age_verified, onboarding_completed, onboarding_current_step, onboarding_interests, onboarding_completed_tutorials, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25)`,
-        [
-          id,
-          userId,
-          email,
-          next.display_name,
-          next.username,
-          next.bio,
-          next.profile_photo_url,
-          next.banner_url,
-          next.banner_offset_y,
-          next.is_private,
-          next.last_seen_update_version,
-          next.has_seen_tutorial_v2,
-          next.location,
-          next.catchment_radius_km,
-          next.skills,
-          next.ai_features_enabled,
-          next.movement_group_opt_out,
-          next.email_notifications_opt_in,
-          next.birthdate,
-          next.age_verified,
-          next.onboarding_completed,
-          next.onboarding_current_step,
-          next.onboarding_interests,
-          next.onboarding_completed_tutorials,
-          now,
-        ]
-      );
+          values: [
+            id,
+            userId,
+            email,
+            next.display_name,
+            next.username,
+            next.bio,
+            next.profile_photo_url,
+            next.banner_url,
+            next.banner_offset_y,
+            next.is_private,
+            next.last_seen_update_version,
+            next.has_seen_tutorial_v2,
+            next.location,
+            next.catchment_radius_km,
+            next.skills,
+            next.ai_features_enabled,
+            next.movement_group_opt_out,
+            next.email_notifications_opt_in,
+            next.birthdate,
+            next.age_verified,
+            next.onboarding_completed,
+            next.onboarding_current_step,
+            next.onboarding_interests,
+            next.onboarding_completed_tutorials,
+            now,
+          ],
+        },
+      });
     }
 
     const updatedRes = userId
-      ? await pool.query('SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', [userId])
-      : await pool.query('SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', [email]);
+      ? await dbQueryWithRequestDiagnostics(request, {
+          sql_label: 'me_profile_select_updated_by_user_id',
+          query: { text: 'SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', values: [userId] },
+        })
+      : await dbQueryWithRequestDiagnostics(request, {
+          sql_label: 'me_profile_select_updated_by_email',
+          query: { text: 'SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', values: [email] },
+        });
     const updated = sanitizeUserProfileRecord(updatedRes.rows?.[0] || null);
 
     fastify.log.info(
