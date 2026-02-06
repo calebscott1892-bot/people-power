@@ -4412,8 +4412,9 @@ function formatMovementForClient(record) {
       try {
         const parsed = JSON.parse(out.media_urls);
         if (Array.isArray(parsed)) out.media_urls = toPublicMediaUrls(parsed, { kindHint: 'movement-media' });
+        else out.media_urls = [];
       } catch {
-        // ignore
+        out.media_urls = [];
       }
     }
   }
@@ -5533,6 +5534,8 @@ fastify.get('/public-keys/:email', async (request, reply) => {
 // In production, DB failures must be surfaced (no silent memory fallback), otherwise
 // engagement counts can appear "stuck" across the app.
 fastify.get('/movements', async (request, reply) => {
+  const requestId = request?.id ? String(request.id) : null;
+
   try {
     if (hasDatabaseUrl) {
       if (!(await ensureDbReady(request, reply, { error: 'Failed to load movements' }))) return;
@@ -5594,6 +5597,31 @@ fastify.get('/movements', async (request, reply) => {
       }
 
       return out;
+    }
+
+    function safeProjectMovementForResponse(movement, { source } = {}) {
+      try {
+        const formatted = formatMovementForClient(movement);
+        return projectRecord(formatted, fields);
+      } catch (e) {
+        const movementId = movement?.id != null ? String(movement.id) : null;
+        fastify.log.error(
+          {
+            request_id: requestId,
+            route: 'GET /movements',
+            movement_id: movementId,
+            source: source || null,
+            err_name: e?.name,
+            err_message: e?.message,
+            err_code: e?.code,
+            err_detail: e?.detail,
+            err_hint: e?.hint,
+            stack: e?.stack,
+          },
+          'GET /movements row formatting failed'
+        );
+        return null;
+      }
     }
 
     const limit = parseIntParam(request.query?.limit, 20, { min: 1, max: 100 });
@@ -5660,7 +5688,10 @@ fastify.get('/movements', async (request, reply) => {
 
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
-      return reply.send(enriched.map((m) => projectRecord(formatMovementForClient(m), fields)));
+      const response = enriched
+        .map((m) => safeProjectMovementForResponse(m, { source: 'memory' }))
+        .filter(Boolean);
+      return reply.send(response);
     }
 
     try {
@@ -5693,7 +5724,19 @@ fastify.get('/movements', async (request, reply) => {
         values,
       });
 
-      const rows = Array.isArray(result.rows) ? result.rows : [];
+      if (!result || !Array.isArray(result.rows)) {
+        fastify.log.error(
+          {
+            request_id: requestId,
+            route: 'GET /movements',
+            result_type: result == null ? String(result) : typeof result,
+            result_keys: result && typeof result === 'object' ? Object.keys(result).slice(0, 25) : null,
+          },
+          'GET /movements unexpected DB result shape'
+        );
+      }
+
+      const rows = Array.isArray(result?.rows) ? result.rows : [];
       let merged = rows;
 
       // Postgres is authoritative when available.
@@ -5720,11 +5763,25 @@ fastify.get('/movements', async (request, reply) => {
       merged = merged.filter(canViewMovement).sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
-      return reply.send(enriched.map((m) => projectRecord(formatMovementForClient(m), fields)));
+      const response = enriched
+        .map((m) => safeProjectMovementForResponse(m, { source: 'db' }))
+        .filter(Boolean);
+      return reply.send(response);
     } catch (e) {
-      const requestId = request?.id ? String(request.id) : null;
       if (isProd) {
-        fastify.log.error({ err: e, request_id: requestId }, 'DB query failed for GET /movements');
+        fastify.log.error(
+          {
+            request_id: requestId,
+            route: 'GET /movements',
+            err_name: e?.name,
+            err_message: e?.message,
+            err_code: e?.code,
+            err_detail: e?.detail,
+            err_hint: e?.hint,
+            stack: e?.stack,
+          },
+          'GET /movements failed'
+        );
         return reply.code(500).send({ error: 'Failed to load movements', request_id: requestId });
       }
       fastify.log.warn({ err: e }, 'DB query failed for GET /movements; using memory fallback');
@@ -5749,31 +5806,27 @@ fastify.get('/movements', async (request, reply) => {
         .sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
-      return reply.send(enriched.map((m) => projectRecord(formatMovementForClient(m), fields)));
+      const response = enriched
+        .map((m) => safeProjectMovementForResponse(m, { source: 'memory_fallback' }))
+        .filter(Boolean);
+      return reply.send(response);
     }
   } catch (err) {
-    const requestId = request?.id ? String(request.id) : null;
-    fastify.log.error({ err }, 'GET /movements failed');
-    if (isProd) {
-      return reply.code(500).send({ error: 'Failed to load movements', request_id: requestId });
-    }
-    return reply.send({
-      ok: true,
-      movements: [
-        {
-          id: 'test-movement-1',
-          title: 'Test Movement',
-          description: 'This is a test movement served from migration-mode fallback storage.',
-          tags: ['demo'],
-          created_at: new Date().toISOString(),
-          momentum_score: 0,
-          upvotes: 0,
-          boosts_count: 0,
-          downvotes: 0,
-          score: 0,
-        },
-      ],
-    });
+    const e = err;
+    fastify.log.error(
+      {
+        request_id: requestId,
+        route: 'GET /movements',
+        err_name: e?.name,
+        err_message: e?.message,
+        err_code: e?.code,
+        err_detail: e?.detail,
+        err_hint: e?.hint,
+        stack: e?.stack,
+      },
+      'GET /movements failed'
+    );
+    return reply.code(500).send({ error: 'Failed to load movements', request_id: requestId });
   }
 });
 
