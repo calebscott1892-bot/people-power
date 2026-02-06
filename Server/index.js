@@ -8563,23 +8563,36 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
   if (!authedUser) return;
 
   // Enforce platform role declaration acknowledgment
-  try {
-    const ok = await hasPlatformAcknowledgment(authedUser.email);
-    if (!ok) {
-      return reply.code(403).send({
-        error:
-          'Platform acknowledgment required: People Power is a neutral facilitation platform, not an organiser or endorser. Please acknowledge before creating a movement.',
-      });
-    }
-  } catch (e) {
+  {
     const requestId = request?.id ? String(request.id) : null;
-    const diag = formatDbDiagnostic(getDbDiagnostic(e));
-    fastify.log.error({ err: e, request_id: requestId }, 'Failed to check platform acknowledgment');
-    return reply.code(500).send({
-      error: 'Failed to validate acknowledgment',
-      message: diag || undefined,
-      request_id: requestId,
-    });
+    const email = normalizeEmail(authedUser.email);
+    if (!email) {
+      return reply.code(400).send({ error: 'User email is required', request_id: requestId });
+    }
+
+    try {
+      if (!hasDatabaseUrl) {
+        if (!memoryPlatformAcks.has(email)) {
+          return reply.code(403).send({ error: 'Platform acknowledgment required', request_id: requestId });
+        }
+      } else {
+        await ensurePlatformAcknowledgmentsTable();
+        const res = await dbQueryWithRequestDiagnostics(request, {
+          sql_label: 'platform_ack_check',
+          query: {
+            text: 'SELECT accepted_at FROM platform_acknowledgments WHERE email = $1 LIMIT 1',
+            values: [email],
+          },
+        });
+        const acceptedAt = res?.rows?.[0]?.accepted_at || null;
+        if (!acceptedAt) {
+          return reply.code(403).send({ error: 'Platform acknowledgment required', request_id: requestId });
+        }
+      }
+    } catch {
+      // dbQueryWithRequestDiagnostics already logged request_id + route + err details.
+      return reply.code(503).send({ error: 'Failed to validate acknowledgment', request_id: requestId });
+    }
   }
 
   const schema = z
