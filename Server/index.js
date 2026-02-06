@@ -5224,6 +5224,21 @@ async function requireAdminUser(request, reply) {
   return user;
 }
 
+function normalizeMovementVisibility(input) {
+  const raw = input == null ? '' : String(input).trim().toLowerCase();
+  if (!raw) return 'public';
+
+  if (raw === 'public') return 'public';
+  if (raw === 'community' || raw === 'followers' || raw === 'followers_only' || raw === 'followersonly') return 'community';
+  if (raw === 'private') return 'private';
+
+  // Back-compat booleans/numbers.
+  if (raw === '1' || raw === 'true') return 'private';
+  if (raw === '0' || raw === 'false') return 'public';
+
+  return 'public';
+}
+
 function buildInsertForMovements(columns, payload) {
   const byName = new Map(columns.map((c) => [c.column_name, c]));
 
