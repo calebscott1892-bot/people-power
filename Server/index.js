@@ -2362,7 +2362,26 @@ async function checkDatabaseConnection() {
   try {
     dbProbeInProgress = true;
     // Keep this probe bounded; connectionTimeoutMillis also applies.
-    await withTimeout(pool.query('SELECT 1'), 8_000, 'startup_db_select_1');
+    const STARTUP_DB_SELECT_TIMEOUT_MS = Number(process.env.STARTUP_DB_SELECT_TIMEOUT_MS || 15_000);
+    const STARTUP_DB_SELECT_RETRIES = Number(process.env.STARTUP_DB_SELECT_RETRIES || 3);
+
+    async function startupDbSelect1(labelBase) {
+      let lastErr;
+      for (let attempt = 1; attempt <= STARTUP_DB_SELECT_RETRIES; attempt++) {
+        try {
+          await withTimeout(pool.query('SELECT 1'), STARTUP_DB_SELECT_TIMEOUT_MS, `${labelBase}_attempt_${attempt}`);
+          return;
+        } catch (e) {
+          lastErr = e;
+          // small backoff: 250ms, 500ms, 1000ms...
+          const backoffMs = 250 * Math.pow(2, attempt - 1);
+          await new Promise((r) => setTimeout(r, backoffMs));
+        }
+      }
+      throw lastErr;
+    }
+
+    await startupDbSelect1('startup_db_select_1');
     storageMode = 'postgres';
     dbReady = true;
     dbLastError = null;
@@ -2384,7 +2403,7 @@ async function checkDatabaseConnection() {
       try {
         console.warn('[storage] DEV: Postgres requires SSL; retrying with SSL enabled');
         pool = wrapPoolQueryGuard(createPgPool({ useSsl: true }));
-        await withTimeout(pool.query('SELECT 1'), 8_000, 'startup_db_select_1_ssl_retry');
+        await startupDbSelect1('startup_db_select_1_ssl_retry');
         storageMode = 'postgres';
         dbReady = true;
         dbLastError = null;
