@@ -2195,6 +2195,8 @@ const parsedDbUrl = safeParseDatabaseUrl(DATABASE_URL);
 const sslMode = parsedDbUrl?.sslmode ? String(parsedDbUrl.sslmode).toLowerCase() : '';
 const dbHost = parsedDbUrl?.host ? String(parsedDbUrl.host).toLowerCase() : '';
 const databaseUrlHostForLog = parsedDbUrl?.host ? String(parsedDbUrl.host) : 'none';
+const databaseUrlHostForPgSslServername = parsedDbUrl?.host ? String(parsedDbUrl.host) : null;
+const forcePoolerSslConfig = dbHost.includes('pooler.supabase.com') || sslMode === 'require';
 const hostLooksRemote = !!dbHost && dbHost !== 'localhost' && dbHost !== '127.0.0.1';
 const shouldUseSsl =
   isProd ||
@@ -2289,35 +2291,45 @@ const { connectionString, stripped } = sanitizeDatabaseUrlForPg(process.env.DATA
 fastify.log.info({ strippedSslParams: stripped, rejectUnauthorized }, '[storage] pg ssl config');
 
 function createPgPool({ useSsl }) {
+  const shouldUseSsl = !!useSsl || !!forcePoolerSslConfig;
   return new Pool({
     connectionString,
+    keepAlive: true,
     connectionTimeoutMillis: (() => {
-      const raw = Number(process.env.PG_CONNECTION_TIMEOUT_MS);
-      if (Number.isFinite(raw) && raw > 0) return raw;
-      // Keep this short in production so Render sees an open port quickly,
-      // and let the background retry loop handle transient DB outages.
-      return isProd ? 10_000 : 5_000;
-    })(),
-    max: (() => {
-      const raw = Number(process.env.PG_POOL_MAX);
-      if (Number.isFinite(raw) && raw > 0) return raw;
-      return isProd ? 5 : 10;
+      const raw = Number(process.env.PG_CONNECT_TIMEOUT_MS || 15_000);
+      return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
     })(),
     idleTimeoutMillis: (() => {
-      const raw = Number(process.env.PG_IDLE_TIMEOUT_MS);
-      if (Number.isFinite(raw) && raw > 0) return raw;
-      return 30_000;
+      const raw = Number(process.env.PG_IDLE_TIMEOUT_MS || 30_000);
+      return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
+    })(),
+    max: (() => {
+      const raw = Number(process.env.PG_POOL_MAX || 5);
+      return Number.isFinite(raw) && raw > 0 ? raw : 5;
     })(),
     allowExitOnIdle: true,
-    keepAlive: true,
-    ...(useSsl
+    ...(shouldUseSsl
       ? {
           // Render Postgres often requires TLS; prefer permissive verification in production.
           // Local dev can opt back into strict verification via DATABASE_SSL_REJECT_UNAUTHORIZED=true.
-          ssl:
-            rejectUnauthorized && !isProd
-              ? { rejectUnauthorized: true }
-              : { rejectUnauthorized: false },
+          ssl: (() => {
+            // Supabase session pooler requires SNI and typically uses a cert that may not validate
+            // in some hosted environments. When targeting the pooler (or sslmode=require), force
+            // permissive verification + servername.
+            if (forcePoolerSslConfig && databaseUrlHostForPgSslServername) {
+              return { rejectUnauthorized: false, servername: databaseUrlHostForPgSslServername };
+            }
+
+            if (rejectUnauthorized && !isProd) {
+              return databaseUrlHostForPgSslServername
+                ? { rejectUnauthorized: true, servername: databaseUrlHostForPgSslServername }
+                : { rejectUnauthorized: true };
+            }
+
+            return databaseUrlHostForPgSslServername
+              ? { rejectUnauthorized: false, servername: databaseUrlHostForPgSslServername }
+              : { rejectUnauthorized: false };
+          })(),
         }
       : null),
   });
@@ -2390,7 +2402,22 @@ async function checkDatabaseConnection() {
       let lastErr;
       for (let attempt = 1; attempt <= STARTUP_DB_SELECT_RETRIES; attempt++) {
         try {
-          await withTimeout(pool.query('SELECT 1'), STARTUP_DB_SELECT_TIMEOUT_MS, `${labelBase}_attempt_${attempt}`);
+          await withTimeout(
+            (async () => {
+              const client = await pool.connect();
+              try {
+                await client.query('SELECT 1');
+              } finally {
+                try {
+                  client.release();
+                } catch {
+                  // ignore
+                }
+              }
+            })(),
+            STARTUP_DB_SELECT_TIMEOUT_MS,
+            `${labelBase}_attempt_${attempt}`
+          );
           return;
         } catch (e) {
           lastErr = e;
@@ -8577,10 +8604,31 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
+  const requestId = request?.id ? String(request.id) : null;
+  const route = `${String(request?.method || 'POST')} ${String(request?.routerPath || safePathFromRequest(request) || '')}`;
+  const diagEnabled = ['1', 'true', 'yes'].includes(String(process.env.ENABLE_DIAG_ENDPOINT || '').trim().toLowerCase());
+  const requesterEmail = normalizeEmail(authedUser?.email || '');
+  const isAdminRequest = !!(requesterEmail && ADMIN_EMAILS.has(String(requesterEmail).toLowerCase()));
+  const canShowDiagMessage = diagEnabled || isAdminRequest;
+
+  const sanitizeErrForClientMessage = (e) => {
+    const code = e?.code ? String(e.code) : '';
+    const msg = e?.message ? String(e.message) : '';
+    const detail = e?.detail ? String(e.detail) : '';
+    const hint = e?.hint ? String(e.hint) : '';
+    const parts = [code, msg, detail, hint].filter(Boolean);
+    const joined = parts.join(' | ');
+    return joined.length > 500 ? `${joined.slice(0, 500)}…` : joined;
+  };
+
+  if (hasDatabaseUrl) {
+    const ok = await ensureDbReady(request, reply, { error: 'Database unavailable' });
+    if (!ok) return;
+  }
+
   // Enforce platform role declaration acknowledgment
   {
-    const requestId = request?.id ? String(request.id) : null;
-    const email = normalizeEmail(authedUser.email);
+    const email = requesterEmail;
     if (!email) {
       return reply.code(400).send({ error: 'User email is required', request_id: requestId });
     }
@@ -8604,8 +8652,20 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
           return reply.code(403).send({ error: 'Platform acknowledgment required', request_id: requestId });
         }
       }
-    } catch {
-      // dbQueryWithRequestDiagnostics already logged request_id + route + err details.
+    } catch (e) {
+      fastify.log.error(
+        {
+          request_id: requestId,
+          route,
+          sql_label: 'platform_ack_check',
+          err_code: e?.code,
+          err_message: e?.message,
+          err_detail: e?.detail,
+          err_hint: e?.hint,
+          stack: e?.stack,
+        },
+        'Failed to validate acknowledgment'
+      );
       return reply.code(503).send({ error: 'Failed to validate acknowledgment', request_id: requestId });
     }
   }
@@ -8768,18 +8828,50 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     return reply.code(201).send(formatMovementForClient(enriched));
   }
 
+  let sql_label = null;
   try {
+    sql_label = 'ensure_movements_table';
     await ensureMovementsTable();
+
+    sql_label = 'ensure_movement_extras_columns';
     await ensureMovementExtrasColumns();
+
+    sql_label = 'get_movements_columns';
     const columns = await getMovementsColumns();
     const insert = buildInsertForMovements(columns, payload);
-    const result = await pool.query(insert.text, insert.values);
+
+    sql_label = 'movement_insert';
+    const result = await dbQueryWithRequestDiagnostics(request, {
+      sql_label: 'movement_insert',
+      query: {
+        text: insert.text,
+        values: insert.values,
+      },
+    });
     const row = result.rows?.[0] || null;
     if (!row) {
-      const requestId = request?.id ? String(request.id) : null;
-      return reply.code(500).send({
+      fastify.log.error(
+        {
+          request_id: requestId,
+          route,
+          sql_label: 'movement_insert',
+          err_code: 'PP_NO_ROW',
+          err_message: 'Insert returned no rows',
+        },
+        'Failed to create movement'
+      );
+
+      const response = {
         error: 'Failed to create movement',
         request_id: requestId,
+      };
+
+      if (canShowDiagMessage) {
+        response.message = 'PP_NO_ROW | Insert returned no rows';
+      }
+
+      return reply.code(500).send({
+        ...response,
       });
     }
     fastify.log.info(
@@ -8802,53 +8894,34 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       },
       '[audit] movement_create'
     );
+    sql_label = 'movement_attach_creator_profiles';
     const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
     return reply.code(201).send(formatMovementForClient(enriched));
   } catch (e) {
-    const requestId = request?.id ? String(request.id) : null;
-    const diag = formatDbDiagnostic(getDbDiagnostic(e));
-    fastify.log.error({ err: e, request_id: requestId }, 'Failed to create movement');
-
-    if (isProd) {
-      return reply.code(500).send({
-        error: 'Failed to create movement',
-        message: diag || undefined,
+    fastify.log.error(
+      {
         request_id: requestId,
-      });
+        route,
+        sql_label: sql_label ? String(sql_label) : null,
+        err_code: e?.code,
+        err_message: e?.message,
+        err_detail: e?.detail,
+        err_hint: e?.hint,
+        stack: e?.stack,
+      },
+      'Failed to create movement'
+    );
+
+    const response = {
+      error: 'Failed to create movement',
+      request_id: requestId,
+    };
+
+    if (canShowDiagMessage) {
+      response.message = sanitizeErrForClientMessage(e) || undefined;
     }
 
-    // Crash-proof fallback: if DB insert fails (bad connection/schema/etc),
-    // still allow creation in memory so the app remains usable.
-    const created = {
-      id: `mem-${Date.now()}`,
-      title: payload.title,
-      description: payload.description || payload.summary,
-      description_html: payload.description_html,
-      visibility: payload.visibility || 'public',
-      tags: normalizeTags(payload.tags).filter((t) => ALLOWED_TAGS.has(t)),
-      author_email: payload.author_email ?? null,
-      location_city: payload.location_city,
-      location_country: payload.location_country,
-      location_lat: payload.location_lat,
-      location_lon: payload.location_lon,
-      media_urls: payload.media_urls,
-      claims: payload.claims,
-      created_at: new Date().toISOString(),
-      momentum_score: 0,
-      verified_participants: 0,
-    };
-    memoryMovements.unshift(created);
-    fastify.log.info(
-      {
-        event: 'movement_created',
-        movement_id: String(created.id),
-        actor_id: String(authedUser.id || ''),
-        storage: 'memory_fallback',
-      },
-      'Movement created'
-    );
-    const enriched = (await attachCreatorProfilesToMovements([created]))[0] || created;
-    return reply.code(201).send(formatMovementForClient(enriched));
+    return reply.code(500).send(response);
   }
 });
 
