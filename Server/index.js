@@ -2796,6 +2796,45 @@ function normalizeTags(tags) {
   return [];
 }
 
+function normalizeAndValidateMovementTags(input, { maxTags = 10 } = {}) {
+  const maxLen = MAX_TEXT_LENGTHS.movementTag;
+  const raw = normalizeTags(input);
+  if (!raw.length) return [];
+
+  const out = [];
+  const seen = new Set();
+
+  for (const t of raw) {
+    if (out.length >= maxTags) break;
+
+    let tag = String(t || '').trim().toLowerCase();
+    if (!tag) continue;
+
+    // Canonicalize separators to underscores for consistent storage.
+    tag = tag.replace(/\s+/g, '_');
+    tag = tag.replace(/-+/g, '_');
+
+    // Only allow [a-z0-9_].
+    tag = tag.replace(/[^a-z0-9_]/g, '');
+
+    // Collapse separators and trim.
+    tag = tag.replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+    if (!tag) continue;
+
+    if (tag.length > maxLen) {
+      tag = tag.slice(0, maxLen);
+      tag = tag.replace(/_+$/g, '').replace(/_+/g, '_');
+    }
+
+    if (!tag) continue;
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    out.push(tag);
+  }
+
+  return out;
+}
+
 function cleanText(value, maxLen = 4000) {
   const raw = String(value ?? '');
   if (!raw.trim()) return '';
@@ -8922,7 +8961,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     summary: raw.summary ? cleanText(raw.summary, MAX_TEXT_LENGTHS.movementSummary) : undefined,
     description_html: raw.description_html ? String(raw.description_html).slice(0, MAX_TEXT_LENGTHS.movementDescriptionHtml) : undefined,
     visibility: normalizeMovementVisibility(raw.visibility),
-    tags: normalizeTags(raw.tags).filter((t) => ALLOWED_TAGS.has(t)),
+    tags: normalizeAndValidateMovementTags(raw.tags),
     author_email: authedUser.email ?? null,
     location_city: raw.location_city ? cleanText(raw.location_city, MAX_TEXT_LENGTHS.locationLabel) : undefined,
     location_country: raw.location_country ? cleanText(raw.location_country, MAX_TEXT_LENGTHS.locationLabel) : undefined,
@@ -8977,7 +9016,7 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       description: payload.description || payload.summary,
       description_html: payload.description_html,
       visibility: payload.visibility || 'public',
-      tags: normalizeTags(payload.tags).filter((t) => ALLOWED_TAGS.has(t)),
+      tags: Array.isArray(payload.tags) ? payload.tags : normalizeAndValidateMovementTags(payload.tags),
       author_email: payload.author_email ?? null,
       location_city: payload.location_city,
       location_country: payload.location_country,
@@ -9180,7 +9219,7 @@ fastify.patch('/movements/:id', async (request, reply) => {
     description: raw.description != null ? cleanOptional(raw.description, MAX_TEXT_LENGTHS.movementDescription) : undefined,
     summary: raw.summary != null ? cleanOptional(raw.summary, MAX_TEXT_LENGTHS.movementSummary) : undefined,
     description_html: raw.description_html != null ? String(raw.description_html).slice(0, MAX_TEXT_LENGTHS.movementDescriptionHtml) : undefined,
-    tags: raw.tags != null ? normalizeTags(raw.tags).filter((t) => ALLOWED_TAGS.has(t)) : undefined,
+    tags: raw.tags != null ? normalizeAndValidateMovementTags(raw.tags) : undefined,
     location_city: raw.location_city != null ? cleanOptional(raw.location_city, MAX_TEXT_LENGTHS.locationLabel) : undefined,
     location_country: raw.location_country != null ? cleanOptional(raw.location_country, MAX_TEXT_LENGTHS.locationLabel) : undefined,
     location_lat: raw.location_lat != null ? roundCoord(raw.location_lat) : undefined,
