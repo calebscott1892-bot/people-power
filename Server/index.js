@@ -2737,6 +2737,41 @@ let movementsColumnsCache = null;
 
 let ensureVotesTablePromise = null;
 let ensureMovementsTablePromise = null;
+let ensureMovementExtrasColumnsPromise = null;
+
+async function ensureMovementExtrasColumns() {
+  if (!hasDatabaseUrl) return;
+  if (ensureMovementExtrasColumnsPromise) return ensureMovementExtrasColumnsPromise;
+
+  ensureMovementExtrasColumnsPromise = (async () => {
+    // Keep this minimal: only columns referenced by movement create/formatting paths.
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS summary TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS tags TEXT[] NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS category TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'public'`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS author_email TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS creator_email TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS created_by_email TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS description_html TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_city TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_country TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_lat DOUBLE PRECISION NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS location_lon DOUBLE PRECISION NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS media_urls JSONB NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS claims JSONB NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS momentum_score INT NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS verified_participants INT NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
+  })();
+
+  try {
+    return await ensureMovementExtrasColumnsPromise;
+  } catch (e) {
+    ensureMovementExtrasColumnsPromise = null;
+    throw e;
+  }
+}
 
 async function getMovementsColumns() {
   if (movementsColumnsCache) return movementsColumnsCache;
@@ -2834,15 +2869,16 @@ async function ensureMovementsTable() {
       );
     `);
 
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_created_at ON movements (created_at DESC)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_visibility ON movements (visibility)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_author_email ON movements (LOWER(author_email))');
-
+    // Ensure extras columns exist before indexes (existing DBs may have older schemas).
     try {
       await ensureMovementExtrasColumns();
     } catch {
       // best-effort
     }
+
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_created_at ON movements (created_at DESC)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_visibility ON movements (visibility)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_movements_author_email ON movements (LOWER(author_email))');
 
     movementsColumnsCache = null;
   })();
