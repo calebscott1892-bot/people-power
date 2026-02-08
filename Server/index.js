@@ -2738,6 +2738,7 @@ let movementsColumnsCache = null;
 let ensureVotesTablePromise = null;
 let ensureMovementsTablePromise = null;
 let ensureMovementExtrasColumnsPromise = null;
+let ensurePlatformAcknowledgmentsTablePromise = null;
 
 async function ensureMovementExtrasColumns() {
   if (!hasDatabaseUrl) return;
@@ -3077,12 +3078,61 @@ async function logIncident({
 
 async function ensurePlatformAcknowledgmentsTable() {
   if (!hasDatabaseUrl) return;
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS platform_acknowledgments (
-      email TEXT PRIMARY KEY,
-      accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
+
+  // Promise guard prevents stampedes of CREATE TABLE under concurrent requests.
+  if (ensurePlatformAcknowledgmentsTablePromise) return ensurePlatformAcknowledgmentsTablePromise;
+
+  ensurePlatformAcknowledgmentsTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS platform_acknowledgments (
+        email TEXT PRIMARY KEY,
+        accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+  })();
+
+  try {
+    return await ensurePlatformAcknowledgmentsTablePromise;
+  } catch (e) {
+    ensurePlatformAcknowledgmentsTablePromise = null;
+    throw e;
+  }
+}
+
+// Optional diagnostics wrapper for platform_acknowledgments table creation.
+// - When request/sql_label are provided, use dbQueryWithRequestDiagnostics.
+// - Otherwise, fall back to plain pool.query.
+async function ensurePlatformAcknowledgmentsTableWithDiagnostics(request, { sql_label } = {}) {
+  if (!hasDatabaseUrl) return;
+  if (ensurePlatformAcknowledgmentsTablePromise) return ensurePlatformAcknowledgmentsTablePromise;
+
+  const createQuery = {
+    text: `
+      CREATE TABLE IF NOT EXISTS platform_acknowledgments (
+        email TEXT PRIMARY KEY,
+        accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+    values: [],
+  };
+
+  ensurePlatformAcknowledgmentsTablePromise = (async () => {
+    if (request) {
+      await dbQueryWithRequestDiagnostics(request, {
+        sql_label: sql_label ? String(sql_label) : 'platform_ack_ensure_table',
+        query: createQuery,
+      });
+    } else {
+      await pool.query(createQuery.text);
+    }
+  })();
+
+  try {
+    return await ensurePlatformAcknowledgmentsTablePromise;
+  } catch (e) {
+    ensurePlatformAcknowledgmentsTablePromise = null;
+    throw e;
+  }
 }
 
 async function hasPlatformAcknowledgment(email) {
@@ -5616,28 +5666,90 @@ fastify.get('/platform-acknowledgment/me', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
+  const requestId = request?.id ? String(request.id) : null;
+  const route = `${String(request?.method || 'GET')} ${String(request?.routerPath || safePathFromRequest(request) || '')}`;
+  const diagEnabled = ['1', 'true', 'yes'].includes(String(process.env.ENABLE_DIAG_ENDPOINT || '').trim().toLowerCase());
+  const requesterEmail = normalizeEmail(authedUser?.email || '');
+  const isAdminRequest = !!(requesterEmail && ADMIN_EMAILS.has(String(requesterEmail).toLowerCase()));
+  const canShowDiagMessage = diagEnabled || isAdminRequest;
+
+  const sanitizeErrForClientMessage = (e) => {
+    const code = e?.code ? String(e.code) : '';
+    const msg = e?.message ? String(e.message) : '';
+    const detail = e?.detail ? String(e.detail) : '';
+    const hint = e?.hint ? String(e.hint) : '';
+    const parts = [code, msg, detail, hint].filter(Boolean);
+    const joined = parts.join(' | ');
+    return joined.length > 500 ? `${joined.slice(0, 500)}…` : joined;
+  };
+
   const email = normalizeEmail(authedUser.email);
-  if (!email) return reply.code(400).send({ error: 'User email is required' });
+  if (!email) return reply.code(400).send({ error: 'User email is required', request_id: requestId });
 
   if (!hasDatabaseUrl) {
     const record = memoryPlatformAcks.get(email) || null;
     return reply.send({ accepted: !!record, accepted_at: record?.accepted_at ?? null });
   }
 
+  const ok = await ensureDbReady(request, reply, { error: 'Database unavailable' });
+  if (!ok) return;
+
   try {
-    await ensurePlatformAcknowledgmentsTable();
-    const res = await pool.query('SELECT accepted_at FROM platform_acknowledgments WHERE email = $1 LIMIT 1', [email]);
+    await ensurePlatformAcknowledgmentsTableWithDiagnostics(request, { sql_label: 'platform_ack_me_ensure_table' });
+    const res = await dbQueryWithRequestDiagnostics(request, {
+      sql_label: 'platform_ack_me_select',
+      query: {
+        text: 'SELECT accepted_at FROM platform_acknowledgments WHERE email = $1 LIMIT 1',
+        values: [email],
+      },
+    });
     const acceptedAt = res.rows?.[0]?.accepted_at ?? null;
     return reply.send({ accepted: !!acceptedAt, accepted_at: acceptedAt });
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to load platform acknowledgment');
-    return reply.code(500).send({ error: 'Failed to load acknowledgment' });
+    const lookedLikeTimeout = e?.code === 'PP_TIMEOUT' || /timeout/i.test(String(e?.message || ''));
+    fastify.log.error(
+      {
+        request_id: requestId,
+        route,
+        sql_label: 'platform_ack_me_select',
+        looked_like_pool_timeout: lookedLikeTimeout,
+        err_code: e?.code,
+        err_message: e?.message,
+        err_detail: e?.detail,
+        err_hint: e?.hint,
+        stack: e?.stack,
+      },
+      'Failed to load platform acknowledgment'
+    );
+
+    const response = { error: 'Failed to load acknowledgment', request_id: requestId };
+    if (canShowDiagMessage) {
+      response.message = sanitizeErrForClientMessage(e) || undefined;
+    }
+    return reply.code(503).send(response);
   }
 });
 
 fastify.post('/platform-acknowledgment/me', async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
+
+  const requestId = request?.id ? String(request.id) : null;
+  const route = `${String(request?.method || 'POST')} ${String(request?.routerPath || safePathFromRequest(request) || '')}`;
+  const diagEnabled = ['1', 'true', 'yes'].includes(String(process.env.ENABLE_DIAG_ENDPOINT || '').trim().toLowerCase());
+  const requesterEmail = normalizeEmail(authedUser?.email || '');
+  const isAdminRequest = !!(requesterEmail && ADMIN_EMAILS.has(String(requesterEmail).toLowerCase()));
+  const canShowDiagMessage = diagEnabled || isAdminRequest;
+
+  const sanitizeErrForClientMessage = (e) => {
+    const code = e?.code ? String(e.code) : '';
+    const msg = e?.message ? String(e.message) : '';
+    const detail = e?.detail ? String(e.detail) : '';
+    const hint = e?.hint ? String(e.hint) : '';
+    const parts = [code, msg, detail, hint].filter(Boolean);
+    const joined = parts.join(' | ');
+    return joined.length > 500 ? `${joined.slice(0, 500)}…` : joined;
+  };
 
   const schema = z.object({ accepted: z.literal(true) });
   const parsed = schema.safeParse(request.body ?? {});
@@ -5646,25 +5758,50 @@ fastify.post('/platform-acknowledgment/me', async (request, reply) => {
   }
 
   const email = normalizeEmail(authedUser.email);
-  if (!email) return reply.code(400).send({ error: 'User email is required' });
+  if (!email) return reply.code(400).send({ error: 'User email is required', request_id: requestId });
 
   if (!hasDatabaseUrl) {
     memoryPlatformAcks.set(email, { accepted_at: nowIso() });
     return reply.send({ ok: true });
   }
 
+  const ok = await ensureDbReady(request, reply, { error: 'Database unavailable' });
+  if (!ok) return;
+
   try {
-    await ensurePlatformAcknowledgmentsTable();
-    await pool.query(
-      `INSERT INTO platform_acknowledgments (email)
-       VALUES ($1)
-       ON CONFLICT (email) DO NOTHING`,
-      [email]
-    );
+    await ensurePlatformAcknowledgmentsTableWithDiagnostics(request, { sql_label: 'platform_ack_me_ensure_table' });
+    await dbQueryWithRequestDiagnostics(request, {
+      sql_label: 'platform_ack_me_insert',
+      query: {
+        text: `INSERT INTO platform_acknowledgments (email)
+              VALUES ($1)
+              ON CONFLICT (email) DO NOTHING`,
+        values: [email],
+      },
+    });
     return reply.send({ ok: true });
   } catch (e) {
-    fastify.log.error({ err: e }, 'Failed to record platform acknowledgment');
-    return reply.code(500).send({ error: 'Failed to record acknowledgment' });
+    const lookedLikeTimeout = e?.code === 'PP_TIMEOUT' || /timeout/i.test(String(e?.message || ''));
+    fastify.log.error(
+      {
+        request_id: requestId,
+        route,
+        sql_label: 'platform_ack_me_insert',
+        looked_like_pool_timeout: lookedLikeTimeout,
+        err_code: e?.code,
+        err_message: e?.message,
+        err_detail: e?.detail,
+        err_hint: e?.hint,
+        stack: e?.stack,
+      },
+      'Failed to record platform acknowledgment'
+    );
+
+    const response = { error: 'Failed to record acknowledgment', request_id: requestId };
+    if (canShowDiagMessage) {
+      response.message = sanitizeErrForClientMessage(e) || undefined;
+    }
+    return reply.code(503).send(response);
   }
 });
 
@@ -8669,15 +8806,19 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       return reply.code(400).send({ error: 'User email is required', request_id: requestId });
     }
 
+    let sql_label = null;
     try {
       if (!hasDatabaseUrl) {
         if (!memoryPlatformAcks.has(email)) {
           return reply.code(403).send({ error: 'Platform acknowledgment required', request_id: requestId });
         }
       } else {
-        await ensurePlatformAcknowledgmentsTable();
+        sql_label = 'platform_ack_ensure_table';
+        await ensurePlatformAcknowledgmentsTableWithDiagnostics(request, { sql_label });
+
+        sql_label = 'platform_ack_select';
         const res = await dbQueryWithRequestDiagnostics(request, {
-          sql_label: 'platform_ack_check',
+          sql_label,
           query: {
             text: 'SELECT accepted_at FROM platform_acknowledgments WHERE email = $1 LIMIT 1',
             values: [email],
@@ -8689,11 +8830,13 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
         }
       }
     } catch (e) {
+      const lookedLikeTimeout = e?.code === 'PP_TIMEOUT' || /timeout/i.test(String(e?.message || ''));
       fastify.log.error(
         {
           request_id: requestId,
           route,
-          sql_label: 'platform_ack_check',
+          sql_label: sql_label ? String(sql_label) : null,
+          looked_like_pool_timeout: lookedLikeTimeout,
           err_code: e?.code,
           err_message: e?.message,
           err_detail: e?.detail,
@@ -8702,7 +8845,14 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
         },
         'Failed to validate acknowledgment'
       );
-      return reply.code(503).send({ error: 'Failed to validate acknowledgment', request_id: requestId });
+
+      const response = { error: 'Failed to validate acknowledgment', request_id: requestId };
+      if (canShowDiagMessage) {
+        const step = sql_label ? String(sql_label) : 'platform_ack_unknown';
+        const msg = sanitizeErrForClientMessage(e);
+        response.message = msg ? `${step} | ${msg}` : step;
+      }
+      return reply.code(503).send(response);
     }
   }
 
