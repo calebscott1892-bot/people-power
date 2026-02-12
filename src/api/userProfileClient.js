@@ -1,5 +1,6 @@
 import { SERVER_BASE } from './serverBase';
 import { httpFetch } from '@/utils/httpFetch';
+import { captureRequestDebugInfo, captureRequestId } from '@/utils/requestDebug';
 
 const DEV = !!import.meta?.env?.DEV;
 const FETCH_MY_PROFILE_COOLDOWN_MS = 2000;
@@ -78,7 +79,13 @@ function normalizeProfileMediaForPersistence(value) {
   // Production persistent form: absolute URL (Supabase Storage).
   if (/^https?:\/\//i.test(raw)) return raw;
   // Local dev/back-compat: allow /uploads paths.
-  return toUploadsPath(raw);
+  const uploadsPath = toUploadsPath(raw);
+  if (uploadsPath) return uploadsPath;
+
+  // Two-phase commit (preferred): storage object key/path (or bucket:path).
+  // Server will normalize + verify before persisting.
+  if (!/\s/.test(raw) && raw.length <= 2048) return raw;
+  return null;
 }
 
 async function safeReadJson(res) {
@@ -92,6 +99,7 @@ async function safeReadJson(res) {
 export async function upsertMyProfile(payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   if (!accessToken) throw new Error('Authentication required');
+  const timeoutMs = options?.timeoutMs;
 
   const BASE_URL = SERVER_BASE;
 
@@ -108,6 +116,7 @@ export async function upsertMyProfile(payload, options) {
   const res = await httpFetch(url, {
     method: 'POST',
     cache: 'no-store',
+    timeoutMs,
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -118,6 +127,11 @@ export async function upsertMyProfile(payload, options) {
 
   const body = await safeReadJson(res);
 
+  const requestIdFromHeader = res?.headers?.get ? res.headers.get('x-request-id') : null;
+  const requestIdFromBody = body && typeof body === 'object' ? (body.request_id || body.requestId) : null;
+  const requestId = requestIdFromHeader || requestIdFromBody || null;
+  if (requestId) captureRequestId({ endpoint: '/me/profile', request_id: requestId });
+
   if (!res.ok) {
     const messageFromBody =
       (body && typeof body === 'object' && (body.message || body.error)) || null;
@@ -126,6 +140,8 @@ export async function upsertMyProfile(payload, options) {
       error.code = 'USERNAME_TAKEN';
     }
     error.status = res.status;
+
+    captureRequestDebugInfo({ endpoint: '/me/profile', request_id: requestId, error_message: error.message });
     throw error;
   }
 

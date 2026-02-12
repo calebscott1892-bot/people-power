@@ -18,9 +18,14 @@ import { exportMyData } from '@/api/userExportClient';
 import { useAuth } from '@/auth/AuthProvider';
 import { logError } from '@/utils/logError';
 import { toastFriendlyError } from '@/utils/toastErrors';
-import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
+import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, MIN_IMAGE_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { queryKeys } from '@/lib/queryKeys';
+import {
+  isDebugUiEnabledForUser,
+  getLastRequestDebugInfo,
+  copyRequestDebugInfoToClipboard,
+} from '@/utils/requestDebug';
 import {
   Dialog,
   DialogContent,
@@ -39,6 +44,8 @@ const suggestedSkills = [
 export default function EditProfileModal({ open, onClose, profile, userEmail, userStats }) {
   const { session } = useAuth();
   const photoInputRef = useRef(null);
+  const debugEnabled = isDebugUiEnabledForUser(userEmail);
+  const [debugInfo, setDebugInfo] = useState(null);
   const [displayName, setDisplayName] = useState(profile?.display_name || '');
   const [username, setUsername] = useState(profile?.username || '');
   const [usernameError, setUsernameError] = useState('');
@@ -47,8 +54,11 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [skillInput, setSkillInput] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadingBanner, setUploadingBanner] = useState(false);
+  const [avatarUploadProgress, setAvatarUploadProgress] = useState(0);
+  const [bannerUploadProgress, setBannerUploadProgress] = useState(0);
   const [photoUrl, setPhotoUrl] = useState(profile?.profile_photo_url || '');
   const [bannerUrl, setBannerUrl] = useState(profile?.banner_url || '');
+  const [pendingBannerObjectKey, setPendingBannerObjectKey] = useState(null);
   const [bannerOffsetY, setBannerOffsetY] = useState(
     typeof profile?.banner_offset_y === 'number' ? profile.banner_offset_y : 0
   );
@@ -110,6 +120,10 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     setBannerOffsetY(typeof profile?.banner_offset_y === 'number' ? profile.banner_offset_y : 0);
     setUsernameError('');
     setPendingPhotoFile(null);
+    setPendingBannerObjectKey(null);
+    setAvatarUploadProgress(0);
+    setBannerUploadProgress(0);
+    setDebugInfo(null);
     setMovementGroupOptOut(!!profile?.movement_group_opt_out);
     setEmailNotificationsOptIn(!!profile?.email_notifications_opt_in);
     setIsPrivate(!!profile?.is_private);
@@ -142,7 +156,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const accessToken = session?.access_token ? String(session.access_token) : null;
       if (!accessToken) throw new Error('Please sign in to update your profile');
 
-      const updated = await upsertMyProfile(data, { accessToken });
+      const updated = await upsertMyProfile(data, { accessToken, timeoutMs: 30_000 });
 
       if (allowLocalProfileFallback) {
         // Keep local cache in sync for migration-mode reads.
@@ -175,6 +189,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         // ignore
       }
       setUsernameError('');
+      setDebugInfo(null);
       toast.success('Profile updated!');
       onClose();
     },
@@ -184,6 +199,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         return;
       }
       toastFriendlyError(err, 'Failed to update profile');
+      if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
     }
   });
 
@@ -194,6 +210,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     const validationError = validateFileUpload({
       file,
       maxBytes: MAX_UPLOAD_BYTES,
+      minBytes: MIN_IMAGE_BYTES,
       allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
     });
     if (validationError) {
@@ -220,6 +237,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     const validationError = validateFileUpload({
       file,
       maxBytes: MAX_UPLOAD_BYTES,
+      minBytes: MIN_IMAGE_BYTES,
       allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
     });
     if (validationError) {
@@ -237,6 +255,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     }
     setBannerPreviewUrl(preview);
     setUploadingBanner(true);
+    setBannerUploadProgress(0);
     try {
       const accessToken = session?.access_token ? String(session.access_token) : null;
       if (!accessToken) throw new Error('Please sign in to upload an image');
@@ -248,16 +267,23 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const uploaded = await uploadBanner(file, {
         accessToken,
         allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+        timeoutMs: 30_000,
+        onProgress: (pct) => setBannerUploadProgress(Number.isFinite(pct) ? pct : 0),
       });
       const nextUrl = uploaded?.url ? String(uploaded.url) : '';
-      if (!nextUrl) throw new Error('Upload succeeded but no URL returned');
-      setBannerUrl(nextUrl);
+      const objectKey = uploaded?.path ? String(uploaded.path) : '';
+      if (!objectKey) throw new Error('Upload succeeded but no object key returned');
+      if (nextUrl) setBannerUrl(nextUrl);
+      setPendingBannerObjectKey(objectKey);
       setBannerOffsetY(0);
     } catch (e) {
       logError(e, 'Profile banner upload failed');
       toastFriendlyError(e, 'Failed to upload banner');
+      setPendingBannerObjectKey(null);
+      if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
     } finally {
       setUploadingBanner(false);
+      setBannerUploadProgress(0);
       if (preview) {
         try {
           URL.revokeObjectURL(preview);
@@ -289,37 +315,46 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       writePrivateUserCoordinates(userEmail, privateCoords);
     }
 
-    let nextPhotoUrl = photoUrl;
+    let nextPhotoRef = photoUrl;
     if (pendingPhotoFile) {
       setUploading(true);
+      setAvatarUploadProgress(0);
       try {
         const accessToken = session?.access_token ? String(session.access_token) : null;
         if (!accessToken) throw new Error('Please sign in to upload an image');
         const uploaded = await uploadAvatar(pendingPhotoFile, {
           accessToken,
           allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+          timeoutMs: 30_000,
+          onProgress: (pct) => setAvatarUploadProgress(Number.isFinite(pct) ? pct : 0),
         });
         const uploadedUrl = uploaded?.url ? String(uploaded.url) : '';
-        if (!uploadedUrl) throw new Error('Upload succeeded but no URL returned');
-        nextPhotoUrl = uploadedUrl;
-        setPhotoUrl(uploadedUrl);
+        const objectKey = uploaded?.path ? String(uploaded.path) : '';
+        if (!objectKey) throw new Error('Upload succeeded but no object key returned');
+        nextPhotoRef = objectKey;
+        if (uploadedUrl) setPhotoUrl(uploadedUrl);
         setPendingPhotoFile(null);
       } catch (e) {
         logError(e, 'Profile photo upload failed');
         toastFriendlyError(e, 'Failed to upload photo');
         setUploading(false);
+        setAvatarUploadProgress(0);
+        if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
         return;
       } finally {
         setUploading(false);
+        setAvatarUploadProgress(0);
       }
     }
+
+    const nextBannerRef = pendingBannerObjectKey || bannerUrl;
 
     updateProfileMutation.mutate({
       display_name: displayName.trim(),
       username: normalizedUsername || displayName.trim().toLowerCase().replace(/\s+/g, ''),
       bio: bio.trim(),
-      profile_photo_url: nextPhotoUrl,
-      banner_url: bannerUrl,
+      profile_photo_url: nextPhotoRef,
+      banner_url: nextBannerRef,
       banner_offset_y: bannerOffsetY,
       is_private: isPrivate,
       skills,
@@ -411,6 +446,9 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
                       Change Banner
                     </>
                   )}
+                  {uploadingBanner && bannerUploadProgress > 0 ? (
+                    <span className="tabular-nums">{Math.min(100, Math.max(0, Math.round(bannerUploadProgress)))}%</span>
+                  ) : null}
                 </div>
               </label>
             </div>
@@ -772,11 +810,37 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
                   <Loader2 className="w-4 h-4 animate-spin" />
                   Saving…
                 </span>
+              ) : uploading ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Uploading photo{avatarUploadProgress > 0 ? ` (${Math.min(100, Math.max(0, Math.round(avatarUploadProgress)))}%)` : ''}…
+                </span>
+              ) : uploadingBanner ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Uploading banner{bannerUploadProgress > 0 ? ` (${Math.min(100, Math.max(0, Math.round(bannerUploadProgress)))}%)` : ''}…
+                </span>
               ) : (
                 'Save'
               )}
             </Button>
           </div>
+
+          {debugEnabled && debugInfo ? (
+            <div className="pt-2">
+              <button
+                type="button"
+                className="text-xs font-semibold underline text-slate-600"
+                onClick={async () => {
+                  const ok = await copyRequestDebugInfoToClipboard(debugInfo);
+                  if (ok) toast.success('Debug info copied');
+                  else toast.error('Failed to copy debug info');
+                }}
+              >
+                Tap to copy debug info
+              </button>
+            </div>
+          ) : null}
         </form>
       </DialogContent>
     </Dialog>

@@ -108,6 +108,21 @@ curl -sS \
 - Some sections may show “Coming soon” while the migration is in progress.
 - The app is designed to degrade gracefully (no blank screens) when optional data is missing.
 
+### Cloudflare Insights beacon (Pages Analytics)
+
+This repo does **not** hardcode the Cloudflare Insights beacon script tag in `index.html`.
+If you enable **Cloudflare Pages Analytics / Web Analytics** in the Cloudflare dashboard, Cloudflare may inject a script like:
+
+```html
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token":"..."}'></script>
+```
+
+Guidance:
+
+- Avoid adding an `integrity="..."` attribute to `beacon.min.js` unless you pin a stable, versioned asset (the minified file can change and cause SRI failures + console noise).
+- Ensure it is `defer` (or `async` + `defer`) so a beacon failure never blocks rendering.
+- If you see console errors from this beacon in production and you don’t need it, disable the analytics feature in Cloudflare Pages settings.
+
 ## License
 
 Add your license information here.

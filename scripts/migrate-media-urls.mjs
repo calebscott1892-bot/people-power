@@ -12,6 +12,15 @@ function getSupabasePublicStorageBase() {
   return `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public`;
 }
 
+function buildPublicStorageUrl(bucket, key) {
+  const base = getSupabasePublicStorageBase();
+  if (!base) return null;
+  const b = String(bucket || '').trim().replace(/^\/+|\/+$/g, '');
+  const k = String(key || '').trim().replace(/^\/+/, '');
+  if (!b || !k) return null;
+  return `${base}/${b}/${k}`;
+}
+
 function bucketForMediaKind(kind) {
   const avatarsBucket = String(process.env.SUPABASE_BUCKET_AVATARS || 'avatars').trim() || 'avatars';
   const bannersBucket = String(process.env.SUPABASE_BUCKET_BANNERS || 'banners').trim() || 'banners';
@@ -48,7 +57,7 @@ function convertUploadsToPublicUrl(value, { kindHint } = {}) {
 
   const kind = kindHint === 'avatar' || kindHint === 'banner' || kindHint === 'movement-media' ? kindHint : 'movement-media';
   const bucket = bucketForMediaKind(kind);
-  return `${base}/${bucket}/${rest}`;
+  return buildPublicStorageUrl(bucket, rest);
 }
 
 function parseArgs(argv) {

@@ -3,6 +3,10 @@
 export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 5MB
 export const MAX_UPLOAD_MB = Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024));
 
+// Minimum size guard for profile images (prevents persisting tiny placeholder/error payloads).
+// Mirrors the server-side MIN_IMAGE_BYTES default.
+export const MIN_IMAGE_BYTES = 1024;
+
 export const ALLOWED_IMAGE_MIME_TYPES = [
   'image/png',
   'image/jpeg',
@@ -33,9 +37,16 @@ function imageLabelFromTypes(types) {
 export function validateFileUpload({
   file,
   maxBytes = MAX_UPLOAD_BYTES,
+  minBytes = null,
   allowedMimeTypes = ALLOWED_UPLOAD_MIME_TYPES,
 } = {}) {
   if (!file) return 'File is required.';
+  if (Number.isFinite(minBytes) && Number(minBytes) > 0) {
+    const n = Math.floor(Number(minBytes));
+    if (typeof file.size === 'number' && Number.isFinite(file.size) && file.size > 0 && file.size < n) {
+      return `File looks too small or corrupted. Please choose another image (min ${n} bytes).`;
+    }
+  }
   if (typeof file.size === 'number' && file.size > maxBytes) {
     return `File too large. Max size is ${Math.floor(maxBytes / (1024 * 1024))}MB.`;
   }

@@ -1694,9 +1694,46 @@ fastify.addHook('onRequest', (request, _reply, done) => {
 // Default to "no-store" to prevent browser/CDN caching of dynamic responses.
 // Skip static uploads, which can be safely cached and are served by @fastify/static.
 fastify.addHook('onSend', (request, reply, payload, done) => {
+  const requestId = request?.id != null ? String(request.id) : '';
+  if (requestId) {
+    // Correlation/tracing: propagate request id to clients.
+    reply.header('X-Request-Id', requestId);
+  }
+
   const path = safePathFromRequest(request);
   if (!String(path || '').startsWith('/uploads/')) {
     setNoStoreHeaders(reply);
+  }
+
+  // Prefer request_id in JSON responses without forcing all handlers to include it.
+  // - Always emit X-Request-Id header.
+  // - Only inject request_id into JSON *object* payloads to avoid breaking array responses.
+  try {
+    if (requestId && payload != null) {
+      const contentType = reply.getHeader ? reply.getHeader('content-type') : undefined;
+      const isJson = contentType && String(contentType).toLowerCase().includes('application/json');
+      if (isJson) {
+        const text =
+          typeof payload === 'string'
+            ? payload
+            : Buffer.isBuffer(payload)
+              ? payload.toString('utf8')
+              : null;
+
+        if (text && text.trim().startsWith('{')) {
+          const parsed = JSON.parse(text);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            if (!Object.prototype.hasOwnProperty.call(parsed, 'request_id')) {
+              parsed.request_id = requestId;
+              const nextPayload = JSON.stringify(parsed);
+              return done(null, nextPayload);
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // If parsing fails, fall back to original payload.
   }
   done(null, payload);
 });
@@ -4468,6 +4505,15 @@ function getSupabasePublicStorageBase() {
   return `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public`;
 }
 
+function buildPublicStorageUrl(bucket, key) {
+  const base = getSupabasePublicStorageBase();
+  if (!base) return null;
+  const b = String(bucket || '').trim().replace(/^\/+|\/+$/g, '');
+  const k = String(key || '').trim().replace(/^\/+/, '');
+  if (!b || !k) return null;
+  return `${base}/${b}/${k}`;
+}
+
 function bucketForMediaKind(kind) {
   const avatarsBucket = String(process.env.SUPABASE_BUCKET_AVATARS || 'avatars').trim() || 'avatars';
   const bannersBucket = String(process.env.SUPABASE_BUCKET_BANNERS || 'banners').trim() || 'banners';
@@ -4515,7 +4561,7 @@ function toPublicMediaUrl(value, { kindHint } = {}) {
     fastify.log.warn({ value: raw }, 'Uploads bucket not inferred; defaulting to movement-media');
   }
 
-  return `${base}/${bucket}/${rest}`;
+  return buildPublicStorageUrl(bucket, rest);
 }
 
 function toPublicMediaUrls(value, { kindHint } = {}) {
@@ -4609,12 +4655,319 @@ function normalizeMediaUrlForPersistence(input, { kindHint } = {}) {
   // Preferred persistent form: absolute URL (e.g. Supabase Storage public URL).
   if (/^https?:\/\//i.test(raw)) return raw;
 
+  // Preferred client input (two-phase commit): a Supabase Storage object path/key.
+  // Example: "<userId>/<uuid>.png" (bucket is inferred from kindHint).
+  // Also accept "<bucket>:<path>" and "<bucket>/<path>" for convenience.
+  const base = getSupabasePublicStorageBase();
+  if (base) {
+    const knownBuckets = new Set([
+      bucketForMediaKind('avatar'),
+      bucketForMediaKind('banner'),
+      bucketForMediaKind('movement-media'),
+    ]);
+
+    const colonIdx = raw.indexOf(':');
+    if (colonIdx > 0 && !raw.slice(0, colonIdx).includes('/')) {
+      const maybeBucket = raw.slice(0, colonIdx).trim();
+      const maybePath = raw.slice(colonIdx + 1).replace(/^\/+/, '').trim();
+      if (maybeBucket && maybePath && knownBuckets.has(maybeBucket)) {
+        return buildPublicStorageUrl(maybeBucket, maybePath);
+      }
+    }
+
+    const firstSlash = raw.indexOf('/');
+    if (firstSlash > 0) {
+      const maybeBucket = raw.slice(0, firstSlash).trim();
+      const maybePath = raw.slice(firstSlash + 1).replace(/^\/+/, '').trim();
+      if (maybeBucket && maybePath && knownBuckets.has(maybeBucket)) {
+        return buildPublicStorageUrl(maybeBucket, maybePath);
+      }
+    }
+
+    const inferredKind = kindHint === 'avatar' || kindHint === 'banner' || kindHint === 'movement-media' ? kindHint : null;
+    const inferredBucket = bucketForMediaKind(inferredKind || 'movement-media');
+    const objectPath = raw.replace(/^\/+/, '');
+    if (objectPath) {
+      return buildPublicStorageUrl(inferredBucket, objectPath);
+    }
+  }
+
   const converted = toPublicMediaUrl(raw, { kindHint });
   if (!converted) return null;
 
   // Never persist local /uploads paths in production/Render.
   if ((IS_NODE_PROD || IS_RENDER) && String(converted).startsWith('/uploads/')) return null;
   return converted;
+}
+
+function parseSupabasePublicObjectUrl(urlString) {
+  try {
+    const u = new URL(String(urlString));
+    const pathname = String(u.pathname || '');
+    const marker = '/storage/v1/object/public/';
+    const idx = pathname.indexOf(marker);
+    if (idx === -1) return null;
+    const rest = pathname.slice(idx + marker.length).replace(/^\/+/, '');
+    const parts = rest.split('/').filter(Boolean);
+    if (parts.length < 2) return null;
+    const bucket = parts[0];
+    const path = parts.slice(1).join('/');
+    return { bucket, path };
+  } catch {
+    return null;
+  }
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim());
+}
+
+function expectedUserImageKeyPattern({ userId } = {}) {
+  const uid = String(userId || '').trim();
+  if (!uid) return null;
+  const escaped = uid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Matches `${userId}/${uuid}.{png|jpg|webp}` (jpg is used for image/jpeg).
+  return new RegExp(`^${escaped}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.(png|jpg|webp)$`, 'i');
+}
+
+function validateBannerReferenceInput(rawValue, { userId } = {}) {
+  if (rawValue == null) return { ok: true, skipped: true, reason: 'null_value' };
+  const raw = String(rawValue || '').trim();
+  if (!raw) return { ok: true, skipped: true, reason: 'empty_value' };
+
+  // Allow dev-only /uploads references.
+  if (!IS_NODE_PROD && !IS_RENDER && raw.startsWith('/uploads/')) {
+    return { ok: true, skipped: true, reason: 'uploads_path' };
+  }
+
+  const expectedBucket = bucketForMediaKind('banner');
+  const pattern = expectedUserImageKeyPattern({ userId });
+  if (!pattern) return { ok: false, reason: 'missing_user_id' };
+
+  // Absolute URL: validate if it's a Supabase public object URL for the banners bucket.
+  if (/^https?:\/\//i.test(raw)) {
+    const parsed = parseSupabasePublicObjectUrl(raw);
+    if (!parsed) return { ok: true, skipped: true, reason: 'non_storage_url' };
+    if (parsed.bucket !== expectedBucket) return { ok: false, reason: 'wrong_bucket' };
+    if (!pattern.test(parsed.path)) return { ok: false, reason: 'invalid_object_key' };
+    return { ok: true };
+  }
+
+  // bucket:path or bucket/path
+  const cleaned = raw.replace(/^\/+/, '');
+  const colonIdx = cleaned.indexOf(':');
+  if (colonIdx > 0 && !cleaned.slice(0, colonIdx).includes('/')) {
+    const bucket = cleaned.slice(0, colonIdx).trim();
+    const path = cleaned.slice(colonIdx + 1).replace(/^\/+/, '').trim();
+    if (bucket !== expectedBucket) return { ok: false, reason: 'wrong_bucket' };
+    if (!pattern.test(path)) return { ok: false, reason: 'invalid_object_key' };
+    return { ok: true };
+  }
+
+  const firstSlash = cleaned.indexOf('/');
+  if (firstSlash > 0) {
+    const maybeBucket = cleaned.slice(0, firstSlash).trim();
+    const rest = cleaned.slice(firstSlash + 1).replace(/^\/+/, '').trim();
+    // If it looks like bucket/path and bucket is the expected one, validate rest.
+    if (maybeBucket === expectedBucket) {
+      if (!pattern.test(rest)) return { ok: false, reason: 'invalid_object_key' };
+      return { ok: true };
+    }
+  }
+
+  // Otherwise treat it as a raw key (bucket inferred).
+  if (!pattern.test(cleaned)) return { ok: false, reason: 'invalid_object_key' };
+  return { ok: true };
+}
+
+function getRequestOrigin(request) {
+  const protoRaw = request?.headers?.['x-forwarded-proto'] || request?.protocol || 'http';
+  const hostRaw = request?.headers?.['x-forwarded-host'] || request?.headers?.host || 'localhost';
+  const proto = String(Array.isArray(protoRaw) ? protoRaw[0] : protoRaw).split(',')[0].trim() || 'http';
+  const host = String(Array.isArray(hostRaw) ? hostRaw[0] : hostRaw).split(',')[0].trim() || 'localhost';
+  return `${proto}://${host}`;
+}
+
+function getRequestRouteLabel(request) {
+  const method = String(request?.method || '');
+  const path = String(request?.routerPath || safePathFromRequest(request) || request?.url || '');
+  return `${method} ${path}`.trim();
+}
+
+function getMinImageBytes() {
+  const raw = String(process.env.MIN_IMAGE_BYTES || '').trim();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1024;
+  return Math.floor(parsed);
+}
+
+async function verifyImageReference({ request, field, value, kindHint, userId }) {
+  const requestId = request?.id ? String(request.id) : null;
+  const route = getRequestRouteLabel(request);
+  const minBytes = getMinImageBytes();
+
+  if (value == null) {
+    return { ok: true, skipped: true, reason: 'null_value' };
+  }
+
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return { ok: true, skipped: true, reason: 'empty_value' };
+  }
+
+  let url = null;
+  let bucket = null;
+  let path = null;
+
+  if (/^https?:\/\//i.test(raw)) {
+    url = raw;
+    const parsed = parseSupabasePublicObjectUrl(raw);
+    if (parsed) {
+      bucket = parsed.bucket;
+      path = parsed.path;
+    }
+  } else if (!IS_NODE_PROD && !IS_RENDER && raw.startsWith('/uploads/')) {
+    url = `${getRequestOrigin(request)}${raw}`;
+  } else {
+    // Path-like value: infer bucket from kindHint.
+    const base = getSupabasePublicStorageBase();
+    const inferredKind = kindHint === 'avatar' || kindHint === 'banner' || kindHint === 'movement-media' ? kindHint : null;
+    const inferredBucket = bucketForMediaKind(inferredKind || 'movement-media');
+    const cleaned = raw.replace(/^\/+/, '');
+    if (base && cleaned) {
+      const knownBuckets = new Set([
+        bucketForMediaKind('avatar'),
+        bucketForMediaKind('banner'),
+        bucketForMediaKind('movement-media'),
+      ]);
+
+      const colonIdx = cleaned.indexOf(':');
+      if (colonIdx > 0 && !cleaned.slice(0, colonIdx).includes('/')) {
+        const maybeBucket = cleaned.slice(0, colonIdx).trim();
+        const maybePath = cleaned.slice(colonIdx + 1).replace(/^\/+/, '').trim();
+        if (maybeBucket && maybePath && knownBuckets.has(maybeBucket)) {
+          bucket = maybeBucket;
+          path = maybePath;
+          url = buildPublicStorageUrl(bucket, path);
+        }
+      }
+
+      if (!url) {
+        const firstSlash = cleaned.indexOf('/');
+        if (firstSlash > 0) {
+          const maybeBucket = cleaned.slice(0, firstSlash).trim();
+          const maybePath = cleaned.slice(firstSlash + 1).replace(/^\/+/, '').trim();
+          if (maybeBucket && maybePath && knownBuckets.has(maybeBucket)) {
+            bucket = maybeBucket;
+            path = maybePath;
+            url = buildPublicStorageUrl(bucket, path);
+          }
+        }
+      }
+
+      if (!url) {
+        bucket = inferredBucket;
+        path = cleaned;
+        url = buildPublicStorageUrl(bucket, path);
+      }
+    } else {
+      return { ok: false, reason: 'unverifiable_reference' };
+    }
+  }
+
+  let status = null;
+  let contentType = null;
+  let contentLength = null;
+
+  const attempt = async (method) => {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const res = await fetch(url, { method, redirect: 'follow', signal: controller.signal });
+      status = res.status;
+      const ct = res.headers.get('content-type');
+      const cl = res.headers.get('content-length');
+      contentType = ct ? String(ct).split(';')[0].trim().toLowerCase() : null;
+      contentLength = cl != null && String(cl).trim() ? Number(String(cl).trim()) : null;
+      if (res.body && typeof res.body.cancel === 'function') {
+        try {
+          await res.body.cancel();
+        } catch {
+          // ignore
+        }
+      }
+      return res;
+    } finally {
+      clearTimeout(t);
+    }
+  };
+
+  let res;
+  try {
+    res = await attempt('HEAD');
+    if (res.status === 405 || res.status === 501) {
+      res = await attempt('GET');
+    }
+  } catch (e) {
+    fastify.log.warn(
+      {
+        event: 'profile_media_verify',
+        request_id: requestId,
+        route,
+        user_id: userId ? String(userId) : null,
+        field,
+        bucket,
+        path,
+        url,
+        ok: false,
+        reason: 'fetch_failed',
+        err_message: e?.message ? String(e.message) : null,
+      },
+      '[media] verification fetch failed'
+    );
+    return { ok: false, bucket, path, url, status: null, content_type: null, content_length: null, reason: 'fetch_failed' };
+  }
+
+  let ok = true;
+  let reason = null;
+  if (status !== 200) {
+    ok = false;
+    reason = 'status_not_200';
+  } else if (!contentType) {
+    ok = false;
+    reason = 'missing_content_type';
+  } else if (!contentType.startsWith('image/')) {
+    ok = false;
+    reason = 'non_image_content_type';
+  } else if (!Number.isFinite(contentLength)) {
+    ok = false;
+    reason = 'missing_content_length';
+  } else if (contentLength < minBytes) {
+    ok = false;
+    reason = 'content_length_too_small';
+  }
+
+  fastify.log.info(
+    {
+      event: 'profile_media_verify',
+      request_id: requestId,
+      route,
+      user_id: userId ? String(userId) : null,
+      field,
+      bucket,
+      path,
+      url,
+      ok,
+      status,
+      content_type: contentType,
+      content_length: contentLength,
+      min_bytes: minBytes,
+      reason,
+    },
+    '[media] verification result'
+  );
+
+  return { ok, bucket, path, url, status, content_type: contentType, content_length: contentLength, reason };
 }
 
 function formatConversationForClient(convo) {
@@ -5698,6 +6051,322 @@ function readMultipartField(fields, name) {
       { config: { rateLimit: RATE_LIMITS.upload } },
       handleUploadWithKind('movement-media')
     );
+
+    // Direct-to-storage flow: return a signed upload URL + object key.
+    // Client uploads via PUT to upload_url, then persists object_key via /me/profile.
+    fastify.post('/uploads/sign', { config: { rateLimit: RATE_LIMITS.upload } }, async (request, reply) => {
+      const authedUser = await requireVerifiedUser(request, reply);
+      if (!authedUser) return;
+
+      const requestId = request?.id ? String(request.id) : null;
+      const route = getRequestRouteLabel(request);
+      const userId = authedUser?.id != null ? String(authedUser.id).trim() : null;
+      if (!userId) return reply.code(400).send({ error: 'User id is required', request_id: requestId });
+
+      const schema = z.object({
+        bucket: z.enum(['avatars', 'banners']),
+        content_type: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+        bytes: z.number().int().min(1).max(MAX_UPLOAD_BYTES),
+      });
+
+      const parsed = schema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid upload payload', request_id: requestId });
+      }
+
+      const canUseSupabaseStorage = !!(SUPABASE_SERVICE_ROLE_KEY && supabaseAdmin && supabaseAdmin.storage);
+      if (!canUseSupabaseStorage) {
+        return reply.code(503).send({ error: 'Upload storage unavailable', request_id: requestId });
+      }
+
+      const kind = parsed.data.bucket === 'avatars' ? 'avatar' : 'banner';
+      const bucket = bucketForUploadKind(kind);
+
+      const mime = String(parsed.data.content_type).toLowerCase();
+      const ext = mime === 'image/jpeg' ? '.jpg' : mime === 'image/png' ? '.png' : '.webp';
+      const object_key = `${userId}/${randomUUID()}${ext}`;
+
+      const expiresInRaw = String(process.env.SIGNED_UPLOAD_EXPIRES_IN || process.env.UPLOAD_SIGN_EXPIRES_IN || '').trim();
+      const expires_in = Number.isFinite(Number(expiresInRaw)) ? Math.max(30, Math.min(3600, Number(expiresInRaw))) : 60;
+
+      try {
+        const signedRes = await supabaseAdmin.storage.from(bucket).createSignedUploadUrl(object_key, expires_in);
+        if (signedRes.error) {
+          fastify.log.error(
+            {
+              event: 'upload_sign',
+              request_id: requestId,
+              route,
+              user_id: userId,
+              bucket,
+              object_key,
+              ok: false,
+              err_message: signedRes.error?.message ? String(signedRes.error.message) : null,
+            },
+            '[upload] sign failed'
+          );
+          return reply.code(500).send({ error: 'Failed to sign upload', request_id: requestId });
+        }
+
+        const upload_url = signedRes?.data?.signedUrl ? String(signedRes.data.signedUrl) : null;
+        if (!upload_url) {
+          return reply.code(500).send({ error: 'Failed to sign upload', request_id: requestId });
+        }
+
+        const publicRes = supabaseAdmin.storage.from(bucket).getPublicUrl(object_key);
+        const public_url = publicRes?.data?.publicUrl ? String(publicRes.data.publicUrl) : null;
+
+        fastify.log.info(
+          {
+            event: 'upload_sign',
+            request_id: requestId,
+            route,
+            user_id: userId,
+            bucket,
+            object_key,
+            content_type: mime,
+            bytes: parsed.data.bytes,
+            expires_in,
+            ok: true,
+          },
+          '[upload] signed upload issued'
+        );
+
+        return reply.send({
+          bucket,
+          upload_url,
+          object_key,
+          public_url,
+          expires_in,
+          request_id: requestId,
+        });
+      } catch (e) {
+        fastify.log.error(
+          {
+            event: 'upload_sign',
+            request_id: requestId,
+            route,
+            user_id: userId,
+            bucket,
+            ok: false,
+            err_message: e?.message ? String(e.message) : null,
+          },
+          '[upload] sign exception'
+        );
+        return reply.code(500).send({ error: 'Failed to sign upload', request_id: requestId });
+      }
+    });
+
+    // Direct-to-storage verification: ensure the stored object exists, is an image,
+    // and that its content-length matches the local file size (within reason).
+    fastify.post('/uploads/verify', { config: { rateLimit: RATE_LIMITS.upload } }, async (request, reply) => {
+      const authedUser = await requireVerifiedUser(request, reply);
+      if (!authedUser) return;
+
+      const requestId = request?.id ? String(request.id) : null;
+      const route = getRequestRouteLabel(request);
+      const userId = authedUser?.id != null ? String(authedUser.id).trim() : null;
+
+      const schema = z.object({
+        kind: z.enum(['avatar', 'banner']),
+        object_key: z.string().min(1).max(2048),
+        expected_bytes: z.number().int().min(1).max(MAX_UPLOAD_BYTES),
+      });
+
+      const parsed = schema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid upload verify payload', request_id: requestId });
+      }
+
+      const { kind, object_key, expected_bytes } = parsed.data;
+      const cleanedKey = String(object_key || '').trim().replace(/^\/+/, '');
+      if (!cleanedKey) {
+        return reply.code(400).send({ error: 'Invalid object key', request_id: requestId });
+      }
+
+      const verified = await verifyImageReference({
+        request,
+        userId,
+        field: 'direct_upload',
+        value: cleanedKey,
+        kindHint: kind,
+      });
+
+      if (!verified.ok) {
+        fastify.log.warn(
+          {
+            event: 'upload_verify',
+            request_id: requestId,
+            route,
+            user_id: userId,
+            kind,
+            bucket: verified.bucket,
+            path: verified.path,
+            url: verified.url,
+            ok: false,
+            reason: verified.reason,
+            status: verified.status,
+            content_type: verified.content_type,
+            content_length: verified.content_length,
+            expected_bytes,
+          },
+          '[upload] verify failed'
+        );
+        return reply.code(409).send({
+          error: 'Upload not verified',
+          request_id: requestId,
+          kind,
+          object_key: cleanedKey,
+          reason: verified.reason || 'verification_failed',
+          status: verified.status,
+          content_type: verified.content_type,
+          content_length: verified.content_length,
+          expected_bytes,
+        });
+      }
+
+      const remote = Number(verified.content_length);
+      const expected = Number(expected_bytes);
+      const tolerance = Math.max(256, Math.floor(expected * 0.02));
+      const diff = Number.isFinite(remote) && Number.isFinite(expected) ? Math.abs(remote - expected) : Infinity;
+      const sizeMatches = diff <= tolerance;
+
+      if (!sizeMatches) {
+        fastify.log.warn(
+          {
+            event: 'upload_verify',
+            request_id: requestId,
+            route,
+            user_id: userId,
+            kind,
+            bucket: verified.bucket,
+            path: verified.path,
+            url: verified.url,
+            ok: false,
+            reason: 'size_mismatch',
+            remote_bytes: remote,
+            expected_bytes: expected,
+            diff_bytes: diff,
+            tolerance_bytes: tolerance,
+          },
+          '[upload] verify size mismatch'
+        );
+        return reply.code(409).send({
+          error: 'Upload size mismatch',
+          request_id: requestId,
+          kind,
+          object_key: cleanedKey,
+          reason: 'size_mismatch',
+          remote_bytes: remote,
+          expected_bytes: expected,
+          diff_bytes: diff,
+          tolerance_bytes: tolerance,
+        });
+      }
+
+      fastify.log.info(
+        {
+          event: 'upload_verify',
+          request_id: requestId,
+          route,
+          user_id: userId,
+          kind,
+          bucket: verified.bucket,
+          path: verified.path,
+          url: verified.url,
+          ok: true,
+          remote_bytes: remote,
+          expected_bytes: expected,
+          diff_bytes: diff,
+          tolerance_bytes: tolerance,
+        },
+        '[upload] verify ok'
+      );
+
+      return reply.send({
+        ok: true,
+        request_id: requestId,
+        kind,
+        bucket: verified.bucket,
+        object_key: cleanedKey,
+        url: verified.url,
+        remote_bytes: remote,
+        expected_bytes: expected,
+        tolerance_bytes: tolerance,
+      });
+    });
+
+    // Internal diagnostics: verify an uploaded image reference (HEAD/GET + MIME + size).
+    // Gated by ENABLE_DIAG_ENDPOINT=1 or admin email.
+    fastify.post('/diag/verify-image', async (request, reply) => {
+      const authedUser = await requireVerifiedUser(request, reply);
+      if (!authedUser) return;
+
+      const diagUserId = authedUser?.id != null ? String(authedUser.id).trim() : null;
+
+      const requestId = request?.id ? String(request.id) : null;
+      const route = getRequestRouteLabel(request);
+      const diagEnabled = ['1', 'true', 'yes'].includes(String(process.env.ENABLE_DIAG_ENDPOINT || '').trim().toLowerCase());
+      const requesterEmail = normalizeEmail(authedUser?.email || '');
+      const isAdminRequest = !!(requesterEmail && ADMIN_EMAILS.has(String(requesterEmail).toLowerCase()));
+      if (!diagEnabled && !isAdminRequest) {
+        return reply.code(404).send({ error: 'NOT_FOUND' });
+      }
+
+      const schema = z
+        .object({
+          url: z.string().url().optional(),
+          bucket: z.string().min(1).max(120).optional(),
+          path: z.string().min(1).max(2048).optional(),
+          kind: z.enum(['avatar', 'banner', 'movement-media']).optional(),
+          field: z.string().max(128).optional(),
+        })
+        .refine((v) => !!v.url || (!!v.path && (!!v.bucket || !!v.kind)), {
+          message: 'Provide url or (bucket+path) or (kind+path)',
+        });
+
+      const parsed = schema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid payload', request_id: requestId });
+      }
+
+      const field = parsed.data.field ? String(parsed.data.field) : 'diag';
+      const kindHint = parsed.data.kind ? String(parsed.data.kind) : null;
+      const value =
+        parsed.data.url ||
+        (parsed.data.bucket && parsed.data.path
+          ? `${String(parsed.data.bucket)}:${String(parsed.data.path)}`
+          : String(parsed.data.path));
+
+      const verified = await verifyImageReference({
+        request,
+        userId: diagUserId || null,
+        field,
+        value,
+        kindHint: kindHint || 'movement-media',
+      });
+
+      fastify.log.info(
+        {
+          event: 'diag_verify_image',
+          request_id: requestId,
+          route,
+          user_id: diagUserId || null,
+          field,
+          ok: !!verified.ok,
+          bucket: verified.bucket,
+          path: verified.path,
+          url: verified.url,
+          status: verified.status,
+          content_type: verified.content_type,
+          content_length: verified.content_length,
+          reason: verified.reason,
+        },
+        '[diag] verify image'
+      );
+
+      return reply.send({ request_id: requestId, ...verified });
+    });
 
 
 // Platform role declaration acknowledgment
@@ -11812,6 +12481,8 @@ async function handlePostMyProfile(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
+  const requestId = request?.id != null ? String(request.id) : null;
+
   const userIdRaw = authedUser?.id != null ? String(authedUser.id).trim() : '';
   const userId = userIdRaw || null;
   const email = normalizeEmail(authedUser.email);
@@ -11847,6 +12518,12 @@ async function handlePostMyProfile(request, reply) {
   if (!parsed.success) {
     return reply.code(400).send({ error: 'Invalid profile payload' });
   }
+
+  const bodyObj = request.body && typeof request.body === 'object' ? request.body : {};
+  const wantsPhotoUpdate =
+    Object.prototype.hasOwnProperty.call(bodyObj, 'profile_photo_url') ||
+    Object.prototype.hasOwnProperty.call(bodyObj, 'avatar_url');
+  const wantsBannerUpdate = Object.prototype.hasOwnProperty.call(bodyObj, 'banner_url');
 
   const describeProfileMediaInput = (value) => {
     if (value === undefined) return { provided: false, kind: 'unset' };
@@ -11959,10 +12636,59 @@ async function handlePostMyProfile(request, reply) {
     };
     const next = buildNextProfile(existing);
 
+    if (wantsBannerUpdate) {
+      const bannerValidation = validateBannerReferenceInput(next.banner_url, { userId });
+      if (!bannerValidation.ok) {
+        return reply.code(400).send({
+          error: 'Invalid banner key',
+          request_id: requestId,
+          reason: bannerValidation.reason || 'invalid_banner_key',
+        });
+      }
+    }
+
     // Persist absolute URLs (Supabase Storage) in production; /uploads only in local dev.
     next.profile_photo_url =
       normalizeMediaUrlForPersistence(next.profile_photo_url, { kindHint: 'avatar' }) || null;
     next.banner_url = normalizeMediaUrlForPersistence(next.banner_url, { kindHint: 'banner' }) || null;
+
+    // Two-phase commit: verify image objects before persisting.
+    if (wantsPhotoUpdate && next.profile_photo_url) {
+      const verified = await verifyImageReference({
+        request,
+        userId,
+        field: 'profile_photo_url',
+        value: next.profile_photo_url,
+        kindHint: 'avatar',
+      });
+      if (!verified.ok) {
+        const requestId = request?.id ? String(request.id) : null;
+        return reply.code(409).send({
+          error: 'Image upload not verified',
+          request_id: requestId,
+          field: 'profile_photo_url',
+          reason: verified.reason || 'verification_failed',
+        });
+      }
+    }
+    if (wantsBannerUpdate && next.banner_url) {
+      const verified = await verifyImageReference({
+        request,
+        userId,
+        field: 'banner_url',
+        value: next.banner_url,
+        kindHint: 'banner',
+      });
+      if (!verified.ok) {
+        const requestId = request?.id ? String(request.id) : null;
+        return reply.code(409).send({
+          error: 'Image upload not verified',
+          request_id: requestId,
+          field: 'banner_url',
+          reason: verified.reason || 'verification_failed',
+        });
+      }
+    }
 
     if (!isProd) {
       fastify.log.info(
@@ -11987,7 +12713,29 @@ async function handlePostMyProfile(request, reply) {
       updated_at: now,
       created_at: existing.created_at || now,
     };
+
+    fastify.log.info(
+      {
+        event: 'profile_update_persist_start',
+        request_id: requestId,
+        user_id: userId ? String(userId) : null,
+        profile_id: merged?.id ? String(merged.id) : null,
+        storage: 'memory',
+      },
+      '[profile] persist start'
+    );
     memoryUserProfiles.set(email, merged);
+
+    fastify.log.info(
+      {
+        event: 'profile_update_persist_ok',
+        request_id: requestId,
+        user_id: userId ? String(userId) : null,
+        profile_id: merged?.id ? String(merged.id) : null,
+        storage: 'memory',
+      },
+      '[profile] persist ok'
+    );
 
     fastify.log.info(
       {
@@ -12055,10 +12803,59 @@ async function handlePostMyProfile(request, reply) {
 
     const next = buildNextProfile(existing);
 
+    if (wantsBannerUpdate) {
+      const bannerValidation = validateBannerReferenceInput(next.banner_url, { userId });
+      if (!bannerValidation.ok) {
+        return reply.code(400).send({
+          error: 'Invalid banner key',
+          request_id: requestId,
+          reason: bannerValidation.reason || 'invalid_banner_key',
+        });
+      }
+    }
+
     // Persist absolute URLs (Supabase Storage) in production; /uploads only in local dev.
     next.profile_photo_url =
       normalizeMediaUrlForPersistence(next.profile_photo_url, { kindHint: 'avatar' }) || null;
     next.banner_url = normalizeMediaUrlForPersistence(next.banner_url, { kindHint: 'banner' }) || null;
+
+    // Two-phase commit: verify image objects before persisting.
+    if (wantsPhotoUpdate && next.profile_photo_url) {
+      const verified = await verifyImageReference({
+        request,
+        userId,
+        field: 'profile_photo_url',
+        value: next.profile_photo_url,
+        kindHint: 'avatar',
+      });
+      if (!verified.ok) {
+        const requestId = request?.id ? String(request.id) : null;
+        return reply.code(409).send({
+          error: 'Image upload not verified',
+          request_id: requestId,
+          field: 'profile_photo_url',
+          reason: verified.reason || 'verification_failed',
+        });
+      }
+    }
+    if (wantsBannerUpdate && next.banner_url) {
+      const verified = await verifyImageReference({
+        request,
+        userId,
+        field: 'banner_url',
+        value: next.banner_url,
+        kindHint: 'banner',
+      });
+      if (!verified.ok) {
+        const requestId = request?.id ? String(request.id) : null;
+        return reply.code(409).send({
+          error: 'Image upload not verified',
+          request_id: requestId,
+          field: 'banner_url',
+          reason: verified.reason || 'verification_failed',
+        });
+      }
+    }
 
     if (!isProd) {
       fastify.log.info(
@@ -12079,6 +12876,17 @@ async function handlePostMyProfile(request, reply) {
 
     const now = nowIso();
     if (existing?.id) {
+      fastify.log.info(
+        {
+          event: 'profile_update_persist_start',
+          request_id: requestId,
+          user_id: userId ? String(userId) : null,
+          profile_id: existing?.id ? String(existing.id) : null,
+          storage: 'db',
+          op: 'update',
+        },
+        '[profile] persist start'
+      );
       await dbQueryWithRequestDiagnostics(request, {
         sql_label: 'me_profile_update',
         query: {
@@ -12137,8 +12945,32 @@ async function handlePostMyProfile(request, reply) {
           ],
         },
       });
+
+      fastify.log.info(
+        {
+          event: 'profile_update_persist_ok',
+          request_id: requestId,
+          user_id: userId ? String(userId) : null,
+          profile_id: existing?.id ? String(existing.id) : null,
+          storage: 'db',
+          op: 'update',
+        },
+        '[profile] persist ok'
+      );
     } else {
       const id = randomUUID();
+
+      fastify.log.info(
+        {
+          event: 'profile_update_persist_start',
+          request_id: requestId,
+          user_id: userId ? String(userId) : null,
+          profile_id: id,
+          storage: 'db',
+          op: 'insert',
+        },
+        '[profile] persist start'
+      );
       await dbQueryWithRequestDiagnostics(request, {
         sql_label: 'me_profile_insert',
         query: {
@@ -12174,6 +13006,18 @@ async function handlePostMyProfile(request, reply) {
           ],
         },
       });
+
+      fastify.log.info(
+        {
+          event: 'profile_update_persist_ok',
+          request_id: requestId,
+          user_id: userId ? String(userId) : null,
+          profile_id: id,
+          storage: 'db',
+          op: 'insert',
+        },
+        '[profile] persist ok'
+      );
     }
 
     const updatedRes = userId
