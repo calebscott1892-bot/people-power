@@ -101,6 +101,45 @@ export async function fetchMovementsPage({ limit = 20, offset = 0, accessToken, 
   return normalizeMovements(data).map(withCanonicalBoostsCount);
 }
 
+export async function fetchMyMovementsWithDeleted({ limit = 200, offset = 0, accessToken, fields } = {}) {
+  const token = accessToken ? String(accessToken) : null;
+  if (!token) throw new Error('Authentication required');
+
+  const base = SERVER_BASE.replace(/\/$/, '');
+  const params = new URLSearchParams();
+  if (limit != null) params.set('limit', String(limit));
+  if (offset != null) params.set('offset', String(offset));
+  params.set('mine', '1');
+  params.set('include_deleted', '1');
+
+  if (fields) {
+    const list = Array.isArray(fields)
+      ? fields.map((f) => String(f).trim()).filter(Boolean)
+      : String(fields).split(',').map((f) => f.trim()).filter(Boolean);
+    if (list.length) params.set('fields', list.join(','));
+  }
+
+  const url = `${base}/movements?${params.toString()}`;
+  const res = await httpFetch(url, {
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) throw toApiError(res, body, `Failed to fetch movements: ${res.status}`);
+
+  const movements = normalizeMovements(body).map(withCanonicalBoostsCount);
+  const deleted =
+    body && typeof body === 'object' && Array.isArray(body.deleted_movements)
+      ? body.deleted_movements.map(withCanonicalBoostsCount)
+      : [];
+
+  return { movements, deleted_movements: deleted };
+}
+
 export async function fetchMovements(options) {
   // Backwards-compatible: fetch the first page with server defaults.
   return fetchMovementsPage({ limit: 50, offset: 0, accessToken: options?.accessToken });

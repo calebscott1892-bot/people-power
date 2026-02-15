@@ -6751,6 +6751,13 @@ fastify.get('/movements', async (request, reply) => {
     const mineRaw = request.query?.mine;
     const mine = mineRaw === '1' || mineRaw === 1 || mineRaw === true || String(mineRaw || '').toLowerCase() === 'true';
 
+    const includeDeletedRaw = request.query?.include_deleted ?? request.query?.includeDeleted;
+    const includeDeleted =
+      includeDeletedRaw === '1' ||
+      includeDeletedRaw === 1 ||
+      includeDeletedRaw === true ||
+      String(includeDeletedRaw || '').toLowerCase() === 'true';
+
     let mineEmail = null;
     if (mine) {
       const authedUser = await requireVerifiedUser(request, reply);
@@ -6798,7 +6805,6 @@ fastify.get('/movements', async (request, reply) => {
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
         })
-        .filter((m) => !isMovementDeleted(m))
         .filter((m) => {
           if (!mineEmail) return true;
           const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || m?.created_by_email || '');
@@ -6807,11 +6813,31 @@ fastify.get('/movements', async (request, reply) => {
         .filter(canViewMovement)
         .sort(sortByCreatedDesc);
 
-      const page = merged.slice(offset, offset + limit);
-      const enriched = await attachCreatorProfilesToMovements(page);
-      const response = enriched
-        .map((m) => safeProjectMovementForResponse(m, { source: 'memory' }))
-        .filter(Boolean);
+      // Default: preserve existing shape (array) and exclude deleted.
+      if (!includeDeleted || !mineEmail) {
+        const page = merged.filter((m) => !isMovementDeleted(m)).slice(offset, offset + limit);
+        const enriched = await attachCreatorProfilesToMovements(page);
+        const response = enriched
+          .map((m) => safeProjectMovementForResponse(m, { source: 'memory' }))
+          .filter(Boolean);
+        return reply.send(response);
+      }
+
+      const active = merged.filter((m) => !isMovementDeleted(m));
+      const deleted = merged.filter((m) => isMovementDeleted(m));
+      const activePage = active.slice(offset, offset + limit);
+      const deletedPage = deleted.slice(0, 500);
+
+      const enrichedActive = await attachCreatorProfilesToMovements(activePage);
+      const enrichedDeleted = await attachCreatorProfilesToMovements(deletedPage);
+      const response = {
+        movements: enrichedActive
+          .map((m) => safeProjectMovementForResponse(m, { source: 'memory' }))
+          .filter(Boolean),
+        deleted_movements: enrichedDeleted
+          .map((m) => projectRecord(movementToTombstone(m), fields))
+          .filter(Boolean),
+      };
       return reply.send(response);
     }
 
@@ -6820,7 +6846,9 @@ fastify.get('/movements', async (request, reply) => {
       let whereClause = '';
       if (mineEmail) {
         values.push(mineEmail);
-        whereClause = `WHERE m.deleted_at IS NULL AND LOWER(COALESCE(m.author_email, m.creator_email, m.created_by_email, '')) = LOWER($${values.length})`;
+        whereClause = includeDeleted
+          ? `WHERE LOWER(COALESCE(m.author_email, m.creator_email, m.created_by_email, '')) = LOWER($${values.length})`
+          : `WHERE m.deleted_at IS NULL AND LOWER(COALESCE(m.author_email, m.creator_email, m.created_by_email, '')) = LOWER($${values.length})`;
       } else {
         whereClause = 'WHERE m.deleted_at IS NULL';
       }
@@ -6883,13 +6911,34 @@ fastify.get('/movements', async (request, reply) => {
         merged = [...rows, ...mergedMemory];
       }
 
-      merged = merged.filter((m) => !isMovementDeleted(m));
+      // Default: preserve existing shape (array) and exclude deleted.
+      if (!includeDeleted || !mineEmail) {
+        merged = merged.filter((m) => !isMovementDeleted(m));
+        merged = merged.filter(canViewMovement).sort(sortByCreatedDesc);
+        const page = merged.slice(offset, offset + limit);
+        const enriched = await attachCreatorProfilesToMovements(page);
+        const response = enriched
+          .map((m) => safeProjectMovementForResponse(m, { source: 'db' }))
+          .filter(Boolean);
+        return reply.send(response);
+      }
+
       merged = merged.filter(canViewMovement).sort(sortByCreatedDesc);
-      const page = merged.slice(offset, offset + limit);
-      const enriched = await attachCreatorProfilesToMovements(page);
-      const response = enriched
-        .map((m) => safeProjectMovementForResponse(m, { source: 'db' }))
-        .filter(Boolean);
+      const active = merged.filter((m) => !isMovementDeleted(m));
+      const deleted = merged.filter((m) => isMovementDeleted(m));
+      const activePage = active.slice(offset, offset + limit);
+      const deletedPage = deleted.slice(0, 500);
+
+      const enrichedActive = await attachCreatorProfilesToMovements(activePage);
+      const enrichedDeleted = await attachCreatorProfilesToMovements(deletedPage);
+      const response = {
+        movements: enrichedActive
+          .map((m) => safeProjectMovementForResponse(m, { source: 'db' }))
+          .filter(Boolean),
+        deleted_movements: enrichedDeleted
+          .map((m) => projectRecord(movementToTombstone(m), fields))
+          .filter(Boolean),
+      };
       return reply.send(response);
     } catch (e) {
       if (isProd) {

@@ -12,7 +12,7 @@ import { format } from 'date-fns';
 import { toast } from "sonner";
 import TagBadge from '../components/shared/TagBadge';
 import { useAuth } from '@/auth/AuthProvider';
-import { fetchMovementsPage, fetchMyFollowedMovementsWithDeleted } from '@/api/movementsClient';
+import { fetchMyMovementsWithDeleted, fetchMyFollowedMovementsWithDeleted } from '@/api/movementsClient';
 import EditProfileModal from '../components/profile/EditProfileModal';
 import ShareButton from '@/components/shared/ShareButton';
 import { entities } from '@/api/appClient';
@@ -91,11 +91,10 @@ export default function Profile() {
     setIsLoading(false);
   }, [authUser, authLoading]);
 
-  const { data: myMovements = [] } = useQuery({
+  const { data: myMovementsData } = useQuery({
     queryKey: queryKeys.movements.mine(user?.email),
     queryFn: async () => {
-      const all = await fetchMovementsPage({
-        mine: true,
+      return fetchMyMovementsWithDeleted({
         limit: 200,
         offset: 0,
         fields: [
@@ -110,13 +109,30 @@ export default function Profile() {
           'momentum_score',
           'boosts_count',
           'tags',
+          'deleted_at',
+          'deletion_reason',
+          'deletion_reason_word_count',
+          'is_deleted',
         ].join(','),
         accessToken,
       });
-      return all;
     },
     enabled: !!user?.email && !!accessToken
   });
+
+  const myMovements = useMemo(() => {
+    const list = Array.isArray(myMovementsData)
+      ? myMovementsData
+      : (myMovementsData && typeof myMovementsData === 'object' && Array.isArray(myMovementsData.movements)
+          ? myMovementsData.movements
+          : []);
+    return list.filter((m) => !(m && typeof m === 'object' && (m.is_deleted === true || m.deleted_at)));
+  }, [myMovementsData]);
+
+  const myDeletedMovements = useMemo(() => {
+    if (!myMovementsData || typeof myMovementsData !== 'object') return [];
+    return Array.isArray(myMovementsData.deleted_movements) ? myMovementsData.deleted_movements : [];
+  }, [myMovementsData]);
 
   const {
     data: userProfile,
@@ -253,8 +269,8 @@ export default function Profile() {
     enabled: !!user?.email && !!accessToken
   });
 
-  const followedMovements = followedMovementsData?.movements || [];
-  const deletedFollowedMovements = followedMovementsData?.deleted_movements || [];
+  const followedMovements = Array.isArray(followedMovementsData?.movements) ? followedMovementsData.movements : [];
+  const deletedFollowedMovements = Array.isArray(followedMovementsData?.deleted_movements) ? followedMovementsData.deleted_movements : [];
 
   const { data: userStats } = useQuery({
     queryKey: ['userChallengeStats', user?.email],
@@ -773,7 +789,7 @@ export default function Profile() {
       </motion.div>
 
       {/* Following */}
-      {(followedMovements.length > 0 || deletedFollowedMovements.length > 0) && (
+      {followedMovements.length > 0 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -803,32 +819,90 @@ export default function Profile() {
                 </div>
               </Link>
             ))}
+          </div>
+        </motion.div>
+      )}
 
-            {deletedFollowedMovements.length > 0 ? (
-              <div className="p-6 border-t-2 border-slate-100 bg-slate-50">
-                <div className="text-xs font-black text-slate-600 uppercase tracking-wider">Deleted</div>
-              </div>
+      {/* Deleted movements (collapsed by default on mobile) */}
+      {(myDeletedMovements.length > 0 || deletedFollowedMovements.length > 0) && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25 }}
+          className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
+        >
+          <div className="p-6 border-b-2 border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+            <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Deleted</h2>
+          </div>
+
+          <div className="p-4 sm:p-6 space-y-4">
+            {myDeletedMovements.length > 0 ? (
+              <details>
+                <summary className="cursor-pointer select-none font-black text-slate-900 text-sm sm:text-base uppercase tracking-wide">
+                  Deleted movements (audit log) ({myDeletedMovements.length})
+                </summary>
+                <div className="mt-3 divide-y-2 divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
+                  {myDeletedMovements.map((movement) => (
+                    <Link
+                      key={movement.id}
+                      to={`/movement/${encodeURIComponent(String(movement.id))}`}
+                      className="block p-4 bg-white hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="font-black text-slate-900 truncate">
+                        {movement.title || 'Deleted movement'}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-600 font-bold">
+                        Deleted {movement.deleted_at ? safeDate(movement.deleted_at) : ''}
+                      </div>
+                      {movement.deletion_reason ? (
+                        <div className="mt-2 text-sm text-slate-700 font-semibold leading-snug">
+                          {String(movement.deletion_reason)}
+                        </div>
+                      ) : null}
+                      <div className="mt-2 text-xs text-slate-500 font-bold">
+                        {typeof movement.deletion_reason_word_count === 'number'
+                          ? `${movement.deletion_reason_word_count} words`
+                          : 'Reason provided'}
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </details>
             ) : null}
 
-            {deletedFollowedMovements.map((movement) => (
-              <Link
-                key={movement.id}
-                to={`/movement/${encodeURIComponent(String(movement.id))}`}
-                className="block p-6 hover:bg-slate-50 transition-colors group"
-              >
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
-                      {movement.title || 'Deleted movement'}
-                    </h3>
-                    <div className="text-sm text-slate-500 font-bold">
-                      Deleted — {movement.deletion_reason_word_count ? `${movement.deletion_reason_word_count} words` : 'reason provided'}
-                    </div>
-                  </div>
-                  <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
+            {deletedFollowedMovements.length > 0 ? (
+              <details>
+                <summary className="cursor-pointer select-none font-black text-slate-900 text-sm sm:text-base uppercase tracking-wide">
+                  Deleted movements you followed ({deletedFollowedMovements.length})
+                </summary>
+                <div className="mt-3 divide-y-2 divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
+                  {deletedFollowedMovements.map((movement) => (
+                    <Link
+                      key={movement.id}
+                      to={`/movement/${encodeURIComponent(String(movement.id))}`}
+                      className="block p-4 bg-white hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="font-black text-slate-900 truncate">
+                        {movement.title || 'Deleted movement'}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-600 font-bold">
+                        Deleted {movement.deleted_at ? safeDate(movement.deleted_at) : ''}
+                      </div>
+                      {movement.deletion_reason ? (
+                        <div className="mt-2 text-sm text-slate-700 font-semibold leading-snug">
+                          {String(movement.deletion_reason)}
+                        </div>
+                      ) : null}
+                      <div className="mt-2 text-xs text-slate-500 font-bold">
+                        {typeof movement.deletion_reason_word_count === 'number'
+                          ? `${movement.deletion_reason_word_count} words`
+                          : 'Reason provided'}
+                      </div>
+                    </Link>
+                  ))}
                 </div>
-              </Link>
-            ))}
+              </details>
+            ) : null}
           </div>
         </motion.div>
       )}
