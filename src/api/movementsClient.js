@@ -5,7 +5,7 @@
  * - GET    /movements            -> Movement[] | { movements: Movement[] }
  * - GET    /movements/:id        -> Movement
  * - POST   /movements            -> Movement
- * - DELETE /movements/:id        -> { ok: true }
+ * - DELETE /movements/:id        -> { ok: true, movement?: MovementTombstone }
  * - GET    /movements/:id/votes  -> { upvotes: number, downvotes: number, score: number }
  * - POST   /movements/:id/vote   -> { ok: true, votes: { upvotes, downvotes, score } }
  * - GET    /movements/:id/follow -> { following: boolean }
@@ -132,6 +132,31 @@ export async function fetchMyFollowedMovements(options) {
   return normalizeMovements(body).map(withCanonicalBoostsCount);
 }
 
+export async function fetchMyFollowedMovementsWithDeleted(options) {
+  const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  if (!accessToken) throw new Error('Authentication required');
+
+  const url = `${SERVER_BASE.replace(/\/$/, '')}/followed-movements`;
+  const res = await httpFetch(url, {
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const body = await safeReadJson(res);
+  if (!res.ok) throw toApiError(res, body, `Failed to fetch followed movements: ${res.status}`);
+
+  const movements = normalizeMovements(body).map(withCanonicalBoostsCount);
+  const deleted =
+    body && typeof body === 'object' && Array.isArray(body.deleted_movements)
+      ? body.deleted_movements.map(withCanonicalBoostsCount)
+      : [];
+
+  return { movements, deleted_movements: deleted };
+}
+
 export async function fetchMovementById(id, options) {
   const movementId = normalizeId(id);
   if (!movementId) throw new Error('Movement ID is required');
@@ -216,18 +241,32 @@ export async function deleteMovement(id, options) {
   if (!movementId) throw new Error('Movement ID is required');
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
-  const url = `${SERVER_BASE.replace(/\/$/, '')}/movements/${encodeURIComponent(movementId)}`;
+  const reason = options?.reason != null ? String(options.reason) : '';
 
-  const res = await httpFetch(url, {
-    method: 'DELETE',
-    cache: 'no-store',
-    headers: {
-      Accept: 'application/json',
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
-  });
+  const base = SERVER_BASE.replace(/\/$/, '');
+  const primaryUrl = `${base}/movements/${encodeURIComponent(movementId)}/delete`;
+  const fallbackUrl = `${base}/movements/${encodeURIComponent(movementId)}`;
 
-  const body = await safeReadJson(res);
+  const doRequest = async (url, method) => {
+    const res = await httpFetch(url, {
+      method,
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json',
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ reason }),
+    });
+    const body = await safeReadJson(res);
+    return { res, body };
+  };
+
+  // Prefer POST to avoid DELETE-with-body issues behind some proxies.
+  let { res, body } = await doRequest(primaryUrl, 'POST');
+  if (res.status === 404 || res.status === 405) {
+    ({ res, body } = await doRequest(fallbackUrl, 'DELETE'));
+  }
 
   if (!res.ok) {
     const messageFromBody =

@@ -47,8 +47,35 @@ function toRenderUrl(pathOrUrl) {
   return `${SERVER_BASE.replace(/\/$/, '')}/${s}`;
 }
 
+function toCacheBustToken(profile) {
+  if (!profile || typeof profile !== 'object') return null;
+  const raw = profile.updated_at ?? profile.updatedAt ?? null;
+  const s = raw == null ? '' : String(raw).trim();
+  if (!s) return null;
+  // Prefer a stable numeric token when possible.
+  const ms = Date.parse(s);
+  return Number.isFinite(ms) ? String(Math.floor(ms)) : s;
+}
+
+function appendCacheBuster(urlString, token) {
+  const url = urlString != null ? String(urlString).trim() : '';
+  const v = token != null ? String(token).trim() : '';
+  if (!url || !v) return urlString;
+  try {
+    const u = new URL(url);
+    u.searchParams.set('v', v);
+    return u.toString();
+  } catch {
+    // Fallback: naive append.
+    const encoded = encodeURIComponent(v);
+    return url.includes('?') ? `${url}&v=${encoded}` : `${url}?v=${encoded}`;
+  }
+}
+
 function normalizeProfileMediaForClient(profile) {
   if (!profile || typeof profile !== 'object') return profile;
+
+  const cacheToken = toCacheBustToken(profile);
 
   const rawPhoto = profile.profile_photo_url;
   const rawBanner = profile.banner_url;
@@ -57,6 +84,8 @@ function normalizeProfileMediaForClient(profile) {
 
   const photoRender = toRenderUrl(photoPath || rawPhoto);
   const bannerRender = toRenderUrl(bannerPath || rawBanner);
+  const photoRenderBusted = photoRender ? appendCacheBuster(photoRender, cacheToken) : photoRender;
+  const bannerRenderBusted = bannerRender ? appendCacheBuster(bannerRender, cacheToken) : bannerRender;
 
   return {
     ...profile,
@@ -64,11 +93,11 @@ function normalizeProfileMediaForClient(profile) {
     profile_photo_url_path: photoPath,
     banner_url_path: bannerPath,
     // Render-safe absolute URLs.
-    profile_photo_url_render: photoRender,
-    banner_url_render: bannerRender,
+    profile_photo_url_render: photoRenderBusted,
+    banner_url_render: bannerRenderBusted,
     // Back-compat: keep existing fields renderable.
-    profile_photo_url: photoRender || rawPhoto || '',
-    banner_url: bannerRender || rawBanner || '',
+    profile_photo_url: photoRenderBusted || rawPhoto || '',
+    banner_url: bannerRenderBusted || rawBanner || '',
   };
 }
 

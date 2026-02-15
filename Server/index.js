@@ -567,6 +567,7 @@ const MAX_TEXT_LENGTHS = {
   movementSummary: 1000,
   movementDescription: 4000,
   movementDescriptionHtml: 8000,
+  movementDeletionReason: 2000,
   movementClaim: 1200,
   movementClaimEvidenceUrl: 800,
   movementClaimEvidenceFilename: 260,
@@ -2799,6 +2800,10 @@ async function ensureMovementExtrasColumns() {
     await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS claims JSONB NULL`);
     await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS momentum_score INT NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS verified_participants INT NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS deletion_reason TEXT NULL`);
+    await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS deletion_reason_word_count INT NULL`);
     await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
     await pool.query(`ALTER TABLE movements ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
   })();
@@ -2941,6 +2946,10 @@ async function ensureMovementsTable() {
         claims JSONB NULL,
         momentum_score INT NOT NULL DEFAULT 0,
         verified_participants INT NOT NULL DEFAULT 0,
+        deleted_at TIMESTAMPTZ NULL,
+        deleted_by_user_id TEXT NULL,
+        deletion_reason TEXT NULL,
+        deletion_reason_word_count INT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
@@ -3713,6 +3722,14 @@ async function getViewerFollowedMovementIds(viewerEmail) {
   const email = typeof normalizeEmail === 'function' ? normalizeEmail(viewerEmail) : String(viewerEmail || '').trim();
   if (!email) return new Set();
 
+  if (!hasDatabaseUrl) {
+    const out = new Set();
+    for (const [movementId, set] of memoryMovementFollows.entries()) {
+      if (set && set.has(email)) out.add(String(movementId));
+    }
+    return out;
+  }
+
   try {
     await ensureMovementFollowsTable();
     const res = await poolQueryWithRetry({
@@ -3725,6 +3742,42 @@ async function getViewerFollowedMovementIds(viewerEmail) {
     fastify.log.warn({ err: e }, 'Failed to load viewer movement follows');
     return new Set();
   }
+}
+
+function countWords(value) {
+  const s = String(value || '').trim();
+  if (!s) return 0;
+  return s.split(/\s+/).filter(Boolean).length;
+}
+
+function isMovementDeleted(movement) {
+  return !!(movement && typeof movement === 'object' && movement.deleted_at);
+}
+
+function movementToTombstone(record) {
+  if (!record || typeof record !== 'object') return record;
+
+  const formatted = formatMovementForClient(record);
+  return {
+    id: formatted?.id ?? null,
+    title: formatted?.title ?? null,
+    summary: formatted?.summary ?? null,
+    tags: formatted?.tags ?? null,
+    category: formatted?.category ?? null,
+    visibility: formatted?.visibility ?? null,
+    created_at: formatted?.created_at ?? formatted?.created_date ?? null,
+    updated_at: formatted?.updated_at ?? null,
+    creator_display_name: formatted?.creator_display_name ?? null,
+    creator_username: formatted?.creator_username ?? null,
+    creator_profile_photo_url: formatted?.creator_profile_photo_url ?? null,
+    creator_is_admin: formatted?.creator_is_admin ?? null,
+    is_deleted: true,
+    deleted_at: formatted?.deleted_at ?? null,
+    deleted_by_user_id: formatted?.deleted_by_user_id ?? null,
+    deletion_reason: formatted?.deletion_reason ?? null,
+    deletion_reason_word_count:
+      typeof formatted?.deletion_reason_word_count === 'number' ? formatted.deletion_reason_word_count : null,
+  };
 }
 
 function canViewerSeeMovementByVisibility({ movement, viewerEmail, viewerFollowedMovementIds } = {}) {
@@ -5582,6 +5635,8 @@ async function requireSupabaseUser(request, reply, { diagnostics = false } = {})
   const trimmed = authHeader.trim();
   const startsWithBearer = /^bearer\s+/i.test(trimmed);
   const jwt = extractBearerJwt(request);
+  const jwtPayload = jwt ? safeParseJwtPayload(jwt) : null;
+  const jwtSub = jwtPayload?.sub != null ? String(jwtPayload.sub) : null;
   const tokenLen = jwt ? jwt.length : 0;
   const dotCount = jwt ? (String(jwt).match(/\./g) || []).length : 0;
 
@@ -5622,6 +5677,16 @@ async function requireSupabaseUser(request, reply, { diagnostics = false } = {})
 
   if (typeof jwtDiag?.secondsRemaining === 'number' && jwtDiag.secondsRemaining <= 0) {
     logAuthFailure('expired_token');
+    fastify.log.warn(
+      {
+        event: 'auth_401_invalid_session',
+        reason: 'expired_token',
+        request_id: requestId,
+        user_id: jwtSub,
+        path: safePathFromRequest(request),
+      },
+      'Returning 401 Invalid session'
+    );
     reply.code(401).send({ error: 'Invalid session', request_id: requestId });
     return null;
   }
@@ -5649,6 +5714,16 @@ async function requireSupabaseUser(request, reply, { diagnostics = false } = {})
 
   if (error || !data?.user) {
     logAuthFailure('invalid_session', error);
+    fastify.log.warn(
+      {
+        event: 'auth_401_invalid_session',
+        reason: 'invalid_session',
+        request_id: requestId,
+        user_id: jwtSub,
+        path: safePathFromRequest(request),
+      },
+      'Returning 401 Invalid session'
+    );
     reply.code(401).send({ error: 'Invalid session', request_id: requestId });
     return null;
   }
@@ -6583,6 +6658,7 @@ fastify.get('/movements', async (request, reply) => {
   try {
     if (hasDatabaseUrl) {
       if (!(await ensureDbReady(request, reply, { error: 'Failed to load movements' }))) return;
+      await ensureMovementsTable();
     }
 
     function parseIntParam(value, fallback, { min = 0, max = 500 } = {}) {
@@ -6722,6 +6798,7 @@ fastify.get('/movements', async (request, reply) => {
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
         })
+        .filter((m) => !isMovementDeleted(m))
         .filter((m) => {
           if (!mineEmail) return true;
           const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || m?.created_by_email || '');
@@ -6743,7 +6820,9 @@ fastify.get('/movements', async (request, reply) => {
       let whereClause = '';
       if (mineEmail) {
         values.push(mineEmail);
-        whereClause = `WHERE LOWER(COALESCE(m.author_email, m.creator_email, m.created_by_email, '')) = LOWER($${values.length})`;
+        whereClause = `WHERE m.deleted_at IS NULL AND LOWER(COALESCE(m.author_email, m.creator_email, m.created_by_email, '')) = LOWER($${values.length})`;
+      } else {
+        whereClause = 'WHERE m.deleted_at IS NULL';
       }
 
       const result = await poolQueryWithRetry({
@@ -6804,6 +6883,7 @@ fastify.get('/movements', async (request, reply) => {
         merged = [...rows, ...mergedMemory];
       }
 
+      merged = merged.filter((m) => !isMovementDeleted(m));
       merged = merged.filter(canViewMovement).sort(sortByCreatedDesc);
       const page = merged.slice(offset, offset + limit);
       const enriched = await attachCreatorProfilesToMovements(page);
@@ -6841,6 +6921,7 @@ fastify.get('/movements', async (request, reply) => {
             verified_participants: memoryCountApprovedEvidenceParticipants(m?.id),
           };
         })
+        .filter((m) => !isMovementDeleted(m))
         .filter((m) => {
           if (!mineEmail) return true;
           const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || m?.created_by_email || '');
@@ -6899,6 +6980,18 @@ fastify.get('/movements/:id', async (request, reply) => {
     if (blockMemoryFallbackInProd(request, reply, 'movement detail')) return;
     const found = memoryMovements.find((m) => String(m.id) === id) || null;
     if (!found) return reply.code(404).send({ error: 'Movement not found' });
+
+    if (isMovementDeleted(found)) {
+      const viewer = viewerEmail ? normalizeEmail(viewerEmail) : null;
+      const ownerEmail = normalizeEmail(found?.author_email || found?.creator_email || found?.created_by_email || '');
+      const isOwner = !!(viewer && ownerEmail && viewer === ownerEmail);
+      const isAdmin = !!(viewer && getStaffRoleForEmail(viewer) === 'admin');
+      const isFollower = viewerFollowedMovementIds instanceof Set ? viewerFollowedMovementIds.has(String(id)) : false;
+      if (!isOwner && !isAdmin && !isFollower) return reply.code(404).send({ error: 'Movement not found' });
+      const enriched = (await attachCreatorProfilesToMovements([found]))[0] || found;
+      return reply.send(movementToTombstone(enriched));
+    }
+
     if (isNotVisibleForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
     if (isHiddenForViewer(found)) return reply.code(404).send({ error: 'Movement not found' });
     const summary = getMemoryVoteSummary(found?.id, null);
@@ -6961,6 +7054,18 @@ fastify.get('/movements/:id', async (request, reply) => {
       }
       return reply.code(404).send({ error: 'Movement not found' });
     }
+
+    if (isMovementDeleted(row)) {
+      const viewer = viewerEmail ? normalizeEmail(viewerEmail) : null;
+      const ownerEmail = normalizeEmail(row?.author_email || row?.creator_email || row?.created_by_email || '');
+      const isOwner = !!(viewer && ownerEmail && viewer === ownerEmail);
+      const isAdmin = !!(viewer && getStaffRoleForEmail(viewer) === 'admin');
+      const isFollower = viewerFollowedMovementIds instanceof Set ? viewerFollowedMovementIds.has(String(id)) : false;
+      if (!isOwner && !isAdmin && !isFollower) return reply.code(404).send({ error: 'Movement not found' });
+      const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
+      return reply.send(movementToTombstone(enriched));
+    }
+
     if (isNotVisibleForViewer(row)) return reply.code(404).send({ error: 'Movement not found' });
     if (isHiddenForViewer(row)) return reply.code(404).send({ error: 'Movement not found' });
     const enriched = (await attachCreatorProfilesToMovements([row]))[0];
@@ -7177,14 +7282,26 @@ async function handleFollowedMovements(request, reply) {
     }
     const movements = memoryMovements.filter((m) => {
       if (!followedIds.has(String(m?.id))) return false;
+      if (isMovementDeleted(m)) return false;
       const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || '');
       return !isBlockedForViewer(authorEmail, viewerBlocks);
     });
-    return reply.send({ movements: movements.map(formatMovementForClient) });
+    const deleted = memoryMovements.filter((m) => {
+      if (!followedIds.has(String(m?.id))) return false;
+      if (!isMovementDeleted(m)) return false;
+      const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || '');
+      return !isBlockedForViewer(authorEmail, viewerBlocks);
+    });
+    const enrichedDeleted = await attachCreatorProfilesToMovements(deleted);
+    return reply.send({
+      movements: movements.map(formatMovementForClient),
+      deleted_movements: enrichedDeleted.map(movementToTombstone),
+    });
   }
 
   try {
     await ensureMovementFollowsTable();
+    await ensureMovementsTable();
     await ensureVotesTable();
 
     const result = await pool.query(
@@ -7201,7 +7318,7 @@ async function handleFollowedMovements(request, reply) {
          COALESCE(v.downvotes, 0)::int AS downvotes,
          (COALESCE(v.upvotes, 0) - COALESCE(v.downvotes, 0))::int AS score
        FROM followed f
-       JOIN movements m ON m.id = f.movement_id
+      JOIN movements m ON m.id = f.movement_id
        LEFT JOIN (
          SELECT
            movement_id,
@@ -7219,7 +7336,13 @@ async function handleFollowedMovements(request, reply) {
       const authorEmail = normalizeEmail(m?.author_email || m?.creator_email || '');
       return !isBlockedForViewer(authorEmail, viewerBlocks);
     });
-    return reply.send({ movements: filtered.map(formatMovementForClient) });
+    const active = filtered.filter((m) => !isMovementDeleted(m));
+    const deleted = filtered.filter((m) => isMovementDeleted(m));
+    const enrichedDeleted = await attachCreatorProfilesToMovements(deleted);
+    return reply.send({
+      movements: active.map(formatMovementForClient),
+      deleted_movements: enrichedDeleted.map(movementToTombstone),
+    });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to load followed movements');
     return reply.code(500).send({ error: 'Failed to load followed movements' });
@@ -10032,7 +10155,7 @@ fastify.patch('/movements/:id', async (request, reply) => {
   }
 });
 
-fastify.delete('/movements/:id', async (request, reply) => {
+async function handleSoftDeleteMovement(request, reply) {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
 
@@ -10042,6 +10165,24 @@ fastify.delete('/movements/:id', async (request, reply) => {
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
   const staffRole = getStaffRoleForEmail(email);
+
+  const schema = z.object({
+    reason: z.string().min(1).max(MAX_TEXT_LENGTHS.movementDeletionReason),
+  });
+  const parsed = schema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    return reply.code(400).send({ error: 'A deletion reason is required (25+ words)' });
+  }
+
+  const deletionReason = cleanText(parsed.data.reason, MAX_TEXT_LENGTHS.movementDeletionReason);
+  const deletionWordCount = countWords(deletionReason);
+  if (deletionWordCount < 25) {
+    return reply.code(400).send({
+      error: 'Deletion reason must be at least 25 words',
+      deletion_reason_word_count: deletionWordCount,
+      deletion_reason_min_words: 25,
+    });
+  }
 
   // Memory-backed movements
   const memIdx = memoryMovements.findIndex((m) => String(m?.id) === id);
@@ -10064,13 +10205,27 @@ fastify.delete('/movements/:id', async (request, reply) => {
     if (!isOwner && staffRole !== 'admin') {
       return reply.code(403).send({ error: 'Not allowed' });
     }
-    memoryMovements.splice(memIdx, 1);
+
+    if (isMovementDeleted(m)) {
+      const enriched = (await attachCreatorProfilesToMovements([m]))[0] || m;
+      return reply.code(409).send({ error: 'Movement already deleted', movement: movementToTombstone(enriched) });
+    }
+
+    const next = {
+      ...m,
+      deleted_at: nowIso(),
+      deleted_by_user_id: String(authedUser.id || authedUser.email || ''),
+      deletion_reason: deletionReason,
+      deletion_reason_word_count: deletionWordCount,
+      updated_at: nowIso(),
+    };
+    memoryMovements[memIdx] = next;
     await logCollaboratorAction({
       movement_id: id,
       actor_user_id: authedUser.id || authedUser.email,
       action_type: 'delete_movement',
       target_id: id,
-      metadata: null
+      metadata: { deletion_reason_word_count: deletionWordCount }
     });
     let notifyResult = { sent: 0, mode: 'none' };
     try {
@@ -10082,7 +10237,14 @@ fastify.delete('/movements/:id', async (request, reply) => {
     } catch {
       // ignore notification failures
     }
-    return reply.code(200).send({ ok: true, notified_count: notifyResult.sent, notification_mode: notifyResult.mode });
+
+    const enriched = (await attachCreatorProfilesToMovements([next]))[0] || next;
+    return reply.code(200).send({
+      ok: true,
+      movement: movementToTombstone(enriched),
+      notified_count: notifyResult.sent,
+      notification_mode: notifyResult.mode,
+    });
   }
 
   if (!hasDatabaseUrl) {
@@ -10113,13 +10275,30 @@ fastify.delete('/movements/:id', async (request, reply) => {
       return reply.code(403).send({ error: 'Not allowed' });
     }
 
-    await pool.query('DELETE FROM movements WHERE id = $1', [id]);
+    if (isMovementDeleted(row)) {
+      const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
+      return reply.code(409).send({ error: 'Movement already deleted', movement: movementToTombstone(enriched) });
+    }
+
+    const updatedRes = await pool.query(
+      `UPDATE movements
+       SET deleted_at = NOW(),
+           deleted_by_user_id = $2,
+           deletion_reason = $3,
+           deletion_reason_word_count = $4,
+           updated_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING *`,
+      [id, String(authedUser.id || authedUser.email || ''), deletionReason, deletionWordCount]
+    );
+    const updated = updatedRes.rows?.[0] || null;
+    if (!updated) return reply.code(500).send({ error: 'Failed to delete movement' });
     await logCollaboratorAction({
       movement_id: id,
       actor_user_id: authedUser.id || authedUser.email,
       action_type: 'delete_movement',
       target_id: id,
-      metadata: null
+      metadata: { deletion_reason_word_count: deletionWordCount }
     });
     let notifyResult = { sent: 0, mode: 'none' };
     try {
@@ -10131,12 +10310,22 @@ fastify.delete('/movements/:id', async (request, reply) => {
     } catch {
       // ignore notification failures
     }
-    return reply.code(200).send({ ok: true, notified_count: notifyResult.sent, notification_mode: notifyResult.mode });
+
+    const enriched = (await attachCreatorProfilesToMovements([updated]))[0] || updated;
+    return reply.code(200).send({
+      ok: true,
+      movement: movementToTombstone(enriched),
+      notified_count: notifyResult.sent,
+      notification_mode: notifyResult.mode,
+    });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to delete movement');
     return reply.code(500).send({ error: 'Failed to delete movement' });
   }
-});
+}
+
+fastify.delete('/movements/:id', handleSoftDeleteMovement);
+fastify.post('/movements/:id/delete', handleSoftDeleteMovement);
 
 fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
@@ -12219,7 +12408,10 @@ fastify.get('/search/movements', { config: { rateLimit: RATE_LIMITS.search } }, 
     };
 
     if (!hasDatabaseUrl) {
-      const filtered = memoryMovements.filter(applyFilters).filter(canViewMovement);
+      const filtered = memoryMovements
+        .filter((m) => !isMovementDeleted(m))
+        .filter(applyFilters)
+        .filter(canViewMovement);
       const scored = filtered
         .map((m) => ({ record: m, score: scoreRecord(m) }))
         .sort((a, b) => b.score - a.score);
@@ -12227,6 +12419,8 @@ fastify.get('/search/movements', { config: { rateLimit: RATE_LIMITS.search } }, 
       const enriched = await attachCreatorProfilesToMovements(page);
       return reply.send({ ok: true, movements: enriched.map(safeMovement) });
     }
+
+    await ensureMovementsTable();
 
     const values = [];
     const where = [];
@@ -12258,6 +12452,8 @@ fastify.get('/search/movements', { config: { rateLimit: RATE_LIMITS.search } }, 
 
     const limitIdx = values.push(limit);
     const offsetIdx = values.push(offset);
+    where.unshift('m.deleted_at IS NULL');
+
     const sql =
       `SELECT m.*
        FROM movements m` +

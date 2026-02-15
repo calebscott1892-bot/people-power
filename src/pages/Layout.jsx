@@ -16,6 +16,11 @@ import { entities } from '@/api/appClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { queryKeys } from '@/lib/queryKeys';
+import {
+  captureRequestDebugInfo,
+  copyRequestDebugInfoToClipboard,
+  getRequestIdForEndpoint,
+} from '@/utils/requestDebug';
 import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
 import IntroScreen from '@/components/home/IntroScreen';
@@ -169,6 +174,15 @@ function LayoutContent({ children }) {
   }, [profileEmail, accessToken]);
 
   const userProfile = userProfileQuery.data;
+    const [avatarLoadError, setAvatarLoadError] = useState(null);
+    const isMobile = useMemo(() => {
+      try {
+        const ua = typeof navigator !== 'undefined' && navigator.userAgent ? String(navigator.userAgent) : '';
+        return /iphone|ipad|ipod|android/i.test(ua);
+      } catch {
+        return false;
+      }
+    }, []);
   const userProfileLoading = userProfileQuery.isLoading;
   const userProfileFetching = userProfileQuery.isFetching;
   const userProfileIsError = userProfileQuery.isError;
@@ -433,12 +447,39 @@ function LayoutContent({ children }) {
                       {/* Avatar flow: local preview → authenticated upload on Save → profile_photo_url persisted via profile update. */}
                       <div className="w-10 h-10 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-full flex items-center justify-center text-white font-black text-sm shadow-lg overflow-hidden">
                         {profilePhotoUrl ? (
-                          <img src={profilePhotoUrl} alt={profileLabel} className="w-full h-full object-cover" />
+                          <img
+                            src={profilePhotoUrl}
+                            alt={profileLabel}
+                            className="w-full h-full object-cover"
+                            onError={() => {
+                              const requestId = getRequestIdForEndpoint('/me/profile');
+                              const record = captureRequestDebugInfo({
+                                endpoint: 'image_load:header_avatar',
+                                request_id: requestId || null,
+                                error_message: `Header avatar failed to load: ${profilePhotoUrl}`,
+                              });
+                              setAvatarLoadError(record);
+                            }}
+                            onLoad={() => setAvatarLoadError(null)}
+                          />
                         ) : (
                           profileInitial
                         )}
                       </div>
                     </Link>
+
+                    {avatarLoadError && (isMobile || isAdmin) ? (
+                      <button
+                        type="button"
+                        className="hidden sm:inline-flex text-[11px] font-black text-amber-900 underline"
+                        onClick={async () => {
+                          const ok = await copyRequestDebugInfoToClipboard(avatarLoadError);
+                          toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
+                        }}
+                      >
+                        Copy image debug
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={handleLogout}

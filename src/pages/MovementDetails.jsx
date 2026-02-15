@@ -124,6 +124,17 @@ function formatShortWhen(iso) {
   }
 }
 
+function countWords(value) {
+  const s = String(value || '').trim();
+  if (!s) return 0;
+  return s.split(/\s+/).filter(Boolean).length;
+}
+
+function looksLikeUuid(value) {
+  const s = String(value || '').trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
 function guessPreviewType(resource) {
   const mime = resource?.mime_type ? String(resource.mime_type).toLowerCase() : '';
   const url = String(resource?.file_url || resource?.url || '').toLowerCase();
@@ -565,6 +576,7 @@ export default function MovementDetails() {
   const [organizerToolsOpen, setOrganizerToolsOpen] = useState(false);
   const [deleteMovementOpen, setDeleteMovementOpen] = useState(false);
   const [deletingMovement, setDeletingMovement] = useState(false);
+  const [deleteReason, setDeleteReason] = useState('');
   const [resourceToDelete, setResourceToDelete] = useState(null);
   const [editMovementOpen, setEditMovementOpen] = useState(false);
   const [editMovementSaving, setEditMovementSaving] = useState(false);
@@ -655,6 +667,8 @@ export default function MovementDetails() {
 
   // Prefer last-known-good data when offline.
   const movement = (allowOfflineMovementCache && offlineMovement) ? offlineMovement : movementData;
+  const isDeletedMovement = !!(movement && (movement.is_deleted || movement.deleted_at));
+  const diagEnabled = String(import.meta?.env?.VITE_ENABLE_DIAG_ENDPOINT || '').trim().toLowerCase() === 'true';
 
   useEffect(() => {
     const currentMovement = (allowOfflineMovementCache && offlineMovement) ? offlineMovement : movementData;
@@ -1990,6 +2004,34 @@ export default function MovementDetails() {
 
   if (earlyView) return earlyView;
 
+  if (isDeletedMovement) {
+    const reason = String(movement?.deletion_reason || '').trim();
+    const when = movement?.deleted_at ? formatShortWhen(movement.deleted_at) : '';
+    return (
+      <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 sm:py-10 space-y-6">
+        <BackButton />
+        <div className="p-5 sm:p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-3">
+          <div className="text-xs font-black text-rose-700 uppercase tracking-wider">Deleted</div>
+          <h1 className="text-2xl sm:text-3xl font-black text-slate-900 break-words">
+            {title || 'Movement'}
+          </h1>
+          <div className="text-sm text-slate-600 font-semibold">
+            This movement was deleted{when ? ` — ${when}` : ''}.
+          </div>
+          {reason ? (
+            <div className="mt-3 p-4 rounded-xl border border-rose-200 bg-rose-50">
+              <div className="text-xs font-black text-rose-800 uppercase tracking-wider">Deletion reason</div>
+              <div className="mt-2 text-sm font-semibold text-slate-900 whitespace-pre-wrap break-words">{reason}</div>
+            </div>
+          ) : null}
+          <div className="text-xs text-slate-500 font-semibold">
+            {movement?.deletion_reason_word_count ? `${movement.deletion_reason_word_count} words` : ''}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 sm:py-10 space-y-6 sm:space-y-8">
       <BackButton />
@@ -3058,10 +3100,30 @@ export default function MovementDetails() {
                 ) : (
                   <ul className="space-y-1">
                     {activityLog.map((a) => (
-                      <li key={a.id} className="text-xs text-slate-700">
-                        <span className="font-bold">{a.actor_user_id}</span> {a.action_type.replace(/_/g, ' ')}
-                        {a.target_id ? ` (target: ${a.target_id})` : ''}
-                        {a.timestamp ? ` — ${new Date(a.timestamp).toLocaleString()}` : ''}
+                      <li key={a.id} className="text-xs text-slate-700 break-words">
+                        {(() => {
+                          const showDiagIds = diagEnabled && isAdmin;
+                          const rawActor = a?.actor_user_id != null ? String(a.actor_user_id) : '';
+                          const actor = rawActor.includes('@') ? maskEmail(rawActor) : 'Collaborator';
+                          const actorDiag = showDiagIds
+                            ? (looksLikeUuid(rawActor) ? rawActor.slice(0, 8) : String(rawActor).slice(0, 24))
+                            : '';
+
+                          const rawTarget = a?.target_id != null ? String(a.target_id) : '';
+                          const targetDiag = showDiagIds && rawTarget
+                            ? (looksLikeUuid(rawTarget) ? rawTarget.slice(0, 8) : rawTarget.slice(0, 24))
+                            : '';
+
+                          return (
+                            <>
+                              <span className="font-bold">{actor}</span>
+                              {actorDiag ? <span className="ml-1 font-mono text-[10px] text-slate-400">({actorDiag})</span> : null}{' '}
+                              {String(a.action_type || '').replace(/_/g, ' ') || 'action'}
+                              {targetDiag ? <span className="ml-1 font-mono text-[10px] text-slate-400">(target {targetDiag})</span> : null}
+                              {a.timestamp ? ` — ${new Date(a.timestamp).toLocaleString()}` : ''}
+                            </>
+                          );
+                        })()}
                       </li>
                     ))}
                   </ul>
@@ -3630,7 +3692,7 @@ export default function MovementDetails() {
               {canDelete ? (
                 <SectionCard title="Danger zone">
                   <p className="text-sm text-slate-600 font-semibold">
-                    Deleting a movement is permanent and should be a last resort.
+                    Deleting a movement removes it from feeds and search. Followers will see a tombstone with your reason.
                   </p>
                   <button
                     type="button"
@@ -3771,30 +3833,55 @@ export default function MovementDetails() {
       </Dialog>
 
       {/* Confirm: delete movement */}
-      <AlertDialog open={deleteMovementOpen} onOpenChange={setDeleteMovementOpen}>
+      <AlertDialog
+        open={deleteMovementOpen}
+        onOpenChange={(open) => {
+          setDeleteMovementOpen(open);
+          if (!open) setDeleteReason('');
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete movement?</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently removes it from the platform and cannot be undone. Verified participants will be notified.
+              This removes it from feeds and search. Followers will see a tombstone with your deletion reason.
             </AlertDialogDescription>
           </AlertDialogHeader>
+
+          <div className="mt-3 space-y-2">
+            <div className="text-sm font-black text-slate-900">Deletion reason (25+ words)</div>
+            <textarea
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              rows={5}
+              placeholder="Explain what happened and why you’re deleting this movement…"
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 font-semibold placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#3A3DFF]/30"
+              disabled={deletingMovement}
+            />
+            <div className="text-xs text-slate-500 font-semibold">
+              {countWords(deleteReason)} / 25 words
+            </div>
+          </div>
+
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deletingMovement}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              disabled={deletingMovement}
+              disabled={deletingMovement || countWords(deleteReason) < 25}
               onClick={async (e) => {
                 e.preventDefault();
                 try {
                   setDeletingMovement(true);
                   const token = session?.access_token ?? null;
                   if (!token) throw new Error('Missing access token. Please log in again.');
-                  await deleteMovement(movementId, { accessToken: token });
+                  const wc = countWords(deleteReason);
+                  if (wc < 25) throw new Error('Deletion reason must be at least 25 words.');
+                  await deleteMovement(movementId, { accessToken: token, reason: deleteReason });
                   queryClient.invalidateQueries({ queryKey: ['movements'] });
                   queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(movementId) });
                   setDeleteMovementOpen(false);
-                  navigate('/');
+                  setDeleteReason('');
+                  navigate(`/movement/${encodeURIComponent(String(movementId))}`, { replace: true });
                 } catch (err) {
                   toast.error(getInteractionErrorMessage(err, 'Failed to delete'));
                 } finally {

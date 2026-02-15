@@ -31,6 +31,7 @@ import { createIncident } from '@/api/incidentsClient';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { upsertNotification } from '@/api/notificationsClient';
 import { queryKeys } from '@/lib/queryKeys';
+import { isDebugUiEnabledForUser } from '@/utils/requestDebug';
 
 function getMovementOwnerEmail(movement) {
   const candidates = [
@@ -80,6 +81,10 @@ export default function CommentSection({ movementId, movement, canModerate = fal
   const isOffline = backendStatus === 'offline';
   const { user, session } = useAuth();
   const queryClient = useQueryClient();
+
+  const isAdmin = isAdminEmail(user?.email);
+  const diagEnabled = isDebugUiEnabledForUser(user?.email);
+  const showDiagIds = diagEnabled && isAdmin;
 
   const safeMovementId = useMemo(
     () => String(movementId ?? movement?.id ?? movement?._id ?? '').trim(),
@@ -384,7 +389,9 @@ export default function CommentSection({ movementId, movement, canModerate = fal
     <div className={`p-4 rounded-xl border border-slate-200 bg-white ${className}`}>
       <div className="flex items-center justify-between">
         <div className="font-black text-slate-900">Comments</div>
-        <div className="text-xs text-slate-500 font-semibold">Movement: {safeMovementId}</div>
+        {showDiagIds ? (
+          <div className="text-xs text-slate-500 font-semibold">Movement: {safeMovementId}</div>
+        ) : null}
       </div>
 
       <div className="mt-2 flex flex-wrap gap-2 items-center">

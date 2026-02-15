@@ -60,13 +60,13 @@ async function readResponseTextSafe(res) {
   }
 }
 
-function dispatchAuthExpired(message) {
+function dispatchAuthExpired(detail) {
   if (typeof window === 'undefined') return;
   try {
     window.dispatchEvent(
       new CustomEvent(AUTH_EXPIRED_EVENT, {
         detail: {
-          message,
+          ...(detail && typeof detail === 'object' ? detail : null),
           at: Date.now(),
         },
       })
@@ -259,12 +259,18 @@ export function installAuthFetch() {
         if (!handlingAuthFailure) {
           handlingAuthFailure = true;
 
-          const message = 'Backend authentication failed (401). Check that requests include an Authorization header and that the backend points at the same Supabase project.';
-          dispatchBackendAuthFailed({ message, url, status: res.status });
-          dispatchAuthExpired(message);
+          const requestId = res?.headers?.get ? res.headers.get('x-request-id') : null;
+          const expired = shouldTreatForbiddenAsAuthFailure(text) || String(text || '').toLowerCase().includes('invalid session');
+          const reason = expired ? 'invalid_session' : 'auth_failed';
+          const message = expired
+            ? 'Your session has expired. Please sign in again.'
+            : 'Backend authentication failed (401). Check that requests include an Authorization header and that the backend points at the same Supabase project.';
+
+          dispatchBackendAuthFailed({ message, url, status: res.status, request_id: requestId || null });
+          dispatchAuthExpired({ message, url, status: res.status, request_id: requestId || null, reason });
 
           try {
-            await onAuthExpired({ message });
+            await onAuthExpired({ message, url, status: res.status, request_id: requestId || null, reason });
           } finally {
             // allow future auth failures to be handled if user signs in again
             setTimeout(() => {

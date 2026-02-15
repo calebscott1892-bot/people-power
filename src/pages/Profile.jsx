@@ -9,9 +9,10 @@ import {
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { format } from 'date-fns';
+import { toast } from "sonner";
 import TagBadge from '../components/shared/TagBadge';
 import { useAuth } from '@/auth/AuthProvider';
-import { fetchMovementsPage, fetchMyFollowedMovements } from '@/api/movementsClient';
+import { fetchMovementsPage, fetchMyFollowedMovementsWithDeleted } from '@/api/movementsClient';
 import EditProfileModal from '../components/profile/EditProfileModal';
 import ShareButton from '@/components/shared/ShareButton';
 import { entities } from '@/api/appClient';
@@ -25,6 +26,11 @@ import FollowListDialog from '@/components/profile/FollowListDialog';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 import FeedbackBugDialog from '@/components/shared/FeedbackBugDialog';
 import { queryKeys } from '@/lib/queryKeys';
+import {
+  captureRequestDebugInfo,
+  copyRequestDebugInfoToClipboard,
+  getRequestIdForEndpoint,
+} from '@/utils/requestDebug';
 
 const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
 
@@ -56,6 +62,17 @@ export default function Profile() {
   const navigate = useNavigate();
   const accessToken = session?.access_token || null;
   const challengesEnabled = !!import.meta?.env?.DEV;
+  const [avatarLoadError, setAvatarLoadError] = useState(null);
+  const [bannerLoadError, setBannerLoadError] = useState(null);
+
+  const isMobile = useMemo(() => {
+    try {
+      const ua = typeof navigator !== 'undefined' && navigator.userAgent ? String(navigator.userAgent) : '';
+      return /iphone|ipad|ipod|android/i.test(ua);
+    } catch {
+      return false;
+    }
+  }, []);
 
   const getHttpStatus = (err) => {
     if (!err) return null;
@@ -176,6 +193,12 @@ export default function Profile() {
     return { ...base };
   }, [userProfile]);
 
+  const bannerUrl = useMemo(() => {
+    const raw = resolvedProfile?.banner_url || '';
+    const trimmed = String(raw || '').trim();
+    return trimmed || '';
+  }, [resolvedProfile]);
+
   const safeHandle = useMemo(() => {
     const emailLocal = String(user?.email || '').split('@')[0]?.toLowerCase() || '';
     const rawUsername = resolvedProfile?.username ? String(resolvedProfile.username) : '';
@@ -196,11 +219,42 @@ export default function Profile() {
     return trimmed || '';
   }, [resolvedProfile]);
 
-  const { data: followedMovements = [] } = useQuery({
+  useEffect(() => {
+    // Best-effort preload the banner image so we can log failures even though it renders as a CSS background.
+    setBannerLoadError(null);
+    if (!bannerUrl) return;
+
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      setBannerLoadError(null);
+    };
+    img.onerror = () => {
+      if (cancelled) return;
+      const requestId = getRequestIdForEndpoint('/me/profile');
+      const record = captureRequestDebugInfo({
+        endpoint: 'image_load:banner',
+        request_id: requestId || null,
+        error_message: `Banner failed to load: ${bannerUrl}`,
+      });
+      setBannerLoadError(record);
+    };
+    img.src = bannerUrl;
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bannerUrl]);
+
+  const { data: followedMovementsData } = useQuery({
     queryKey: queryKeys.movements.followed(user?.email),
-    queryFn: async () => fetchMyFollowedMovements({ accessToken }),
+    queryFn: async () => fetchMyFollowedMovementsWithDeleted({ accessToken }),
     enabled: !!user?.email && !!accessToken
   });
+
+  const followedMovements = followedMovementsData?.movements || [];
+  const deletedFollowedMovements = followedMovementsData?.deleted_movements || [];
 
   const { data: userStats } = useQuery({
     queryKey: ['userChallengeStats', user?.email],
@@ -353,6 +407,23 @@ export default function Profile() {
         ) : (
           <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
+
+        {bannerLoadError && (isMobile || isAdmin) ? (
+          <div className="px-4 sm:px-8 py-2 bg-amber-50 text-amber-900 text-xs font-semibold flex items-center justify-between gap-2">
+            <span className="truncate">Banner image failed to load.</span>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-8 px-3 text-xs font-black"
+              onClick={async () => {
+                const ok = await copyRequestDebugInfoToClipboard(bannerLoadError);
+                toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
+              }}
+            >
+              Tap to copy debug info
+            </Button>
+          </div>
+        ) : null}
         
         {/* Profile Info */}
         <div className="px-4 sm:px-8 pb-6 sm:pb-8">
@@ -360,7 +431,21 @@ export default function Profile() {
             <div className="flex items-start gap-4 sm:gap-6">
               <div className="w-24 h-24 sm:w-32 sm:h-32 -mt-12 sm:-mt-16 bg-white rounded-full shadow-2xl flex items-center justify-center border-4 border-white overflow-hidden">
                 {profilePhotoUrl ? (
-                  <img src={profilePhotoUrl} alt="" className="w-full h-full rounded-full object-cover" />
+                  <img
+                    src={profilePhotoUrl}
+                    alt=""
+                    className="w-full h-full rounded-full object-cover"
+                    onError={() => {
+                      const requestId = getRequestIdForEndpoint('/me/profile');
+                      const record = captureRequestDebugInfo({
+                        endpoint: 'image_load:avatar',
+                        request_id: requestId || null,
+                        error_message: `Avatar failed to load: ${profilePhotoUrl}`,
+                      });
+                      setAvatarLoadError(record);
+                    }}
+                    onLoad={() => setAvatarLoadError(null)}
+                  />
                 ) : (
                   <div className="w-20 h-20 sm:w-28 sm:h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
                     <span className="text-3xl sm:text-5xl font-black text-slate-900">
@@ -369,6 +454,22 @@ export default function Profile() {
                   </div>
                 )}
               </div>
+
+              {avatarLoadError && (isMobile || isAdmin) ? (
+                <div className="mt-2 text-[11px] font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+                  <span className="truncate">Avatar failed to load.</span>
+                  <button
+                    type="button"
+                    className="font-black underline"
+                    onClick={async () => {
+                      const ok = await copyRequestDebugInfoToClipboard(avatarLoadError);
+                      toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
+                    }}
+                  >
+                    Tap to copy debug info
+                  </button>
+                </div>
+              ) : null}
               <div className="pt-2 sm:pt-4 flex-1">
                 <h1 className="text-2xl sm:text-3xl font-black text-slate-900 mb-1">
                   {resolvedProfile?.display_name || user?.full_name || 'Anonymous User'}
@@ -672,7 +773,7 @@ export default function Profile() {
       </motion.div>
 
       {/* Following */}
-      {followedMovements.length > 0 && (
+      {(followedMovements.length > 0 || deletedFollowedMovements.length > 0) && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -694,9 +795,35 @@ export default function Profile() {
                     <h3 className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
                       {movement.title}
                     </h3>
-              <div className="text-sm text-slate-500 font-bold">
-                by {getMovementAuthorLabel(movement)}
+                    <div className="text-sm text-slate-500 font-bold">
+                      by {getMovementAuthorLabel(movement)}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
+                </div>
+              </Link>
+            ))}
+
+            {deletedFollowedMovements.length > 0 ? (
+              <div className="p-6 border-t-2 border-slate-100 bg-slate-50">
+                <div className="text-xs font-black text-slate-600 uppercase tracking-wider">Deleted</div>
               </div>
+            ) : null}
+
+            {deletedFollowedMovements.map((movement) => (
+              <Link
+                key={movement.id}
+                to={`/movement/${encodeURIComponent(String(movement.id))}`}
+                className="block p-6 hover:bg-slate-50 transition-colors group"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <h3 className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
+                      {movement.title || 'Deleted movement'}
+                    </h3>
+                    <div className="text-sm text-slate-500 font-bold">
+                      Deleted — {movement.deletion_reason_word_count ? `${movement.deletion_reason_word_count} words` : 'reason provided'}
+                    </div>
                   </div>
                   <ChevronRight className="w-6 h-6 text-slate-400 group-hover:text-[#3A3DFF] transition-colors flex-shrink-0" strokeWidth={3} />
                 </div>

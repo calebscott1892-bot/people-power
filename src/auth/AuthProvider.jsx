@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
 import toast from 'react-hot-toast';
-const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
 import { SERVER_BASE } from '@/api/serverBase';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { upsertMyPublicKey } from '@/api/keysClient';
@@ -16,6 +15,8 @@ import { queryKeys } from '@/lib/queryKeys';
 
 // --- Backend user sync for persistence proof ---
 import { syncUserWithBackend } from '@/api/usersClient';
+
+const isProof = import.meta.env.VITE_C4_PROOF_PACK === '1';
 
 
 // Move sessionRef to top-level so it can be exported and used by getAccessToken
@@ -48,9 +49,7 @@ export function AuthProvider({ children }) {
 
   const isAuthReady = !loading;
 
-  useEffect(() => {
-    sessionRef.current = session;
-  }, [session]);
+  const handlingSessionExpiredRef = useRef(false);
 
   const applySession = useCallback(
     (nextSession) => {
@@ -60,6 +59,69 @@ export function AuthProvider({ children }) {
     },
     []
   );
+
+  const forceRelogin = useCallback(
+    async ({ message, request_id } = {}) => {
+      if (handlingSessionExpiredRef.current) return;
+      handlingSessionExpiredRef.current = true;
+      try {
+        const msg = String(message || '').trim() || 'Your session has expired. Please sign in again.';
+        try {
+          sessionStorage.setItem('pp_session_expired_toast', msg);
+        } catch {
+          // ignore
+        }
+
+        try {
+          toast.error(msg);
+        } catch {
+          // ignore
+        }
+
+        // Best-effort: clear local app state immediately so spinners stop.
+        applySession(null);
+        setServerStaffRole(null);
+        try {
+          queryClient.clear();
+        } catch {
+          // ignore
+        }
+
+        // Supabase sign-out (clears persisted session).
+        try {
+          const supabase = getSupabaseClient();
+          await supabase?.auth?.signOut?.();
+        } catch {
+          // ignore
+        }
+
+        // Route to login.
+        try {
+          const path = typeof window !== 'undefined' ? String(window.location?.pathname || '') : '';
+          if (path !== '/login') {
+            navigate('/login', {
+              replace: true,
+              state: {
+                reason: 'session_expired',
+                request_id: request_id || null,
+              },
+            });
+          }
+        } catch {
+          // ignore
+        }
+      } finally {
+        setTimeout(() => {
+          handlingSessionExpiredRef.current = false;
+        }, 1000);
+      }
+    },
+    [applySession, navigate, queryClient]
+  );
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   const refreshProofUser = useCallback(async () => {
     setLoading(true);
@@ -170,9 +232,16 @@ export function AuthProvider({ children }) {
         if (error) throw error;
         return data?.session ?? null;
       },
-      onAuthExpired: async ({ message }) => {
+      onAuthExpired: async ({ message, reason, request_id } = {}) => {
+        // Only force a logout/navigation for real expired sessions.
+        if (reason === 'invalid_session') {
+          await forceRelogin({ message, request_id });
+          return;
+        }
+
+        // Otherwise, show a toast but keep session intact (helps local-dev debugging).
         try {
-          const msg = String(message || '').trim() || 'Your session has expired. Please sign in again.';
+          const msg = String(message || '').trim() || 'Authentication failed. Please try again.';
           sessionStorage.setItem('pp_session_expired_toast', msg);
           try {
             toast.error(msg);
@@ -182,16 +251,24 @@ export function AuthProvider({ children }) {
         } catch {
           // ignore
         }
-
-        // IMPORTANT: do not force sign-out or navigation here.
-        // Backend 401s during local dev are frequently caused by missing Authorization headers
-        // or a Supabase URL/key mismatch. Keeping the Supabase session intact makes debugging
-        // much easier and prevents instant logout loops.
       },
     });
 
     installAuthFetch();
-  }, [navigate]);
+  }, [forceRelogin]);
+
+  // Also listen for the global auth-expired event (emitted by httpFetch/authFetch).
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handler = (event) => {
+      const detail = event?.detail;
+      if (detail?.reason === 'invalid_session') {
+        forceRelogin({ message: detail?.message, request_id: detail?.request_id });
+      }
+    };
+    window.addEventListener('pp:auth-expired', handler);
+    return () => window.removeEventListener('pp:auth-expired', handler);
+  }, [forceRelogin]);
 
   useEffect(() => {
     const accessToken = session?.access_token ? String(session.access_token) : null;

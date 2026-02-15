@@ -28,6 +28,11 @@ import FollowListDialog from '@/components/profile/FollowListDialog';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 import { queryKeys } from '@/lib/queryKeys';
+import {
+  captureRequestDebugInfo,
+  copyRequestDebugInfoToClipboard,
+  getRequestIdForEndpoint,
+} from '@/utils/requestDebug';
 
 function getMovementAuthorLabel(movement) {
   const displayName = String(
@@ -55,9 +60,20 @@ export default function UserProfile() {
   const navigate = useNavigate();
   const { email: emailParam, username: usernameParam } = useParams();
   const [searchParams] = useSearchParams();
-  const { user, session } = useAuth();
+  const { user, session, isAdmin } = useAuth();
   const accessToken = session?.access_token || null;
   const challengesEnabled = !!import.meta?.env?.DEV;
+  const [avatarLoadError, setAvatarLoadError] = useState(null);
+  const [bannerLoadError, setBannerLoadError] = useState(null);
+
+  const isMobile = useMemo(() => {
+    try {
+      const ua = typeof navigator !== 'undefined' && navigator.userAgent ? String(navigator.userAgent) : '';
+      return /iphone|ipad|ipod|android/i.test(ua);
+    } catch {
+      return false;
+    }
+  }, []);
   const profileEmail = useMemo(() => {
     const fromParam = emailParam ? String(emailParam) : '';
     const fromQuery = searchParams?.get('email') ? String(searchParams.get('email')) : '';
@@ -376,6 +392,38 @@ export default function UserProfile() {
     return trimmed || '';
   }, [userProfile]);
 
+  const bannerUrl = useMemo(() => {
+    const raw = userProfile?.banner_url || '';
+    const trimmed = String(raw || '').trim();
+    return trimmed || '';
+  }, [userProfile]);
+
+  useEffect(() => {
+    // Best-effort preload banner to detect failures (it renders as CSS background).
+    setBannerLoadError(null);
+    if (!bannerUrl) return;
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      setBannerLoadError(null);
+    };
+    img.onerror = () => {
+      if (cancelled) return;
+      const requestId = getRequestIdForEndpoint('/me/profile');
+      const record = captureRequestDebugInfo({
+        endpoint: 'image_load:banner',
+        request_id: requestId || null,
+        error_message: `Banner failed to load: ${bannerUrl}`,
+      });
+      setBannerLoadError(record);
+    };
+    img.src = bannerUrl;
+    return () => {
+      cancelled = true;
+    };
+  }, [bannerUrl]);
+
   if (profileLoading) {
     return (
       <div className="flex flex-col items-center justify-center py-32">
@@ -446,13 +494,44 @@ export default function UserProfile() {
         ) : (
           <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
+
+        {bannerLoadError && (isMobile || isAdmin) ? (
+          <div className="px-4 sm:px-8 py-2 bg-amber-50 text-amber-900 text-xs font-semibold flex items-center justify-between gap-2">
+            <span className="truncate">Banner image failed to load.</span>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-8 px-3 text-xs font-black"
+              onClick={async () => {
+                const ok = await copyRequestDebugInfoToClipboard(bannerLoadError);
+                toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
+              }}
+            >
+              Tap to copy debug info
+            </Button>
+          </div>
+        ) : null}
         
         <div className="px-4 sm:px-8 pb-6 sm:pb-8">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6 mb-6">
             <div className="flex items-start gap-4 sm:gap-6">
               <div className="w-24 h-24 sm:w-32 sm:h-32 -mt-12 sm:-mt-16 bg-white rounded-full shadow-2xl flex items-center justify-center border-4 border-white overflow-hidden">
                 {profilePhotoUrl ? (
-                  <img src={profilePhotoUrl} alt="" className="w-full h-full rounded-full object-cover" />
+                  <img
+                    src={profilePhotoUrl}
+                    alt=""
+                    className="w-full h-full rounded-full object-cover"
+                    onError={() => {
+                      const requestId = getRequestIdForEndpoint('/me/profile');
+                      const record = captureRequestDebugInfo({
+                        endpoint: 'image_load:avatar',
+                        request_id: requestId || null,
+                        error_message: `Avatar failed to load: ${profilePhotoUrl}`,
+                      });
+                      setAvatarLoadError(record);
+                    }}
+                    onLoad={() => setAvatarLoadError(null)}
+                  />
                 ) : (
                   <div className="w-20 h-20 sm:w-28 sm:h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
                     <span className="text-3xl sm:text-5xl font-black text-slate-900">
@@ -461,6 +540,22 @@ export default function UserProfile() {
                   </div>
                 )}
               </div>
+
+              {avatarLoadError && (isMobile || isAdmin) ? (
+                <div className="mt-2 text-[11px] font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+                  <span className="truncate">Avatar failed to load.</span>
+                  <button
+                    type="button"
+                    className="font-black underline"
+                    onClick={async () => {
+                      const ok = await copyRequestDebugInfoToClipboard(avatarLoadError);
+                      toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
+                    }}
+                  >
+                    Tap to copy debug info
+                  </button>
+                </div>
+              ) : null}
               <div className="pt-2 sm:pt-4">
                 <h1 className="text-2xl sm:text-3xl font-black text-slate-900 mb-1">
                   {userProfile.display_name || 'Anonymous'}

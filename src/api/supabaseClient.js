@@ -29,6 +29,56 @@ const supabaseClient = supabaseConfigError
       },
     });
 
+let refreshInFlight = null;
+
+function isSessionNearExpiry(session, withinSeconds = 60) {
+  const expiresAt = session?.expires_at;
+  if (!expiresAt) return false;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  return Number(expiresAt) - nowSeconds <= withinSeconds;
+}
+
+async function refreshOnce() {
+  if (!supabaseClient) return null;
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const { data, error } = await supabaseClient.auth.refreshSession();
+    if (error) throw error;
+    return data?.session ?? null;
+  })();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
+}
+
+// Central token helper used by API clients.
+// - Uses persisted session from Supabase.
+// - Refreshes when close to expiry (mobile background/resume).
+// - Can force refresh when recovering from 401s.
+export async function getValidAccessToken({ withinSeconds = 60, forceRefresh = false } = {}) {
+  if (!supabaseClient) return null;
+
+  const { data } = await supabaseClient.auth.getSession();
+  const session = data?.session ?? null;
+  if (!session) return null;
+
+  const shouldRefresh = forceRefresh || isSessionNearExpiry(session, withinSeconds);
+  if (!shouldRefresh) {
+    return session?.access_token ? String(session.access_token) : null;
+  }
+
+  try {
+    const refreshed = await refreshOnce();
+    if (refreshed?.access_token) return String(refreshed.access_token);
+  } catch {
+    // fall back to current token; caller can handle 401 + re-login flow
+  }
+
+  return session?.access_token ? String(session.access_token) : null;
+}
+
 // NOTE: Supabase dashboard configuration required for email flows:
 // - Auth > URL Configuration: set a correct Site URL (e.g. https://peoplepower.app)
 // - Add Redirect URLs for (at least):

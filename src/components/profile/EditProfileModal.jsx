@@ -21,6 +21,7 @@ import { toastFriendlyError } from '@/utils/toastErrors';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_UPLOAD_BYTES, MIN_IMAGE_BYTES, validateFileUpload } from '@/utils/uploadLimits';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { queryKeys } from '@/lib/queryKeys';
+import { getValidAccessToken } from '@/api/supabaseClient';
 import {
   isDebugUiEnabledForUser,
   getLastRequestDebugInfo,
@@ -45,6 +46,21 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const { session } = useAuth();
   const photoInputRef = useRef(null);
   const debugEnabled = isDebugUiEnabledForUser(userEmail);
+  const isMobile = React.useMemo(() => {
+    try {
+      const ua = typeof navigator !== 'undefined' && navigator.userAgent ? String(navigator.userAgent) : '';
+      return /iphone|ipad|ipod|android/i.test(ua);
+    } catch {
+      return false;
+    }
+  }, []);
+  const mountedRef = useRef(true);
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [debugInfo, setDebugInfo] = useState(null);
   const [displayName, setDisplayName] = useState(profile?.display_name || '');
   const [username, setUsername] = useState(profile?.username || '');
@@ -54,6 +70,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [skillInput, setSkillInput] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadingBanner, setUploadingBanner] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [avatarUploadProgress, setAvatarUploadProgress] = useState(0);
   const [bannerUploadProgress, setBannerUploadProgress] = useState(0);
   const [photoUrl, setPhotoUrl] = useState(profile?.profile_photo_url || '');
@@ -99,6 +116,21 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [catchmentRadius, setCatchmentRadius] = useState(profile?.catchment_radius_km || 50);
   const [exporting, setExporting] = useState(false);
   const queryClient = useQueryClient();
+
+  // Hard-stop any "Saving…" state if we detect a real session expiry.
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handler = (event) => {
+      const detail = event?.detail;
+      if (detail?.reason === 'invalid_session') {
+        setSaving(false);
+        setUploading(false);
+        setUploadingBanner(false);
+      }
+    };
+    window.addEventListener('pp:auth-expired', handler);
+    return () => window.removeEventListener('pp:auth-expired', handler);
+  }, []);
 
   React.useEffect(() => {
     if (!open) return;
@@ -153,7 +185,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
 
   const updateProfileMutation = useMutation({
     mutationFn: async (data) => {
-      const accessToken = session?.access_token ? String(session.access_token) : null;
+      const accessToken = (await getValidAccessToken()) || (session?.access_token ? String(session.access_token) : null);
       if (!accessToken) throw new Error('Please sign in to update your profile');
 
       const updated = await upsertMyProfile(data, { accessToken, timeoutMs: 30_000 });
@@ -199,7 +231,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         return;
       }
       toastFriendlyError(err, 'Failed to update profile');
-      if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
+      if (debugEnabled || isMobile) setDebugInfo(getLastRequestDebugInfo());
     }
   });
 
@@ -257,7 +289,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     setUploadingBanner(true);
     setBannerUploadProgress(0);
     try {
-      const accessToken = session?.access_token ? String(session.access_token) : null;
+      const accessToken = (await getValidAccessToken()) || (session?.access_token ? String(session.access_token) : null);
       if (!accessToken) throw new Error('Please sign in to upload an image');
 
       // Banner upload flow:
@@ -280,7 +312,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       logError(e, 'Profile banner upload failed');
       toastFriendlyError(e, 'Failed to upload banner');
       setPendingBannerObjectKey(null);
-      if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
+      if (debugEnabled || isMobile) setDebugInfo(getLastRequestDebugInfo());
     } finally {
       setUploadingBanner(false);
       setBannerUploadProgress(0);
@@ -315,56 +347,61 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       writePrivateUserCoordinates(userEmail, privateCoords);
     }
 
-    let nextPhotoRef = photoUrl;
-    if (pendingPhotoFile) {
-      setUploading(true);
-      setAvatarUploadProgress(0);
-      try {
-        const accessToken = session?.access_token ? String(session.access_token) : null;
-        if (!accessToken) throw new Error('Please sign in to upload an image');
-        const uploaded = await uploadAvatar(pendingPhotoFile, {
-          accessToken,
-          allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
-          timeoutMs: 30_000,
-          onProgress: (pct) => setAvatarUploadProgress(Number.isFinite(pct) ? pct : 0),
-        });
-        const uploadedUrl = uploaded?.url ? String(uploaded.url) : '';
-        const objectKey = uploaded?.path ? String(uploaded.path) : '';
-        if (!objectKey) throw new Error('Upload succeeded but no object key returned');
-        nextPhotoRef = objectKey;
-        if (uploadedUrl) setPhotoUrl(uploadedUrl);
-        setPendingPhotoFile(null);
-      } catch (e) {
-        logError(e, 'Profile photo upload failed');
-        toastFriendlyError(e, 'Failed to upload photo');
-        setUploading(false);
+    setSaving(true);
+    try {
+      let nextPhotoRef = photoUrl;
+      if (pendingPhotoFile) {
+        setUploading(true);
         setAvatarUploadProgress(0);
-        if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
-        return;
-      } finally {
-        setUploading(false);
-        setAvatarUploadProgress(0);
+        try {
+          const accessToken = (await getValidAccessToken()) || (session?.access_token ? String(session.access_token) : null);
+          if (!accessToken) throw new Error('Please sign in to upload an image');
+          const uploaded = await uploadAvatar(pendingPhotoFile, {
+            accessToken,
+            allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
+            timeoutMs: 30_000,
+            onProgress: (pct) => setAvatarUploadProgress(Number.isFinite(pct) ? pct : 0),
+          });
+          const uploadedUrl = uploaded?.url ? String(uploaded.url) : '';
+          const objectKey = uploaded?.path ? String(uploaded.path) : '';
+          if (!objectKey) throw new Error('Upload succeeded but no object key returned');
+          nextPhotoRef = objectKey;
+          if (uploadedUrl) setPhotoUrl(uploadedUrl);
+          setPendingPhotoFile(null);
+        } catch (err) {
+          logError(err, 'Profile photo upload failed');
+          toastFriendlyError(err, 'Failed to upload photo');
+          if (debugEnabled || isMobile) setDebugInfo(getLastRequestDebugInfo());
+          throw err;
+        } finally {
+          setUploading(false);
+          setAvatarUploadProgress(0);
+        }
       }
+
+      const nextBannerRef = pendingBannerObjectKey || bannerUrl;
+
+      await updateProfileMutation.mutateAsync({
+        display_name: displayName.trim(),
+        username: normalizedUsername || displayName.trim().toLowerCase().replace(/\s+/g, ''),
+        bio: bio.trim(),
+        profile_photo_url: nextPhotoRef,
+        banner_url: nextBannerRef,
+        banner_offset_y: bannerOffsetY,
+        is_private: isPrivate,
+        skills,
+        ai_features_enabled: aiEnabled,
+        movement_group_opt_out: movementGroupOptOut,
+        email_notifications_opt_in: emailNotificationsOptIn,
+        // Store only coarse location fields (city/region/country), never raw GPS.
+        location: sanitizePublicLocation(location),
+        catchment_radius_km: catchmentRadius
+      });
+    } catch {
+      // Errors/toasts are handled in mutation onError or upload catch above.
+    } finally {
+      if (mountedRef.current) setSaving(false);
     }
-
-    const nextBannerRef = pendingBannerObjectKey || bannerUrl;
-
-    updateProfileMutation.mutate({
-      display_name: displayName.trim(),
-      username: normalizedUsername || displayName.trim().toLowerCase().replace(/\s+/g, ''),
-      bio: bio.trim(),
-      profile_photo_url: nextPhotoRef,
-      banner_url: nextBannerRef,
-      banner_offset_y: bannerOffsetY,
-      is_private: isPrivate,
-      skills,
-      ai_features_enabled: aiEnabled,
-      movement_group_opt_out: movementGroupOptOut,
-      email_notifications_opt_in: emailNotificationsOptIn,
-      // Store only coarse location fields (city/region/country), never raw GPS.
-      location: sanitizePublicLocation(location),
-      catchment_radius_km: catchmentRadius
-    });
   };
 
   const handleDownloadMyData = async () => {
@@ -802,10 +839,10 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
             </Button>
             <Button
               type="submit"
-              disabled={updateProfileMutation.isPending || uploading || uploadingBanner}
+              disabled={saving || updateProfileMutation.isPending || uploading || uploadingBanner}
               className="flex-1 bg-[#3A3DFF] hover:bg-[#2A2DDD] font-bold rounded-xl"
             >
-              {updateProfileMutation.isPending ? (
+              {saving || updateProfileMutation.isPending ? (
                 <span className="inline-flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   Saving…
@@ -826,7 +863,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
             </Button>
           </div>
 
-          {debugEnabled && debugInfo ? (
+          {(debugEnabled || isMobile) && debugInfo ? (
             <div className="pt-2">
               <button
                 type="button"
