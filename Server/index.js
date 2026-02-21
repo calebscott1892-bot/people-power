@@ -3751,7 +3751,7 @@ function countWords(value) {
 }
 
 function isMovementDeleted(movement) {
-  return !!(movement && typeof movement === 'object' && movement.deleted_at);
+  return !!(movement && typeof movement === 'object' && (movement.deleted_at || movement.is_deleted === true));
 }
 
 function movementToTombstone(record) {

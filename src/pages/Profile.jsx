@@ -92,7 +92,7 @@ export default function Profile() {
   }, [authUser, authLoading]);
 
   const { data: myMovementsData } = useQuery({
-    queryKey: queryKeys.movements.mine(user?.email),
+    queryKey: queryKeys.movements.mineWithDeleted(user?.email),
     queryFn: async () => {
       return fetchMyMovementsWithDeleted({
         limit: 200,
@@ -120,13 +120,16 @@ export default function Profile() {
     enabled: !!user?.email && !!accessToken
   });
 
+  const isDeletedMovement = (m) =>
+    !!(m && typeof m === 'object' && (m.is_deleted === true || m.deleted_at));
+
   const myMovements = useMemo(() => {
     const list = Array.isArray(myMovementsData)
       ? myMovementsData
       : (myMovementsData && typeof myMovementsData === 'object' && Array.isArray(myMovementsData.movements)
           ? myMovementsData.movements
           : []);
-    return list.filter((m) => !(m && typeof m === 'object' && (m.is_deleted === true || m.deleted_at)));
+    return list.filter((m) => !isDeletedMovement(m));
   }, [myMovementsData]);
 
   const myDeletedMovements = useMemo(() => {
@@ -269,7 +272,9 @@ export default function Profile() {
     enabled: !!user?.email && !!accessToken
   });
 
-  const followedMovements = Array.isArray(followedMovementsData?.movements) ? followedMovementsData.movements : [];
+  const followedMovements = (Array.isArray(followedMovementsData?.movements)
+    ? followedMovementsData.movements
+    : []).filter((m) => !isDeletedMovement(m));
   const deletedFollowedMovements = Array.isArray(followedMovementsData?.deleted_movements) ? followedMovementsData.deleted_movements : [];
 
   const { data: userStats } = useQuery({

@@ -39,8 +39,12 @@ export const queryKeys = {
     feed: () => ['movements', 'feed'],
     leaderboard: () => ['movements', 'leaderboard'],
 
-    mine: (email) => ['myMovements', normalizeEmail(email)],
-    followed: (email) => ['followedMovements', normalizeEmail(email)],
+    // NOTE: Keep movement lists under the 'movements' prefix so that broad
+    // invalidations like queryClient.invalidateQueries({ queryKey: ['movements'] })
+    // refresh Profile lists after deletes.
+    mine: (email) => ['movements', 'mine', normalizeEmail(email)],
+    mineWithDeleted: (email) => ['movements', 'mine', normalizeEmail(email), 'withDeleted'],
+    followed: (email) => ['movements', 'followed', normalizeEmail(email)],
     byUser: (email) => ['userMovements', normalizeEmail(email)],
     participated: (email) => ['participatedMovements', normalizeEmail(email)],
 
