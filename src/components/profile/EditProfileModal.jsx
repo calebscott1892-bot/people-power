@@ -27,6 +27,8 @@ import {
   getLastRequestDebugInfo,
   copyRequestDebugInfoToClipboard,
 } from '@/utils/requestDebug';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 import {
   Dialog,
   DialogContent,
@@ -46,14 +48,6 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const { session } = useAuth();
   const photoInputRef = useRef(null);
   const debugEnabled = isDebugUiEnabledForUser(userEmail);
-  const isMobile = React.useMemo(() => {
-    try {
-      const ua = typeof navigator !== 'undefined' && navigator.userAgent ? String(navigator.userAgent) : '';
-      return /iphone|ipad|ipod|android/i.test(ua);
-    } catch {
-      return false;
-    }
-  }, []);
   const mountedRef = useRef(true);
   React.useEffect(() => {
     mountedRef.current = true;
@@ -116,6 +110,9 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [catchmentRadius, setCatchmentRadius] = useState(profile?.catchment_radius_km || 50);
   const [exporting, setExporting] = useState(false);
   const queryClient = useQueryClient();
+
+  const pendingGuard = usePendingGuard('edit-profile', { timeoutMs: 20_000 });
+  const lastBannerFileRef = useRef(null);
 
   // Hard-stop any "Saving…" state if we detect a real session expiry.
   React.useEffect(() => {
@@ -188,7 +185,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const accessToken = (await getValidAccessToken()) || (session?.access_token ? String(session.access_token) : null);
       if (!accessToken) throw new Error('Please sign in to update your profile');
 
-      const updated = await upsertMyProfile(data, { accessToken, timeoutMs: 30_000 });
+      const updated = await upsertMyProfile(data, { accessToken, timeoutMs: 20_000 });
 
       if (allowLocalProfileFallback) {
         // Keep local cache in sync for migration-mode reads.
@@ -231,7 +228,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         return;
       }
       toastFriendlyError(err, 'Failed to update profile');
-      if (debugEnabled || isMobile) setDebugInfo(getLastRequestDebugInfo());
+      if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
     }
   });
 
@@ -262,9 +259,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     setPendingPhotoFile(file);
   };
 
-  const handleBannerUpload = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
+  const runBannerUpload = async (file) => {
     if (!file) return;
     const validationError = validateFileUpload({
       file,
@@ -276,6 +271,8 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       toast.error(validationError);
       return;
     }
+
+    lastBannerFileRef.current = file;
 
     const preview = URL.createObjectURL(file);
     if (bannerPreviewUrl) {
@@ -292,14 +289,10 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const accessToken = (await getValidAccessToken()) || (session?.access_token ? String(session.access_token) : null);
       if (!accessToken) throw new Error('Please sign in to upload an image');
 
-      // Banner upload flow:
-      // - Uploads file via POST /uploads (kind=banner) in src/api/uploadsClient.js
-      // - Persists returned URL into user_profiles.banner_url via POST /me/profile (upsertMyProfile)
-      // - Banner renders on Profile/UserProfile as a CSS background image
       const uploaded = await uploadBanner(file, {
         accessToken,
         allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
-        timeoutMs: 30_000,
+        timeoutMs: 20_000,
         onProgress: (pct) => setBannerUploadProgress(Number.isFinite(pct) ? pct : 0),
       });
       const nextUrl = uploaded?.url ? String(uploaded.url) : '';
@@ -308,11 +301,12 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       if (nextUrl) setBannerUrl(nextUrl);
       setPendingBannerObjectKey(objectKey);
       setBannerOffsetY(0);
+      lastBannerFileRef.current = null;
     } catch (e) {
       logError(e, 'Profile banner upload failed');
       toastFriendlyError(e, 'Failed to upload banner');
       setPendingBannerObjectKey(null);
-      if (debugEnabled || isMobile) setDebugInfo(getLastRequestDebugInfo());
+      if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
     } finally {
       setUploadingBanner(false);
       setBannerUploadProgress(0);
@@ -327,8 +321,14 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleBannerUpload = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    await runBannerUpload(file);
+  };
+
+  const runSave = async () => {
     setUsernameError('');
 
     if (!displayName.trim()) {
@@ -342,7 +342,6 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       return;
     }
 
-    // NOTE: Store city-level/approximate location only (no exact GPS) in the profile; precise coords stay on-device for local discovery.
     if (userEmail && privateCoords?.lat != null && privateCoords?.lng != null) {
       writePrivateUserCoordinates(userEmail, privateCoords);
     }
@@ -359,7 +358,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
           const uploaded = await uploadAvatar(pendingPhotoFile, {
             accessToken,
             allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
-            timeoutMs: 30_000,
+            timeoutMs: 20_000,
             onProgress: (pct) => setAvatarUploadProgress(Number.isFinite(pct) ? pct : 0),
           });
           const uploadedUrl = uploaded?.url ? String(uploaded.url) : '';
@@ -371,7 +370,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         } catch (err) {
           logError(err, 'Profile photo upload failed');
           toastFriendlyError(err, 'Failed to upload photo');
-          if (debugEnabled || isMobile) setDebugInfo(getLastRequestDebugInfo());
+          if (debugEnabled) setDebugInfo(getLastRequestDebugInfo());
           throw err;
         } finally {
           setUploading(false);
@@ -393,15 +392,54 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
         ai_features_enabled: aiEnabled,
         movement_group_opt_out: movementGroupOptOut,
         email_notifications_opt_in: emailNotificationsOptIn,
-        // Store only coarse location fields (city/region/country), never raw GPS.
         location: sanitizePublicLocation(location),
-        catchment_radius_km: catchmentRadius
+        catchment_radius_km: catchmentRadius,
       });
     } catch {
       // Errors/toasts are handled in mutation onError or upload catch above.
     } finally {
       if (mountedRef.current) setSaving(false);
     }
+  };
+
+  React.useEffect(() => {
+    pendingGuard.watch(saving || uploading || uploadingBanner || updateProfileMutation.isPending, {
+      retry: async () => {
+        if (pendingPhotoFile) {
+          await runSave();
+          return;
+        }
+        if (lastBannerFileRef.current) {
+          await runBannerUpload(lastBannerFileRef.current);
+          return;
+        }
+        await runSave();
+      },
+      onTimeout: () => {
+        setSaving(false);
+        setUploading(false);
+        setUploadingBanner(false);
+        showPendingTimeoutToast({
+          retry: async () => {
+            pendingGuard.stop();
+            if (pendingPhotoFile) {
+              await runSave();
+              return;
+            }
+            if (lastBannerFileRef.current) {
+              await runBannerUpload(lastBannerFileRef.current);
+              return;
+            }
+            await runSave();
+          },
+        });
+      },
+    });
+  }, [pendingGuard, saving, uploading, uploadingBanner, pendingPhotoFile, updateProfileMutation.isPending]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    await runSave();
   };
 
   const handleDownloadMyData = async () => {
@@ -863,7 +901,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
             </Button>
           </div>
 
-          {(debugEnabled || isMobile) && debugInfo ? (
+          {debugEnabled && debugInfo ? (
             <div className="pt-2">
               <button
                 type="button"

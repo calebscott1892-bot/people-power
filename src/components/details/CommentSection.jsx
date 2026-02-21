@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../../utils/backendStatus';
 import { Link } from 'react-router-dom';
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -32,6 +32,10 @@ import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { upsertNotification } from '@/api/notificationsClient';
 import { queryKeys } from '@/lib/queryKeys';
 import { isDebugUiEnabledForUser } from '@/utils/requestDebug';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
+import { captureRequestDebugInfo } from '@/utils/requestDebug';
+import { newIdempotencyKey } from '@/utils/idempotencyKey';
 
 function getMovementOwnerEmail(movement) {
   const candidates = [
@@ -81,6 +85,12 @@ export default function CommentSection({ movementId, movement, canModerate = fal
   const isOffline = backendStatus === 'offline';
   const { user, session } = useAuth();
   const queryClient = useQueryClient();
+
+  const postPendingGuard = usePendingGuard('Post comment');
+  const [postBusy, setPostBusy] = useState(false);
+  const lastPostTextRef = useRef('');
+  const lastPostMovementIdRef = useRef('');
+  const postIdempotencyKeyRef = useRef(null);
 
   const isAdmin = isAdminEmail(user?.email);
   const diagEnabled = isDebugUiEnabledForUser(user?.email);
@@ -202,7 +212,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
   }, [comments, accessToken]);
 
   const postMutation = useMutation({
-    mutationFn: async ({ text }) => {
+    mutationFn: async ({ text, idempotencyKey }) => {
       if (!safeMovementId) throw new Error('Missing movement');
       if (!accessToken) throw new Error('Please log in to comment');
       if (locked) throw new Error('Comments are locked for this movement');
@@ -220,7 +230,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
         throw new Error(String(rateCheck?.reason || 'Please slow down.') + wait);
       }
 
-      return createMovementComment(safeMovementId, cleanText, { accessToken });
+      return createMovementComment(safeMovementId, cleanText, { accessToken, idempotencyKey: idempotencyKey ? String(idempotencyKey) : '' });
     },
     onSuccess: async (_created) => {
       setDraft('');
@@ -306,10 +316,49 @@ export default function CommentSection({ movementId, movement, canModerate = fal
     onError: (e) => {
       toast.error(getInteractionErrorMessage(e, "Couldn't post comment"));
     },
+    onSettled: () => {
+      setPostBusy(false);
+      postPendingGuard.stop();
+    },
   });
 
+  const submitPost = (text) => {
+    if (locked || postBusy || isOffline) return;
+    const clean = String(text || '').trim();
+    if (!clean) {
+      toast.error('Please write a comment');
+      return;
+    }
+
+    const movementKey = String(safeMovementId || '').trim();
+    if (lastPostTextRef.current !== clean || lastPostMovementIdRef.current !== movementKey) {
+      postIdempotencyKeyRef.current = newIdempotencyKey('comment_post');
+      lastPostTextRef.current = clean;
+      lastPostMovementIdRef.current = movementKey;
+    }
+
+    setPostBusy(true);
+    postPendingGuard.start({
+      retry: () => submitPost(clean),
+      onTimeout: () => {
+        setPostBusy(false);
+        captureRequestDebugInfo({
+          label: 'Post comment',
+          endpoint: safeMovementId ? `/movements/${encodeURIComponent(String(safeMovementId))}/comments` : '/movements/:id/comments',
+          method: 'POST',
+          elapsed_ms: postPendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry: () => submitPost(clean) });
+        postPendingGuard.stop();
+      },
+    });
+
+    postMutation.mutate({ text: clean, idempotencyKey: postIdempotencyKeyRef.current });
+  };
+
   const attemptPost = () => {
-    if (locked || postMutation.isPending || isOffline) return;
+    if (locked || postBusy || isOffline) return;
     const text = String(draft || '').trim();
     if (!text) {
       toast.error('Please write a comment');
@@ -365,7 +414,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       return;
     }
 
-    postMutation.mutate({ text });
+    submitPost(text);
   };
 
   const confirmTitle = postConfirmKind === 'crisis' ? 'Confirm posting' : 'Confirm posting';
@@ -482,7 +531,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
                       setPostConfirmOpen(false);
                       setPostConfirmKind(null);
                       setPendingPostText('');
-                      if (text) postMutation.mutate({ text });
+                      if (text) submitPost(text);
                     }}
                   >
                     Post anyway
@@ -502,7 +551,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
                     : 'Write a comment…'
               }
               className="w-full min-h-20 p-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-800 font-semibold outline-none"
-              disabled={locked || postMutation.isPending || isOffline}
+              disabled={locked || postBusy || isOffline}
             />
             {isOffline ? (
               <div className="text-xs font-bold text-rose-700">
@@ -511,10 +560,10 @@ export default function CommentSection({ movementId, movement, canModerate = fal
             ) : null}
             <button
               onClick={attemptPost}
-              disabled={locked || postMutation.isPending || isOffline}
+              disabled={locked || postBusy || isOffline}
               className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
             >
-              {postMutation.isPending ? 'Posting…' : 'Post'}
+              {postBusy ? 'Posting…' : 'Post'}
             </button>
           </>
         )}

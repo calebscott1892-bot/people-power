@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { captureRequestDebugInfo } from '@/utils/requestDebug';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 
 import { getSupabaseClient } from '@/api/supabaseClient';
 import { Button } from '@/components/ui/button';
@@ -30,6 +33,8 @@ export default function ResetPassword() {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [saving, setSaving] = useState(false);
+
+  const pendingGuard = usePendingGuard('Reset password');
 
   useEffect(() => {
     const supabase = getSupabaseClient();
@@ -67,7 +72,7 @@ export default function ResetPassword() {
   }, [code]);
 
   const onSubmit = async (e) => {
-    e.preventDefault();
+    e?.preventDefault?.();
 
     const supabase = getSupabaseClient();
     if (!supabase) {
@@ -88,6 +93,24 @@ export default function ResetPassword() {
       return;
     }
 
+    if (saving) return;
+
+    const retry = () => onSubmit(null);
+    pendingGuard.start({
+      retry,
+      onTimeout: () => {
+        setSaving(false);
+        captureRequestDebugInfo({
+          label: 'Reset password',
+          endpoint: 'supabase:updateUserPassword',
+          method: 'POST',
+          elapsed_ms: pendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry });
+      },
+    });
+
     setSaving(true);
     try {
       const { error } = await supabase.auth.updateUser({ password: p });
@@ -104,6 +127,7 @@ export default function ResetPassword() {
       toastFriendlyError(err, 'Failed to reset password');
     } finally {
       setSaving(false);
+      pendingGuard.stop();
     }
   };
 

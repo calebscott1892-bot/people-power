@@ -20,9 +20,13 @@ import {
   captureRequestDebugInfo,
   copyRequestDebugInfoToClipboard,
   getRequestIdForEndpoint,
+  isDebugUiEnabledForUser,
 } from '@/utils/requestDebug';
 import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
+import { httpFetch } from '@/utils/httpFetch';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 import IntroScreen from '@/components/home/IntroScreen';
 import UpdateBanner from '@/components/updates/UpdateBanner';
 import UpdatesPanel from '@/components/updates/UpdatesPanel';
@@ -186,6 +190,70 @@ function LayoutContent({ children }) {
   const userProfileLoading = userProfileQuery.isLoading;
   const userProfileFetching = userProfileQuery.isFetching;
   const userProfileIsError = userProfileQuery.isError;
+  const debugEnabled = isDebugUiEnabledForUser(profileEmail);
+
+  const syncGuard = usePendingGuard('profile-sync', { timeoutMs: 20_000 });
+
+  useEffect(() => {
+    syncGuard.watch(userProfileFetching, {
+      retry: () => userProfileQuery.refetch(),
+      onTimeout: async () => {
+        // Force-clear the UI banner after 20s.
+        showPendingTimeoutToast({
+          retry: () => {
+            syncGuard.stop();
+            userProfileQuery.refetch();
+          },
+        });
+
+        const requestId = getRequestIdForEndpoint('/me/profile');
+        captureRequestDebugInfo({
+          label: 'profile-sync',
+          endpoint: '/me/profile',
+          method: 'GET',
+          request_id: requestId || null,
+          error_message: 'Pending state timed out (20s)',
+        });
+
+        // Best-effort ping to include in debug info.
+        try {
+          const startedAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+          const res = await httpFetch('/diag/ping', { method: 'GET', cache: 'no-store', timeoutMs: 8_000, retry: 0, label: 'diag-ping' });
+          const elapsedMs =
+            (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()) -
+            startedAt;
+          const pingRequestId = res?.headers?.get ? res.headers.get('x-request-id') : null;
+          captureRequestDebugInfo({
+            label: 'profile-sync',
+            endpoint: '/me/profile',
+            method: 'GET',
+            request_id: requestId || null,
+            error_message: 'Pending state timed out (20s)',
+            ping: {
+              ok: !!res?.ok,
+              request_id: pingRequestId || null,
+              elapsed_ms: Math.round(Number(elapsedMs) || 0),
+              error_message: res?.ok ? null : `Ping HTTP ${res?.status}`,
+            },
+          });
+        } catch (e) {
+          captureRequestDebugInfo({
+            label: 'profile-sync',
+            endpoint: '/me/profile',
+            method: 'GET',
+            request_id: requestId || null,
+            error_message: 'Pending state timed out (20s)',
+            ping: {
+              ok: false,
+              request_id: null,
+              elapsed_ms: null,
+              error_message: e?.message ? String(e.message) : 'Ping failed',
+            },
+          });
+        }
+      },
+    });
+  }, [syncGuard, userProfileFetching, userProfileQuery]);
 
   const hideFooter = location.pathname === '/login';
 
@@ -298,7 +366,7 @@ function LayoutContent({ children }) {
             <span>Reconnecting to People Power — some data may be out of date.</span>
           </div>
         </div>
-      ) : userProfileFetching ? (
+      ) : userProfileFetching && !syncGuard.timedOut ? (
         <div className="w-full border-b border-slate-200 bg-white text-slate-700 px-4 sm:px-6 py-2">
           <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -468,7 +536,7 @@ function LayoutContent({ children }) {
                       </div>
                     </Link>
 
-                    {avatarLoadError && (isMobile || isAdmin) ? (
+                    {avatarLoadError && debugEnabled ? (
                       <button
                         type="button"
                         className="hidden sm:inline-flex text-[11px] font-black text-amber-900 underline"

@@ -126,6 +126,7 @@ export async function createMovementComment(movementId, content, options) {
   if (!id) throw new Error('Movement ID is required');
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const idempotencyKey = options?.idempotencyKey ? String(options.idempotencyKey) : '';
   if (!accessToken) throw new Error('Authentication required');
 
   const text = String(content ?? '').trim();
@@ -139,6 +140,7 @@ export async function createMovementComment(movementId, content, options) {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       Authorization: `Bearer ${accessToken}`,
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
     },
     body: JSON.stringify({ content: text }),
   });

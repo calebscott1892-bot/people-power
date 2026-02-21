@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
@@ -20,6 +20,10 @@ import {
   saveRecentReportTimes,
 } from '@/components/safety/reportingUtils';
 import { logError } from '@/utils/logError';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
+import { captureRequestDebugInfo } from '@/utils/requestDebug';
+import { newIdempotencyKey } from '@/utils/idempotencyKey';
 
 export default function ReportCenter() {
   const { session } = useAuth();
@@ -43,6 +47,9 @@ export default function ReportCenter() {
   const [evidenceLink, setEvidenceLink] = useState('');
   const [bugPage, setBugPage] = useState('');
   const [submitted, setSubmitted] = useState(false);
+
+  const pendingGuard = usePendingGuard('Submit report');
+  const idempotencyKeyRef = useRef(null);
 
   const contextType = String(searchParams.get('type') || '').trim();
   const contextId = String(searchParams.get('id') || '').trim();
@@ -99,6 +106,7 @@ export default function ReportCenter() {
     setBugDetails('');
     setEvidenceFile(null);
     setEvidenceLink('');
+    idempotencyKeyRef.current = null;
   };
 
   const handleSubmit = async () => {
@@ -133,6 +141,21 @@ export default function ReportCenter() {
       toast.error('Please add a short explanation for “Other”.');
       return;
     }
+
+    pendingGuard.start({
+      retry: () => handleSubmit(),
+      onTimeout: () => {
+        setSubmitting(false);
+        captureRequestDebugInfo({
+          label: 'Submit report',
+          endpoint: '/reports',
+          method: 'POST',
+          elapsed_ms: pendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry: () => handleSubmit() });
+      },
+    });
 
     setSubmitting(true);
     try {
@@ -192,8 +215,15 @@ export default function ReportCenter() {
           evidence_urls: evidenceFileUrl ? [evidenceFileUrl] : undefined,
           is_repeat_report: isRepeatReport || undefined,
         },
-        { accessToken, reporterEmail }
+        {
+          accessToken,
+          reporterEmail,
+          idempotencyKey: idempotencyKeyRef.current || (idempotencyKeyRef.current = newIdempotencyKey('report_submit')),
+        }
       );
+
+      // Success: allow the next submit to generate a fresh key.
+      idempotencyKeyRef.current = null;
 
       const times = loadRecentReportTimes(reporterEmail);
       saveRecentReportTimes(reporterEmail, [...times, now]);
@@ -217,6 +247,7 @@ export default function ReportCenter() {
       toast.error("Couldn't submit report right now");
     } finally {
       setSubmitting(false);
+      pendingGuard.stop();
     }
   };
 

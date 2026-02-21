@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { motion } from 'framer-motion';
@@ -8,6 +8,9 @@ import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { upsertNotification } from '@/api/notificationsClient';
 import { queryKeys } from '@/lib/queryKeys';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
+import { captureRequestDebugInfo } from '@/utils/requestDebug';
 
 function getMovementOwnerEmail(movement) {
   const candidates = [
@@ -41,6 +44,10 @@ export default function BoostButtons({
   );
 
   const accessToken = session?.access_token ? String(session.access_token) : null;
+
+  const votePendingGuard = usePendingGuard('Boost/Vote');
+  const [voteBusy, setVoteBusy] = useState(false);
+  const pendingVoteRef = useRef(null);
 
   const {
     data: votes,
@@ -166,12 +173,40 @@ export default function BoostButtons({
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Could not boost right now')),
   });
 
-  const isBusy = mutation.isPending;
+  const isBusy = voteBusy;
 
   const readLocked = requireRead && !isReadEligible;
   const effectiveDisabled = disabled || readLocked;
   const effectiveDisabledReason =
     disabledReason || (readLocked ? 'Read a bit first (unlocks in ~3s or near bottom)' : undefined);
+
+  const startVoteAttempt = (pendingValue) => {
+    pendingVoteRef.current = pendingValue;
+    setVoteBusy(true);
+
+    votePendingGuard.start({
+      retry: () => startVoteAttempt(pendingValue),
+      onTimeout: () => {
+        setVoteBusy(false);
+        captureRequestDebugInfo({
+          label: 'Boost/Vote',
+          endpoint: id ? `/movements/${encodeURIComponent(String(id))}/vote` : '/movements/:id/vote',
+          method: 'POST',
+          elapsed_ms: votePendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry: () => startVoteAttempt(pendingValue) });
+        votePendingGuard.stop();
+      },
+    });
+
+    mutation.mutate(pendingValue, {
+      onSettled: () => {
+        setVoteBusy(false);
+        votePendingGuard.stop();
+      },
+    });
+  };
 
   const handleVote = async (value) => {
     if (!id) return;
@@ -200,7 +235,7 @@ export default function BoostButtons({
       }
     }
 
-    mutation.mutate(nextValue);
+    startVoteAttempt(nextValue);
   };
 
   const boostActive = myVote === 1;

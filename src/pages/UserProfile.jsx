@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useRef } from 'react';
 import { UserPlus, UserMinus, Loader2, Zap, TrendingUp, Trophy, MessageCircle, Edit } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Button } from "@/components/ui/button";
@@ -28,10 +29,13 @@ import FollowListDialog from '@/components/profile/FollowListDialog';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 import { queryKeys } from '@/lib/queryKeys';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 import {
   captureRequestDebugInfo,
   copyRequestDebugInfoToClipboard,
   getRequestIdForEndpoint,
+  isDebugUiEnabledForUser,
 } from '@/utils/requestDebug';
 
 function getMovementAuthorLabel(movement) {
@@ -60,20 +64,12 @@ export default function UserProfile() {
   const navigate = useNavigate();
   const { email: emailParam, username: usernameParam } = useParams();
   const [searchParams] = useSearchParams();
-  const { user, session, isAdmin } = useAuth();
+  const { user, session } = useAuth();
   const accessToken = session?.access_token || null;
   const challengesEnabled = !!import.meta?.env?.DEV;
   const [avatarLoadError, setAvatarLoadError] = useState(null);
   const [bannerLoadError, setBannerLoadError] = useState(null);
-
-  const isMobile = useMemo(() => {
-    try {
-      const ua = typeof navigator !== 'undefined' && navigator.userAgent ? String(navigator.userAgent) : '';
-      return /iphone|ipad|ipod|android/i.test(ua);
-    } catch {
-      return false;
-    }
-  }, []);
+  const debugEnabled = isDebugUiEnabledForUser(user?.email);
   const profileEmail = useMemo(() => {
     const fromParam = emailParam ? String(emailParam) : '';
     const fromQuery = searchParams?.get('email') ? String(searchParams.get('email')) : '';
@@ -88,11 +84,14 @@ export default function UserProfile() {
   }, [usernameParam, searchParams]);
   const [currentUser, setCurrentUser] = useState(null);
   const [isFollowing, setIsFollowing] = useState(false);
+  const [followBusy, setFollowBusy] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showGiftModal, setShowGiftModal] = useState(false);
   const [followListOpen, setFollowListOpen] = useState(false);
   const [followListMode, setFollowListMode] = useState('followers');
+  const followPendingGuard = usePendingGuard('Follow/Unfollow');
   const queryClient = useQueryClient();
+  const pendingFollowValueRef = useRef(null);
 
   useEffect(() => {
     setCurrentUser(user || null);
@@ -285,13 +284,13 @@ export default function UserProfile() {
     enabled: challengesEnabled && !!currentUser?.email,
   });
 
-  const toggleFollowMutation = useMutation({
-    mutationFn: async () => {
+  const followMutation = useMutation({
+    mutationFn: async (nextFollowing) => {
       if (!accessToken) throw new Error('Sign in to follow');
       if (!currentUser?.email || !resolvedProfileEmail) throw new Error('Missing profile');
 
-      const nextFollowing = !isFollowing;
-      if (nextFollowing) {
+      const desired = !!nextFollowing;
+      if (desired) {
         const rateCheck = await checkActionAllowed({
           email: currentUser?.email ?? null,
           action: 'user_follow',
@@ -304,10 +303,10 @@ export default function UserProfile() {
         }
       }
 
-      return setUserFollow(resolvedProfileEmail, !isFollowing, { accessToken });
+      return setUserFollow(resolvedProfileEmail, desired, { accessToken });
     },
-    onSuccess: async (next) => {
-      const justFollowed = !!next?.following && !isFollowing;
+    onSuccess: async (next, nextFollowing) => {
+      const justFollowed = !!nextFollowing && !isFollowing;
       setIsFollowing(!!next?.following);
       await queryClient.invalidateQueries({ queryKey: queryKeys.follows.userFollow(resolvedProfileEmail, currentUser?.email) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.follows.userFollowers(resolvedProfileEmail, currentUser?.email) });
@@ -346,7 +345,38 @@ export default function UserProfile() {
       toast.success(next?.following ? 'Following!' : 'Unfollowed');
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to update follow')),
+    onSettled: () => {
+      setFollowBusy(false);
+      followPendingGuard.stop();
+    },
   });
+
+  const submitFollow = (nextFollowing) => {
+    const desired = !!nextFollowing;
+    if (followBusy) return;
+    pendingFollowValueRef.current = desired;
+
+    const retry = () => submitFollow(desired);
+
+    setFollowBusy(true);
+    followPendingGuard.start({
+      retry,
+      onTimeout: () => {
+        setFollowBusy(false);
+        captureRequestDebugInfo({
+          label: 'Follow/Unfollow',
+          endpoint: resolvedProfileEmail ? `/user/${encodeURIComponent(String(resolvedProfileEmail))}/follow` : '/user/:email/follow',
+          method: 'POST',
+          elapsed_ms: followPendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry });
+        followPendingGuard.stop();
+      },
+    });
+
+    followMutation.mutate(desired);
+  };
 
   const blockMutation = useMutation({
     mutationFn: async () => {
@@ -495,7 +525,7 @@ export default function UserProfile() {
           <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
 
-        {bannerLoadError && (isMobile || isAdmin) ? (
+        {bannerLoadError && debugEnabled ? (
           <div className="px-4 sm:px-8 py-2 bg-amber-50 text-amber-900 text-xs font-semibold flex items-center justify-between gap-2">
             <span className="truncate">Banner image failed to load.</span>
             <Button
@@ -541,7 +571,7 @@ export default function UserProfile() {
                 )}
               </div>
 
-              {avatarLoadError && (isMobile || isAdmin) ? (
+              {avatarLoadError && debugEnabled ? (
                 <div className="mt-2 text-[11px] font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
                   <span className="truncate">Avatar failed to load.</span>
                   <button
@@ -651,8 +681,8 @@ export default function UserProfile() {
                 ) : (
                   <>
                     <Button
-                      onClick={() => toggleFollowMutation.mutate()}
-                      disabled={toggleFollowMutation.isPending || blockPending}
+                      onClick={() => submitFollow(!isFollowing)}
+                      disabled={followBusy || blockPending}
                       className={cn(
                         "h-12 font-bold rounded-xl uppercase tracking-wide",
                         isFollowing

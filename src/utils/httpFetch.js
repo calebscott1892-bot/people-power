@@ -1,7 +1,8 @@
 import { SERVER_BASE } from '@/api/serverBase';
 import { getValidAccessToken } from '@/api/supabaseClient';
+import { captureRequestDebugInfo, captureRequestId } from '@/utils/requestDebug';
 
-const DEFAULT_TIMEOUT_MS = 45_000;
+const DEFAULT_TIMEOUT_MS = 20_000;
 
 const AUTH_EXPIRED_EVENT = 'pp:auth-expired';
 const DIAG_ENABLED = (() => {
@@ -34,6 +35,7 @@ function isBackendApiUrl(url) {
       raw.startsWith('/reports') ||
       raw.startsWith('/resources') ||
       raw.startsWith('/uploads') ||
+      raw.startsWith('/diag/') ||
       raw.startsWith('/admin/')
     );
   }
@@ -100,6 +102,31 @@ export function httpFetch(input, init) {
     throw new Error('Fetch is not available in this environment');
   }
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const toEndpoint = (url) => {
+    const raw = String(url || '');
+    if (!raw) return '';
+    if (raw.startsWith('/')) return raw;
+    if (/^https?:\/\//i.test(raw)) {
+      try {
+        const u = new URL(raw);
+        return String(u.pathname || '') || raw;
+      } catch {
+        return raw;
+      }
+    }
+    return raw;
+  };
+
+  const getMethod = (reqInit) => {
+    const m = reqInit?.method ? String(reqInit.method) : '';
+    return m ? m.toUpperCase() : 'GET';
+  };
+
+  const isSafeRetryStatus = (status) => status === 502 || status === 503 || status === 504;
+  const isIdempotent = (method) => method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+
   const safeAbort = (controller, reason) => {
     if (!controller) return;
     try {
@@ -115,8 +142,10 @@ export function httpFetch(input, init) {
     }
   };
 
-  const { timeoutMs, ...requestInit } = init || {};
+  const { timeoutMs, retry, label, ...requestInit } = init || {};
   const resolvedTimeoutMs = Number.isFinite(timeoutMs) ? Number(timeoutMs) : DEFAULT_TIMEOUT_MS;
+
+  const resolvedRetry = Number.isFinite(Number(retry)) ? Math.max(0, Math.floor(Number(retry))) : null;
 
   if (!resolvedTimeoutMs || resolvedTimeoutMs <= 0) {
     return f(input, requestInit);
@@ -139,7 +168,9 @@ export function httpFetch(input, init) {
     }
   }
 
+  let timedOut = false;
   const timeoutId = setTimeout(() => {
+    timedOut = true;
     safeAbort(controller, 'Request timed out');
   }, resolvedTimeoutMs);
 
@@ -154,8 +185,11 @@ export function httpFetch(input, init) {
     }
   };
 
-  const doFetch = async () => {
+  const doSingleFetch = async () => {
     const url = input instanceof Request ? input.url : String(input);
+    const endpoint = toEndpoint(url);
+    const method = getMethod(requestInit);
+    const startedAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
 
     // Dev-only diagnostic: simulate an invalid-session backend 401.
     if (DIAG_ENABLED) {
@@ -195,14 +229,60 @@ export function httpFetch(input, init) {
       headers = ensureJsonContentType(headers, requestInit);
     }
 
-    const res = await f(input, { ...requestInit, headers, signal: controller.signal });
+    const fetchPromise = f(input, { ...requestInit, headers, signal: controller.signal });
+    const timeoutPromise = new Promise((_, reject) => {
+      const id = setTimeout(() => {
+        const err = new Error('Request timed out');
+        err.name = 'TimeoutError';
+        err.code = 'TIMEOUT';
+        reject(err);
+      }, resolvedTimeoutMs);
+      fetchPromise.finally(() => clearTimeout(id));
+    });
+
+    let res;
+    try {
+      res = await Promise.race([fetchPromise, timeoutPromise]);
+    } catch (e) {
+      const elapsedMs =
+        (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()) -
+        startedAt;
+      const msg = e?.message ? String(e.message) : timedOut ? 'Request timed out' : 'Request failed';
+      captureRequestDebugInfo({
+        label: label || null,
+        endpoint,
+        method,
+        status: null,
+        elapsed_ms: Math.round(Number(elapsedMs) || 0),
+        error_message: msg,
+      });
+      throw e;
+    }
+
+    const elapsedMs =
+      (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()) -
+      startedAt;
+
+    const requestId = res?.headers?.get ? res.headers.get('x-request-id') : null;
+    if (requestId) captureRequestId({ endpoint, request_id: requestId });
+
+    if (!res.ok) {
+      captureRequestDebugInfo({
+        label: label || null,
+        endpoint,
+        method,
+        status: res.status,
+        request_id: requestId || null,
+        elapsed_ms: Math.round(Number(elapsedMs) || 0),
+        error_message: `HTTP ${res.status}`,
+      });
+    }
 
     // Global 401 handling (final response after any authFetch retry):
     // if the backend says "Invalid session", ensure we don't leave the UI spinning.
     if (isBackend && res && res.status === 401) {
       const text = await readResponseTextSafe(res);
       if (shouldTreat401AsExpired(text)) {
-        const requestId = res?.headers?.get ? res.headers.get('x-request-id') : null;
         dispatchAuthExpired({
           message: 'Your session has expired. Please sign in again.',
           reason: 'invalid_session',
@@ -216,7 +296,46 @@ export function httpFetch(input, init) {
     return res;
   };
 
-  return doFetch().finally(cleanup);
+  const endpoint = toEndpoint(input instanceof Request ? input.url : String(input));
+  const method = getMethod(requestInit);
+  const maxRetries = resolvedRetry != null ? resolvedRetry : (isIdempotent(method) ? 1 : 0);
+
+  const doFetchWithRetry = async () => {
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        const res = await doSingleFetch();
+        if (attempt < maxRetries && res && isIdempotent(method) && isSafeRetryStatus(res.status)) {
+          await sleep(250);
+          continue;
+        }
+        return res;
+      } catch (e) {
+        lastError = e;
+        const message = e?.message ? String(e.message) : '';
+        const isTimeout = e?.code === 'TIMEOUT' || e?.name === 'TimeoutError' || message.toLowerCase().includes('timed out');
+        const isAbort = e?.name === 'AbortError';
+        const isNetwork = e instanceof TypeError;
+        const canRetry = attempt < maxRetries && isIdempotent(method) && (isTimeout || isNetwork) && !isAbort;
+        if (canRetry) {
+          captureRequestDebugInfo({
+            label: label || null,
+            endpoint,
+            method,
+            status: null,
+            elapsed_ms: null,
+            error_message: `Retrying after error: ${message || 'request failed'}`,
+          });
+          await sleep(250);
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw lastError;
+  };
+
+  return doFetchWithRetry().finally(cleanup);
 }
 
 // Expose a tiny dev-only helper for manual verification:

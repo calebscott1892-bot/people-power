@@ -137,6 +137,7 @@ async function createLocalReport(payload, options) {
 
 export async function createReport(payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const idempotencyKey = options?.idempotencyKey ? String(options.idempotencyKey) : '';
   const url = `${BASE_URL.replace(/\/$/, '')}/reports`;
 
   // Network-first; local fallback when server is unavailable.
@@ -148,6 +149,7 @@ export async function createReport(payload, options) {
         Accept: 'application/json',
         'Content-Type': 'application/json',
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
       },
       body: JSON.stringify(payload ?? {}),
     });

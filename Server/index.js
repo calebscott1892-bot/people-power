@@ -936,7 +936,7 @@ const { Pool } = require('pg');
 const { z } = require('zod');
 const BadWordsFilter = require('bad-words');
 const { createClient } = require('@supabase/supabase-js');
-const { randomUUID } = require('crypto');
+const { randomUUID, createHash } = require('crypto');
 const fs = require('fs');
 const { pipeline } = require('stream/promises');
 const { WebSocketServer } = require('ws');
@@ -2704,6 +2704,11 @@ const memoryCollaboratorsByMovement = new Map();
 const memoryReports = [];
 let memoryReportSeq = 1;
 
+// Idempotency keys (memory fallback)
+// Map<`${userId}|${route}|${idempotencyKey}`, { body_hash, status_code, response_json, created_at_ms }>
+const memoryIdempotencyKeys = new Map();
+const IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
+
 
 // Migration/Backup logs (memory fallback)
 // Array<{id,type,status,started_at,finished_at,message,details}>
@@ -3678,6 +3683,227 @@ async function dbQueryWithRequestDiagnostics(request, { sql_label, query } = {})
       'DB query failed'
     );
     throw e;
+  }
+}
+
+function stableStringifyForIdempotency(value) {
+  const seen = new WeakSet();
+
+  const normalize = (v) => {
+    if (v == null) return null;
+    const t = typeof v;
+    if (t === 'string' || t === 'number' || t === 'boolean') return v;
+    if (t === 'bigint') return String(v);
+    if (t !== 'object') return String(v);
+
+    if (v instanceof Date) return v.toISOString();
+    if (Array.isArray(v)) return v.map(normalize);
+
+    if (seen.has(v)) return '[Circular]';
+    seen.add(v);
+    const keys = Object.keys(v).sort();
+    const out = {};
+    for (const k of keys) {
+      out[k] = normalize(v[k]);
+    }
+    return out;
+  };
+
+  try {
+    return JSON.stringify(normalize(value));
+  } catch {
+    try {
+      return JSON.stringify(String(value));
+    } catch {
+      return '"[Unserializable]"';
+    }
+  }
+}
+
+function hashBodyForIdempotency(body) {
+  const s = stableStringifyForIdempotency(body ?? {});
+  return createHash('sha256').update(s).digest('hex');
+}
+
+function getIdempotencyKeyFromRequest(request) {
+  try {
+    const raw = request?.headers ? request.headers['idempotency-key'] : null;
+    const s = raw != null ? String(raw).trim() : '';
+    return s;
+  } catch {
+    return '';
+  }
+}
+
+function getIdempotencyRouteKey(request) {
+  const method = String(request?.method || 'POST');
+  const path = safePathFromRequest(request) || String(request?.routerPath || '');
+  return `${method} ${path}`.trim();
+}
+
+async function ensureIdempotencyKeysTableWithDiagnostics(request) {
+  if (!hasDatabaseUrl) return;
+  await dbQueryWithRequestDiagnostics(request, {
+    sql_label: 'idempotency_keys_create_table',
+    query: {
+      text: `
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+          user_id TEXT NOT NULL,
+          route TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          request_body_hash TEXT NOT NULL,
+          status_code INT NOT NULL,
+          response_json JSONB NOT NULL,
+          request_id TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (user_id, route, idempotency_key)
+        );
+      `,
+    },
+  });
+  await dbQueryWithRequestDiagnostics(request, {
+    sql_label: 'idempotency_keys_create_index_created_at',
+    query: {
+      text: 'CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created_at ON idempotency_keys (created_at)',
+    },
+  });
+}
+
+function getMemoryIdempotencyRecord(memoryKey) {
+  const now = Date.now();
+  const rec = memoryIdempotencyKeys.get(memoryKey) || null;
+  if (!rec) return null;
+  if (!rec.created_at_ms || now - rec.created_at_ms > IDEMPOTENCY_WINDOW_MS) {
+    memoryIdempotencyKeys.delete(memoryKey);
+    return null;
+  }
+  return rec;
+}
+
+function setMemoryIdempotencyRecord(memoryKey, record) {
+  const now = Date.now();
+  // Opportunistic pruning: remove a handful of expired entries.
+  if (memoryIdempotencyKeys.size > 5000) {
+    let pruned = 0;
+    for (const [k, v] of memoryIdempotencyKeys.entries()) {
+      if (pruned >= 200) break;
+      if (!v?.created_at_ms || now - v.created_at_ms > IDEMPOTENCY_WINDOW_MS) {
+        memoryIdempotencyKeys.delete(k);
+        pruned++;
+      }
+    }
+  }
+  memoryIdempotencyKeys.set(memoryKey, record);
+}
+
+async function maybeReplayIdempotentResponse(request, reply, { userId, route, idempotencyKey, bodyHash }) {
+  const requestId = request?.id ? String(request.id) : null;
+  const key = idempotencyKey ? String(idempotencyKey).trim() : '';
+  const uid = userId ? String(userId).trim() : '';
+  const r = route ? String(route).trim() : '';
+  if (!key || !uid || !r) return false;
+
+  const memoryKey = `${uid}|${r}|${key}`;
+  const mem = getMemoryIdempotencyRecord(memoryKey);
+  if (mem) {
+    if (String(mem.body_hash || '') !== String(bodyHash || '')) {
+      reply.code(409).send({ error: 'Idempotency-Key conflict (different request body)', request_id: requestId });
+      return true;
+    }
+    reply.code(Number(mem.status_code) || 200).send(mem.response_json);
+    return true;
+  }
+
+  if (!hasDatabaseUrl) return false;
+
+  try {
+    await ensureIdempotencyKeysTableWithDiagnostics(request);
+
+    const res = await dbQueryWithRequestDiagnostics(request, {
+      sql_label: 'idempotency_keys_select',
+      query: {
+        text: `
+          SELECT request_body_hash, status_code, response_json, created_at
+          FROM idempotency_keys
+          WHERE user_id = $1 AND route = $2 AND idempotency_key = $3
+            AND created_at > NOW() - INTERVAL '10 minutes'
+          LIMIT 1
+        `,
+        values: [uid, r, key],
+      },
+    });
+
+    const row = res?.rows?.[0] || null;
+    if (!row) return false;
+
+    const storedHash = row?.request_body_hash ? String(row.request_body_hash) : '';
+    if (storedHash !== String(bodyHash || '')) {
+      reply.code(409).send({ error: 'Idempotency-Key conflict (different request body)', request_id: requestId });
+      return true;
+    }
+
+    const responseJson = row?.response_json ?? null;
+    const statusCode = Number(row?.status_code) || 200;
+
+    // Cache in memory for resilience if DB blips.
+    setMemoryIdempotencyRecord(memoryKey, {
+      body_hash: storedHash,
+      status_code: statusCode,
+      response_json: responseJson,
+      created_at_ms: Date.now(),
+    });
+
+    reply.code(statusCode).send(responseJson);
+    return true;
+  } catch (e) {
+    fastify.log.warn({ err: e, request_id: requestId, route: r }, 'Idempotency replay lookup failed');
+    return false;
+  }
+}
+
+async function storeIdempotentResponse(request, { userId, route, idempotencyKey, bodyHash, statusCode, responseJson }) {
+  const requestId = request?.id ? String(request.id) : null;
+  const key = idempotencyKey ? String(idempotencyKey).trim() : '';
+  const uid = userId ? String(userId).trim() : '';
+  const r = route ? String(route).trim() : '';
+  if (!key || !uid || !r) return;
+
+  const memoryKey = `${uid}|${r}|${key}`;
+  setMemoryIdempotencyRecord(memoryKey, {
+    body_hash: String(bodyHash || ''),
+    status_code: Number(statusCode) || 200,
+    response_json: responseJson,
+    created_at_ms: Date.now(),
+  });
+
+  if (!hasDatabaseUrl) return;
+
+  try {
+    await ensureIdempotencyKeysTableWithDiagnostics(request);
+    await dbQueryWithRequestDiagnostics(request, {
+      sql_label: 'idempotency_keys_insert',
+      query: {
+        text: `
+          INSERT INTO idempotency_keys
+            (user_id, route, idempotency_key, request_body_hash, status_code, response_json, request_id)
+          VALUES
+            ($1, $2, $3, $4, $5, $6::jsonb, $7)
+          ON CONFLICT (user_id, route, idempotency_key)
+          DO NOTHING
+        `,
+        values: [
+          uid,
+          r,
+          key,
+          String(bodyHash || ''),
+          Number(statusCode) || 200,
+          JSON.stringify(responseJson ?? null),
+          requestId,
+        ],
+      },
+    });
+  } catch (e) {
+    fastify.log.warn({ err: e, request_id: requestId, route: r }, 'Idempotency store failed');
   }
 }
 
@@ -6373,6 +6599,14 @@ function readMultipartField(fields, name) {
 
     // Internal diagnostics: verify an uploaded image reference (HEAD/GET + MIME + size).
     // Gated by ENABLE_DIAG_ENDPOINT=1 or admin email.
+    fastify.get('/diag/ping', async (request, reply) => {
+      const authedUser = await requireVerifiedUser(request, reply);
+      if (!authedUser) return;
+
+      const requestId = request?.id ? String(request.id) : null;
+      return reply.send({ ok: true, request_id: requestId });
+    });
+
     fastify.post('/diag/verify-image', async (request, reply) => {
       const authedUser = await requireVerifiedUser(request, reply);
       if (!authedUser) return;
@@ -7634,6 +7868,21 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
     return reply.code(400).send({ error: 'Invalid comment payload' });
   }
 
+  // Idempotency: if the same user+route+key repeats within 10 minutes, replay the stored response.
+  {
+    const idempotencyKey = getIdempotencyKeyFromRequest(request);
+    const userId = authedUser?.id ? String(authedUser.id) : normalizeEmail(authedUser.email);
+    const routeKey = getIdempotencyRouteKey(request);
+    const bodyHash = hashBodyForIdempotency(request.body ?? {});
+    const replayed = await maybeReplayIdempotentResponse(request, reply, {
+      userId,
+      route: routeKey,
+      idempotencyKey,
+      bodyHash,
+    });
+    if (replayed) return;
+  }
+
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
   const blockSets = await getUserBlockSets(email);
@@ -7709,7 +7958,16 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
       },
       '[audit] comment_create'
     );
-    return reply.code(201).send({ comment });
+    const responseBody = { comment };
+    await storeIdempotentResponse(request, {
+      userId: authedUser?.id ? String(authedUser.id) : normalizeEmail(authedUser.email),
+      route: getIdempotencyRouteKey(request),
+      idempotencyKey: getIdempotencyKeyFromRequest(request),
+      bodyHash: hashBodyForIdempotency(request.body ?? {}),
+      statusCode: 201,
+      responseJson: responseBody,
+    });
+    return reply.code(201).send(responseBody);
   }
 
   try {
@@ -7787,7 +8045,16 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
       },
       '[audit] comment_create'
     );
-    return reply.code(201).send({ comment: { ...created, author_user_id: authorUserId } });
+    const responseBody = { comment: { ...created, author_user_id: authorUserId } };
+    await storeIdempotentResponse(request, {
+      userId: authedUser?.id ? String(authedUser.id) : normalizeEmail(authedUser.email),
+      route: getIdempotencyRouteKey(request),
+      idempotencyKey: getIdempotencyKeyFromRequest(request),
+      bodyHash: hashBodyForIdempotency(request.body ?? {}),
+      statusCode: 201,
+      responseJson: responseBody,
+    });
+    return reply.code(201).send(responseBody);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to post comment');
     return reply.code(500).send({ error: 'Failed to post comment' });
@@ -9674,6 +9941,21 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     return joined.length > 500 ? `${joined.slice(0, 500)}…` : joined;
   };
 
+  // Idempotency: if the same user+route+key repeats within 10 minutes, replay the stored response.
+  {
+    const idempotencyKey = getIdempotencyKeyFromRequest(request);
+    const userId = authedUser?.id ? String(authedUser.id) : requesterEmail;
+    const routeKey = getIdempotencyRouteKey(request);
+    const bodyHash = hashBodyForIdempotency(request.body ?? {});
+    const replayed = await maybeReplayIdempotentResponse(request, reply, {
+      userId,
+      route: routeKey,
+      idempotencyKey,
+      bodyHash,
+    });
+    if (replayed) return;
+  }
+
   if (hasDatabaseUrl) {
     const ok = await ensureDbReady(request, reply, { error: 'Database unavailable' });
     if (!ok) return;
@@ -9891,7 +10173,16 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
       '[audit] movement_create'
     );
     const enriched = (await attachCreatorProfilesToMovements([created]))[0] || created;
-    return reply.code(201).send(formatMovementForClient(enriched));
+    const responseBody = formatMovementForClient(enriched);
+    await storeIdempotentResponse(request, {
+      userId: authedUser?.id ? String(authedUser.id) : requesterEmail,
+      route: getIdempotencyRouteKey(request),
+      idempotencyKey: getIdempotencyKeyFromRequest(request),
+      bodyHash: hashBodyForIdempotency(request.body ?? {}),
+      statusCode: 201,
+      responseJson: responseBody,
+    });
+    return reply.code(201).send(responseBody);
   }
 
   let sql_label = null;
@@ -9962,7 +10253,16 @@ fastify.post('/movements', { config: { rateLimit: RATE_LIMITS.movementCreate } }
     );
     sql_label = 'movement_attach_creator_profiles';
     const enriched = (await attachCreatorProfilesToMovements([row]))[0] || row;
-    return reply.code(201).send(formatMovementForClient(enriched));
+    const responseBody = formatMovementForClient(enriched);
+    await storeIdempotentResponse(request, {
+      userId: authedUser?.id ? String(authedUser.id) : requesterEmail,
+      route: getIdempotencyRouteKey(request),
+      idempotencyKey: getIdempotencyKeyFromRequest(request),
+      bodyHash: hashBodyForIdempotency(request.body ?? {}),
+      statusCode: 201,
+      responseJson: responseBody,
+    });
+    return reply.code(201).send(responseBody);
   } catch (e) {
     fastify.log.error(
       {
@@ -10233,6 +10533,21 @@ async function handleSoftDeleteMovement(request, reply) {
     });
   }
 
+  // Idempotency: only for POST /movements/:id/delete (not DELETE).
+  if (String(request?.method || '').toUpperCase() === 'POST') {
+    const idempotencyKey = getIdempotencyKeyFromRequest(request);
+    const userId = authedUser?.id ? String(authedUser.id) : email;
+    const routeKey = getIdempotencyRouteKey(request);
+    const bodyHash = hashBodyForIdempotency(request.body ?? {});
+    const replayed = await maybeReplayIdempotentResponse(request, reply, {
+      userId,
+      route: routeKey,
+      idempotencyKey,
+      bodyHash,
+    });
+    if (replayed) return;
+  }
+
   // Memory-backed movements
   const memIdx = memoryMovements.findIndex((m) => String(m?.id) === id);
   if (memIdx !== -1) {
@@ -10288,12 +10603,23 @@ async function handleSoftDeleteMovement(request, reply) {
     }
 
     const enriched = (await attachCreatorProfilesToMovements([next]))[0] || next;
-    return reply.code(200).send({
+    const responseBody = {
       ok: true,
       movement: movementToTombstone(enriched),
       notified_count: notifyResult.sent,
       notification_mode: notifyResult.mode,
-    });
+    };
+    if (String(request?.method || '').toUpperCase() === 'POST') {
+      await storeIdempotentResponse(request, {
+        userId: authedUser?.id ? String(authedUser.id) : email,
+        route: getIdempotencyRouteKey(request),
+        idempotencyKey: getIdempotencyKeyFromRequest(request),
+        bodyHash: hashBodyForIdempotency(request.body ?? {}),
+        statusCode: 200,
+        responseJson: responseBody,
+      });
+    }
+    return reply.code(200).send(responseBody);
   }
 
   if (!hasDatabaseUrl) {
@@ -10361,12 +10687,23 @@ async function handleSoftDeleteMovement(request, reply) {
     }
 
     const enriched = (await attachCreatorProfilesToMovements([updated]))[0] || updated;
-    return reply.code(200).send({
+    const responseBody = {
       ok: true,
       movement: movementToTombstone(enriched),
       notified_count: notifyResult.sent,
       notification_mode: notifyResult.mode,
-    });
+    };
+    if (String(request?.method || '').toUpperCase() === 'POST') {
+      await storeIdempotentResponse(request, {
+        userId: authedUser?.id ? String(authedUser.id) : email,
+        route: getIdempotencyRouteKey(request),
+        idempotencyKey: getIdempotencyKeyFromRequest(request),
+        bodyHash: hashBodyForIdempotency(request.body ?? {}),
+        statusCode: 200,
+        responseJson: responseBody,
+      });
+    }
+    return reply.code(200).send(responseBody);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to delete movement');
     return reply.code(500).send({ error: 'Failed to delete movement' });
@@ -10379,6 +10716,21 @@ fastify.post('/movements/:id/delete', handleSoftDeleteMovement);
 fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, async (request, reply) => {
   const authedUser = await requireVerifiedUser(request, reply);
   if (!authedUser) return;
+
+  // Idempotency: if the same user+route+key repeats within 10 minutes, replay the stored response.
+  {
+    const idempotencyKey = getIdempotencyKeyFromRequest(request);
+    const userId = authedUser?.id ? String(authedUser.id) : normalizeEmail(authedUser.email);
+    const routeKey = getIdempotencyRouteKey(request);
+    const bodyHash = hashBodyForIdempotency(request.body ?? {});
+    const replayed = await maybeReplayIdempotentResponse(request, reply, {
+      userId,
+      route: routeKey,
+      idempotencyKey,
+      bodyHash,
+    });
+    if (replayed) return;
+  }
 
   const schema = z.object({
     report_type: z.enum(['abuse', 'bug', 'feedback']).optional(),
@@ -10487,6 +10839,14 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
       text: receipt.text,
       html: receipt.html,
     });
+    await storeIdempotentResponse(request, {
+      userId: authedUser?.id ? String(authedUser.id) : normalizeEmail(authedUser.email),
+      route: getIdempotencyRouteKey(request),
+      idempotencyKey: getIdempotencyKeyFromRequest(request),
+      bodyHash: hashBodyForIdempotency(request.body ?? {}),
+      statusCode: 201,
+      responseJson: fallbackReport,
+    });
     return reply.code(201).send(fallbackReport);
   }
 
@@ -10561,7 +10921,16 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
         html: receipt.html,
       });
     }
-    return reply.code(201).send(row ?? { ok: true });
+    const responseBody = row ?? { ok: true };
+    await storeIdempotentResponse(request, {
+      userId: authedUser?.id ? String(authedUser.id) : normalizeEmail(authedUser.email),
+      route: getIdempotencyRouteKey(request),
+      idempotencyKey: getIdempotencyKeyFromRequest(request),
+      bodyHash: hashBodyForIdempotency(request.body ?? {}),
+      statusCode: 201,
+      responseJson: responseBody,
+    });
+    return reply.code(201).send(responseBody);
   } catch (e) {
     if (isProd) {
       fastify.log.error({ err: e }, 'Failed to create report');
@@ -10581,7 +10950,16 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
       return reply.code(201).send(fallbackReport);
     } catch (fallbackError) {
       fastify.log.error({ err: fallbackError }, 'Memory fallback failed for report');
-      return reply.code(201).send({ ok: true, mode: 'fallback' });
+      const responseBody = { ok: true, mode: 'fallback' };
+      await storeIdempotentResponse(request, {
+        userId: authedUser?.id ? String(authedUser.id) : normalizeEmail(authedUser.email),
+        route: getIdempotencyRouteKey(request),
+        idempotencyKey: getIdempotencyKeyFromRequest(request),
+        bodyHash: hashBodyForIdempotency(request.body ?? {}),
+        statusCode: 201,
+        responseJson: responseBody,
+      });
+      return reply.code(201).send(responseBody);
     }
   }
 });

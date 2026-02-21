@@ -243,6 +243,7 @@ export async function fetchMovementById(id, options) {
 
 export async function createMovement(payload, options) {
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
+  const idempotencyKey = options?.idempotencyKey ? String(options.idempotencyKey) : '';
   const url = `${SERVER_BASE.replace(/\/$/, '')}/movements`;
 
   const res = await httpFetch(url, {
@@ -252,6 +253,7 @@ export async function createMovement(payload, options) {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
     },
     body: JSON.stringify(payload ?? {}),
   });
@@ -281,6 +283,7 @@ export async function deleteMovement(id, options) {
 
   const accessToken = options?.accessToken ? String(options.accessToken) : null;
   const reason = options?.reason != null ? String(options.reason) : '';
+  const idempotencyKey = options?.idempotencyKey ? String(options.idempotencyKey) : '';
 
   const base = SERVER_BASE.replace(/\/$/, '');
   const primaryUrl = `${base}/movements/${encodeURIComponent(movementId)}/delete`;
@@ -293,6 +296,7 @@ export async function deleteMovement(id, options) {
       headers: {
         Accept: 'application/json',
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ reason }),

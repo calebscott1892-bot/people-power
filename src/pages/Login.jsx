@@ -6,6 +6,9 @@ import { useAuth } from '@/auth/AuthProvider';
 const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
 import BackButton from '@/components/shared/BackButton';
 import { toastFriendlyError } from '@/utils/toastErrors';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { captureRequestDebugInfo } from '@/utils/requestDebug';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -34,6 +37,10 @@ export default function Login() {
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
+
+  const authPendingGuard = usePendingGuard('Auth');
+  const forgotPendingGuard = usePendingGuard('Forgot password');
+  const resendPendingGuard = usePendingGuard('Resend confirmation');
 
   const redirectToEmailVerified = useMemo(() => {
     return typeof window !== 'undefined' ? `${window.location.origin}/email-verified` : undefined;
@@ -104,7 +111,7 @@ export default function Login() {
   };
 
   const submitForgotPassword = async (e) => {
-    e.preventDefault();
+    e?.preventDefault?.();
     setStatus('');
     if (!isSupabaseConfigured) return;
 
@@ -113,6 +120,23 @@ export default function Login() {
       toast.error('Enter your email address');
       return;
     }
+
+    if (loading) return;
+
+    forgotPendingGuard.start({
+      retry: () => submitForgotPassword(null),
+      onTimeout: () => {
+        setLoading(false);
+        captureRequestDebugInfo({
+          label: 'Forgot password',
+          endpoint: 'supabase:resetPasswordForEmail',
+          method: 'POST',
+          elapsed_ms: forgotPendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry: () => submitForgotPassword(null) });
+      },
+    });
 
     setLoading(true);
     try {
@@ -123,12 +147,35 @@ export default function Login() {
       toastFriendlyError(err, "Couldn't send reset email");
     } finally {
       setLoading(false);
+      forgotPendingGuard.stop();
     }
   };
 
   const submit = async (e) => {
-    e.preventDefault();
+    e?.preventDefault?.();
     setStatus('');
+
+    if (loading) return;
+
+    const label = mode === 'signup' ? 'Create account' : 'Sign in';
+    const endpoint = mode === 'signup' ? 'supabase:signUp' : 'supabase:signInWithPassword';
+    const retry = () => submit(null);
+
+    authPendingGuard.start({
+      retry,
+      onTimeout: () => {
+        setLoading(false);
+        captureRequestDebugInfo({
+          label,
+          endpoint,
+          method: 'POST',
+          elapsed_ms: authPendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry });
+      },
+    });
+
     setLoading(true);
     try {
       if (!isSupabaseConfigured) return;
@@ -167,6 +214,7 @@ export default function Login() {
       setStatus(err?.message ?? 'Auth error');
     } finally {
       setLoading(false);
+      authPendingGuard.stop();
     }
   };
 
@@ -178,6 +226,24 @@ export default function Login() {
       return;
     }
 
+    if (resendLoading) return;
+
+    const retry = () => submitResend();
+    resendPendingGuard.start({
+      retry,
+      onTimeout: () => {
+        setResendLoading(false);
+        captureRequestDebugInfo({
+          label: 'Resend confirmation email',
+          endpoint: 'supabase:resendConfirmationEmail',
+          method: 'POST',
+          elapsed_ms: resendPendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry });
+      },
+    });
+
     setResendLoading(true);
     try {
       await resendConfirmationEmail(toEmail, redirectToEmailVerified ? { emailRedirectTo: redirectToEmailVerified } : undefined);
@@ -186,6 +252,7 @@ export default function Login() {
       toastFriendlyError(err, "Couldn't resend verification email");
     } finally {
       setResendLoading(false);
+      resendPendingGuard.stop();
     }
   };
 

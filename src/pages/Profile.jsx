@@ -30,6 +30,7 @@ import {
   captureRequestDebugInfo,
   copyRequestDebugInfoToClipboard,
   getRequestIdForEndpoint,
+  isDebugUiEnabledForUser,
 } from '@/utils/requestDebug';
 
 const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
@@ -64,6 +65,7 @@ export default function Profile() {
   const challengesEnabled = !!import.meta?.env?.DEV;
   const [avatarLoadError, setAvatarLoadError] = useState(null);
   const [bannerLoadError, setBannerLoadError] = useState(null);
+  const debugEnabled = isDebugUiEnabledForUser(authUser?.email);
 
   const isMobile = useMemo(() => {
     try {
@@ -429,7 +431,7 @@ export default function Profile() {
           <div className="h-24 sm:h-32 bg-gradient-to-r from-[#3A3DFF] via-[#5B5EFF] to-[#3A3DFF]" />
         )}
 
-        {bannerLoadError && (isMobile || isAdmin) ? (
+        {bannerLoadError && debugEnabled ? (
           <div className="px-4 sm:px-8 py-2 bg-amber-50 text-amber-900 text-xs font-semibold flex items-center justify-between gap-2">
             <span className="truncate">Banner image failed to load.</span>
             <Button
@@ -476,7 +478,7 @@ export default function Profile() {
                 )}
               </div>
 
-              {avatarLoadError && (isMobile || isAdmin) ? (
+              {avatarLoadError && debugEnabled ? (
                 <div className="mt-2 text-[11px] font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
                   <span className="truncate">Avatar failed to load.</span>
                   <button

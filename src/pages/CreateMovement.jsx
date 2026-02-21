@@ -1,5 +1,5 @@
 import { fetchMovementLocks } from '@/api/movementLocksClient';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { useNavigate } from 'react-router-dom';
 import { toastFriendlyError } from '@/utils/toastErrors';
@@ -20,6 +20,10 @@ import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';
 import { queryKeys } from '@/lib/queryKeys';
 import { ALLOWED_IMAGE_MIME_TYPES, ALLOWED_UPLOAD_MIME_TYPES, MAX_UPLOAD_BYTES, validateFileUpload } from '@/utils/uploadLimits';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
+import { captureRequestDebugInfo } from '@/utils/requestDebug';
+import { newIdempotencyKey } from '@/utils/idempotencyKey';
 
 const TAG_OPTIONS = [
   // Movement-type categories requested
@@ -98,6 +102,9 @@ export default function CreateMovement() {
   // submitBanner shape: { type: 'success' | 'error' | 'info', message: string }
 
   const [createdMovement, setCreatedMovement] = useState(null);
+
+  const pendingGuard = usePendingGuard('Create movement');
+  const idempotencyKeyRef = useRef(null);
 
   const aiOptIn = useMemo(() => {
     if (!user) return false;
@@ -198,6 +205,21 @@ export default function CreateMovement() {
     }
 
     if (saving) return;
+
+    pendingGuard.start({
+      retry: () => handleSubmit(null),
+      onTimeout: () => {
+        setSaving(false);
+        captureRequestDebugInfo({
+          label: 'Create movement',
+          endpoint: '/movements',
+          method: 'POST',
+          elapsed_ms: pendingGuard.timeoutMs,
+          error_message: 'Timed out after 20s',
+        });
+        showPendingTimeoutToast({ retry: () => handleSubmit(null) });
+      },
+    });
 
     try {
       setSaving(true);
@@ -359,8 +381,13 @@ export default function CreateMovement() {
       }
 
       // ✅ Real backend creation
-      const created = await createMovement(payload, { accessToken });
+      if (!idempotencyKeyRef.current) {
+        idempotencyKeyRef.current = newIdempotencyKey('movement_create');
+      }
+
+      const created = await createMovement(payload, { accessToken, idempotencyKey: idempotencyKeyRef.current });
       setCreatedMovement(created);
+      idempotencyKeyRef.current = null;
 
       // Best-effort register leadership role for decentralization tracking.
       try {
@@ -410,10 +437,17 @@ export default function CreateMovement() {
       const looksOffline =
         rawMessage.includes('Failed to fetch') ||
         rawMessage.includes('NetworkError') ||
-        rawMessage.includes('Load failed');
+        rawMessage.includes('Load failed') ||
+        /timeout/i.test(rawMessage) ||
+        String(err?.name || '') === 'TimeoutError';
       const message = looksOffline
         ? 'Could not reach the backend server. Check your connection and try again.'
         : rawMessage || "We couldn’t create your movement. Please try again.";
+
+      if (!looksOffline) {
+        // If the server rejected the request, don't reuse the key for a corrected re-submit.
+        idempotencyKeyRef.current = null;
+      }
       setSubmitBanner({
         type: 'error',
         message,
@@ -421,6 +455,7 @@ export default function CreateMovement() {
       toast.error(message);
     } finally {
       setSaving(false);
+      pendingGuard.stop();
     }
   };
 

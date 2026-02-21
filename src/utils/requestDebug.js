@@ -41,6 +41,12 @@ export function isDebugUiEnabledForUser(userEmail) {
 export function captureRequestDebugInfo(input) {
   const endpoint = input?.endpoint != null ? String(input.endpoint) : '';
   const requestId = input?.request_id != null ? String(input.request_id) : (input?.requestId != null ? String(input.requestId) : '');
+  const label = input?.label != null ? String(input.label) : (input?.op != null ? String(input.op) : '');
+  const method = input?.method != null ? String(input.method).toUpperCase() : '';
+  const statusRaw = input?.status;
+  const status = Number.isFinite(Number(statusRaw)) ? Number(statusRaw) : null;
+  const elapsedRaw = input?.elapsed_ms ?? input?.elapsedMs;
+  const elapsedMs = Number.isFinite(Number(elapsedRaw)) ? Number(elapsedRaw) : null;
   const errorMessage =
     input?.error_message != null
       ? String(input.error_message)
@@ -61,10 +67,15 @@ export function captureRequestDebugInfo(input) {
 
   const record = {
     request_id: requestId || null,
+    label: label || null,
     endpoint: endpoint || null,
+    method: method || null,
+    status,
+    elapsed_ms: elapsedMs,
     timestamp: new Date().toISOString(),
     error_message: errorMessage || null,
     user_agent: userAgent,
+    ping: input?.ping && typeof input.ping === 'object' ? input.ping : null,
   };
 
   lastDebugInfo = record;
@@ -110,11 +121,23 @@ export function formatRequestDebugInfo(record) {
   if (!record || typeof record !== 'object') return '';
   const lines = [
     `request_id: ${record.request_id || ''}`,
+    `label: ${record.label || ''}`,
     `endpoint: ${record.endpoint || ''}`,
+    `method: ${record.method || ''}`,
+    `status: ${record.status != null ? String(record.status) : ''}`,
+    `elapsed_ms: ${record.elapsed_ms != null ? String(record.elapsed_ms) : ''}`,
     `timestamp: ${record.timestamp || ''}`,
     `error_message: ${record.error_message || ''}`,
     `user_agent: ${record.user_agent || ''}`,
   ];
+
+  if (record.ping && typeof record.ping === 'object') {
+    const pingOk = record.ping.ok === true ? 'true' : (record.ping.ok === false ? 'false' : '');
+    lines.push(`ping.ok: ${pingOk}`);
+    lines.push(`ping.request_id: ${record.ping.request_id || ''}`);
+    lines.push(`ping.elapsed_ms: ${record.ping.elapsed_ms != null ? String(record.ping.elapsed_ms) : ''}`);
+    lines.push(`ping.error_message: ${record.ping.error_message || ''}`);
+  }
   return lines.join('\n');
 }
 
