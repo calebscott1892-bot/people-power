@@ -5,10 +5,14 @@ import { useAuth } from '@/auth/AuthProvider';
 import { fetchMovementVotes, voteMovement } from '@/api/movementsClient';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { queryKeys } from '@/lib/queryKeys';
+import { usePendingGuard } from '@/hooks/usePendingGuard';
+import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 
 export default function VoteButtons({ movementId, movement, className = '' }) {
   const { session } = useAuth();
   const queryClient = useQueryClient();
+  const pendingGuard = usePendingGuard('vote');
+  const [voteBusy, setVoteBusy] = React.useState(false);
 
   const id = useMemo(
     () => String(movementId ?? movement?.id ?? movement?._id ?? '').trim(),
@@ -69,12 +73,32 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
         });
       });
     },
-    onError: (e) => {
-      toast.error(getInteractionErrorMessage(e, 'Could not vote right now'));
-    },
   });
 
-  const isBusy = mutation.isPending;
+  const isBusy = voteBusy;
+
+  const runVote = React.useCallback(
+    async (nextValue) => {
+      setVoteBusy(true);
+      pendingGuard.start({
+        retry: () => runVote(nextValue),
+        onTimeout: ({ retry }) => {
+          setVoteBusy(false);
+          showPendingTimeoutToast({ retry });
+        },
+      });
+
+      try {
+        await mutation.mutateAsync(nextValue);
+      } catch (e) {
+        toast.error(getInteractionErrorMessage(e, 'Could not vote right now'));
+      } finally {
+        setVoteBusy(false);
+        pendingGuard.stop();
+      }
+    },
+    [mutation, pendingGuard]
+  );
 
   const handleVote = async (value) => {
     if (!id) return;
@@ -85,7 +109,7 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
 
     // Clicking the same vote toggles it off.
     const nextValue = myVote === value ? 0 : value;
-    mutation.mutate(nextValue);
+    runVote(nextValue);
   };
 
   const upActive = myVote === 1;
