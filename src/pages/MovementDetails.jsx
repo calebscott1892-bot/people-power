@@ -884,6 +884,26 @@ export default function MovementDetails() {
 
       return setMyMovementFollow(movementId, !!nextFollowing, { accessToken });
     },
+    // Optimistic update: toggle follow state instantly in UI.
+    onMutate: async (nextFollowing) => {
+      await queryClient.cancelQueries({ queryKey: ['movementFollow', movementId] });
+
+      const previousFollow = queryClient.getQueryData(['movementFollow', movementId]);
+      const prevCount = previousFollow?.followers_count ?? 0;
+      const wasFollowing = !!previousFollow?.following;
+
+      let nextCount = prevCount;
+      if (nextFollowing && !wasFollowing) nextCount = prevCount + 1;
+      else if (!nextFollowing && wasFollowing) nextCount = Math.max(0, prevCount - 1);
+
+      queryClient.setQueryData(['movementFollow', movementId], {
+        ...previousFollow,
+        following: !!nextFollowing,
+        followers_count: nextCount,
+      });
+
+      return { previousFollow };
+    },
     onSuccess: (next, nextFollowing) => {
       queryClient.setQueryData(['movementFollow', movementId], next);
 
@@ -939,7 +959,11 @@ export default function MovementDetails() {
         // best-effort
       }
     },
-    onError: (e) => {
+    onError: (e, _nextFollowing, context) => {
+      // Rollback optimistic update on failure.
+      if (context?.previousFollow) {
+        queryClient.setQueryData(['movementFollow', movementId], context.previousFollow);
+      }
       toast.error(getInteractionErrorMessage(e, 'Failed to update follow'));
     },
   });

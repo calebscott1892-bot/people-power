@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 export function usePendingGuard(label, options) {
-  const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options.timeoutMs) : 20_000;
+  const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options.timeoutMs) : 10_000;
 
   const [timedOut, setTimedOut] = React.useState(false);
   const timerRef = React.useRef(null);

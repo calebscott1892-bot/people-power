@@ -232,8 +232,46 @@ export default function CommentSection({ movementId, movement, canModerate = fal
 
       return createMovementComment(safeMovementId, cleanText, { accessToken, idempotencyKey: idempotencyKey ? String(idempotencyKey) : '' });
     },
-    onSuccess: async (_created) => {
+    // Optimistic update: insert the comment into the list immediately.
+    onMutate: async ({ text }) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.movements.comments(safeMovementId) });
+
+      const previousComments = queryClient.getQueryData(queryKeys.movements.comments(safeMovementId));
+      const previousCount = queryClient.getQueryData(queryKeys.movements.commentsCount(safeMovementId));
+
+      // Create an optimistic comment object.
+      const optimisticComment = {
+        id: `optimistic-${Date.now()}`,
+        movement_id: safeMovementId,
+        author_email: user?.email || '',
+        author_user_id: user?.id || '',
+        content: String(text || '').trim(),
+        created_at: new Date().toISOString(),
+        _optimistic: true,
+      };
+
+      // Inject into the infinite query cache (prepend to first page).
+      queryClient.setQueryData(queryKeys.movements.comments(safeMovementId), (old) => {
+        if (!old || !Array.isArray(old.pages)) {
+          return { pages: [[optimisticComment]], pageParams: [0] };
+        }
+        const firstPage = Array.isArray(old.pages[0]) ? [optimisticComment, ...old.pages[0]] : [optimisticComment];
+        return { ...old, pages: [firstPage, ...old.pages.slice(1)] };
+      });
+
+      // Bump comment count.
+      queryClient.setQueryData(queryKeys.movements.commentsCount(safeMovementId), (old) => {
+        const prev = typeof old === 'number' ? old : 0;
+        return prev + 1;
+      });
+
+      // Clear draft immediately for instant UX.
       setDraft('');
+
+      return { previousComments, previousCount };
+    },
+    onSuccess: async (_created, _vars, _context) => {
+      // Refetch comments to replace the optimistic entry with the real one.
       await queryClient.invalidateQueries({ queryKey: queryKeys.movements.comments(safeMovementId) });
       queryClient.setQueryData(queryKeys.movements.commentsCount(safeMovementId), (old) => {
         const prev = typeof old === 'number' ? old : null;
@@ -278,13 +316,8 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       queryClient.setQueriesData({ queryKey: ['userMovements'] }, bumpInAnyList);
       queryClient.setQueriesData({ queryKey: ['participatedMovements'] }, bumpInAnyList);
 
-      // Safety net refetch for list previews.
-      queryClient.invalidateQueries({ queryKey: ['movements'] });
-      queryClient.invalidateQueries({ queryKey: ['myMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['followedMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['searchMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['userMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['participatedMovements'] });
+      // Targeted invalidation: detail view + comments count.
+      // With optimistic insert + cache patching above, we avoid refetch storms.
       queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(safeMovementId) });
 
       toast.success('Comment posted');
@@ -313,7 +346,14 @@ export default function CommentSection({ movementId, movement, canModerate = fal
         // best-effort
       }
     },
-    onError: (e) => {
+    onError: (e, _vars, context) => {
+      // Rollback optimistic comment insertion.
+      if (context?.previousComments) {
+        queryClient.setQueryData(queryKeys.movements.comments(safeMovementId), context.previousComments);
+      }
+      if (context?.previousCount !== undefined) {
+        queryClient.setQueryData(queryKeys.movements.commentsCount(safeMovementId), context.previousCount);
+      }
       toast.error(getInteractionErrorMessage(e, "Couldn't post comment"));
     },
     onSettled: () => {
@@ -347,7 +387,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
           endpoint: safeMovementId ? `/movements/${encodeURIComponent(String(safeMovementId))}/comments` : '/movements/:id/comments',
           method: 'POST',
           elapsed_ms: postPendingGuard.timeoutMs,
-          error_message: 'Timed out after 20s',
+          error_message: 'Timed out after 10s',
         });
         showPendingTimeoutToast({ retry: () => submitPost(clean) });
         postPendingGuard.stop();

@@ -80,6 +80,37 @@ export default function BoostButtons({
       if (!accessToken) throw new Error('Authentication required');
       return voteMovement(id, nextValue, { accessToken });
     },
+    // Optimistic update: make the UI react instantly, rollback if server fails.
+    onMutate: async (nextValue) => {
+      // Cancel any outgoing refetches so they don't overwrite our optimistic update.
+      await queryClient.cancelQueries({ queryKey: queryKeys.movements.votes(id) });
+
+      // Snapshot previous value for rollback.
+      const previousVotes = queryClient.getQueryData(queryKeys.movements.votes(id));
+
+      // Optimistically compute new vote counts.
+      const prev = previousVotes || { upvotes: boostsCount, downvotes, score: 0, myVote };
+      const wasUp = prev.myVote === 1;
+      const wasDown = prev.myVote === -1;
+      const optimistic = { ...prev, myVote: nextValue };
+
+      if (nextValue === 1) {
+        optimistic.upvotes = (prev.upvotes || 0) + 1;
+        if (wasDown) optimistic.downvotes = Math.max(0, (prev.downvotes || 0) - 1);
+      } else if (nextValue === -1) {
+        optimistic.downvotes = (prev.downvotes || 0) + 1;
+        if (wasUp) optimistic.upvotes = Math.max(0, (prev.upvotes || 0) - 1);
+      } else {
+        // Toggle off
+        if (wasUp) optimistic.upvotes = Math.max(0, (prev.upvotes || 0) - 1);
+        if (wasDown) optimistic.downvotes = Math.max(0, (prev.downvotes || 0) - 1);
+      }
+      optimistic.score = (optimistic.upvotes || 0) - (optimistic.downvotes || 0);
+
+      queryClient.setQueryData(queryKeys.movements.votes(id), optimistic);
+
+      return { previousVotes };
+    },
     onSuccess: (next, nextValue) => {
       const summary =
         next && typeof next === 'object' && next.votes && typeof next.votes === 'object'
@@ -161,16 +192,19 @@ export default function BoostButtons({
       queryClient.setQueriesData({ queryKey: ['userMovements'] }, patchMovementInAnyList);
       queryClient.setQueriesData({ queryKey: ['participatedMovements'] }, patchMovementInAnyList);
 
-      // Refetch as a safety net (also covers other screens).
-      queryClient.invalidateQueries({ queryKey: ['movements'] });
-      queryClient.invalidateQueries({ queryKey: ['myMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['followedMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['searchMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['userMovements'] });
-      queryClient.invalidateQueries({ queryKey: ['participatedMovements'] });
+      // Targeted refetch: only the specific movement detail and votes.
+      // With optimistic updates + cache patching above, we don't need to
+      // blast-invalidate every list query (which caused refetch storms).
       queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.movements.votes(id) });
     },
-    onError: (e) => toast.error(getInteractionErrorMessage(e, 'Could not boost right now')),
+    onError: (e, _nextValue, context) => {
+      // Rollback optimistic update on failure.
+      if (context?.previousVotes) {
+        queryClient.setQueryData(queryKeys.movements.votes(id), context.previousVotes);
+      }
+      toast.error(getInteractionErrorMessage(e, 'Could not boost right now'));
+    },
   });
 
   const isBusy = voteBusy;
@@ -193,7 +227,7 @@ export default function BoostButtons({
           endpoint: id ? `/movements/${encodeURIComponent(String(id))}/vote` : '/movements/:id/vote',
           method: 'POST',
           elapsed_ms: votePendingGuard.timeoutMs,
-          error_message: 'Timed out after 20s',
+          error_message: 'Timed out after 10s',
         });
         showPendingTimeoutToast({ retry: () => startVoteAttempt(pendingValue) });
         votePendingGuard.stop();

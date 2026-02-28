@@ -2,7 +2,7 @@ import { SERVER_BASE } from '@/api/serverBase';
 import { getValidAccessToken } from '@/api/supabaseClient';
 import { captureRequestDebugInfo, captureRequestId } from '@/utils/requestDebug';
 
-const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_TIMEOUT_MS = 10_000;
 
 const AUTH_EXPIRED_EVENT = 'pp:auth-expired';
 const DIAG_ENABLED = (() => {
@@ -276,6 +276,43 @@ export function httpFetch(input, init) {
         elapsed_ms: Math.round(Number(elapsedMs) || 0),
         error_message: `HTTP ${res.status}`,
       });
+    }
+
+    // Performance timing log (lightweight, always-on).
+    try {
+      const perfStatus = res?.status ?? null;
+      const perfOk = !!res?.ok;
+      console.debug('[PeoplePower:perf]', {
+        endpoint,
+        method,
+        status: perfStatus,
+        ok: perfOk,
+        elapsed_ms: Math.round(Number(elapsedMs) || 0),
+        request_id: requestId || null,
+      });
+    } catch { /* ignore */ }
+
+    // Edge safety: detect non-JSON HTML responses from CDN/Cloudflare.
+    // Fail fast instead of letting the caller parse garbage.
+    if (isBackend && res && res.ok) {
+      const ct = res.headers?.get?.('content-type') || '';
+      if (ct && ct.includes('text/html') && !ct.includes('json')) {
+        const edgeErr = new Error(
+          `Unexpected HTML response from ${endpoint} — possible CDN/edge interference`
+        );
+        edgeErr.name = 'EdgeInterferenceError';
+        edgeErr.status = res.status;
+        captureRequestDebugInfo({
+          label: label || null,
+          endpoint,
+          method,
+          status: res.status,
+          request_id: requestId || null,
+          elapsed_ms: Math.round(Number(elapsedMs) || 0),
+          error_message: edgeErr.message,
+        });
+        throw edgeErr;
+      }
     }
 
     // Global 401 handling (final response after any authFetch retry):

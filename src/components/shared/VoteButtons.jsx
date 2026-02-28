@@ -44,6 +44,37 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
       if (!accessToken) throw new Error('Authentication required');
       return voteMovement(id, nextValue, { accessToken });
     },
+    // Optimistic update: update UI instantly, rollback on server failure.
+    onMutate: async (nextValue) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.movements.votes(id) });
+
+      const previousVotes = queryClient.getQueryData(queryKeys.movements.votes(id));
+      const prev = previousVotes || { upvotes, downvotes, score: 0, myVote };
+
+      const optimistic = { ...prev, myVote: nextValue };
+      const wasUp = prev.myVote === 1;
+      const wasDown = prev.myVote === -1;
+
+      if (nextValue === 1) {
+        optimistic.upvotes = (prev.upvotes || 0) + 1;
+        if (wasDown) optimistic.downvotes = Math.max(0, (prev.downvotes || 0) - 1);
+      } else if (nextValue === -1) {
+        optimistic.downvotes = (prev.downvotes || 0) + 1;
+        if (wasUp) optimistic.upvotes = Math.max(0, (prev.upvotes || 0) - 1);
+      } else {
+        if (wasUp) optimistic.upvotes = Math.max(0, (prev.upvotes || 0) - 1);
+        if (wasDown) optimistic.downvotes = Math.max(0, (prev.downvotes || 0) - 1);
+      }
+      optimistic.score = (optimistic.upvotes || 0) - (optimistic.downvotes || 0);
+
+      queryClient.setQueryData(queryKeys.movements.votes(id), optimistic);
+      return { previousVotes };
+    },
+    onError: (_err, _nextValue, context) => {
+      if (context?.previousVotes) {
+        queryClient.setQueryData(queryKeys.movements.votes(id), context.previousVotes);
+      }
+    },
     onSuccess: (next) => {
       queryClient.setQueryData(queryKeys.movements.votes(id), next);
 

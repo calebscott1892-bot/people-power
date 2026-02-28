@@ -58,12 +58,17 @@ export async function checkBackendHealth({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}
   return status;
 }
 
-// Poll every 10s
+// Poll every 15s (increased from 10s) — only when the tab is visible.
 function startPolling() {
   if (checkTimeout) clearTimeout(checkTimeout);
   const poll = async () => {
+    // Skip polling when the tab is hidden to save bandwidth and battery.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      checkTimeout = setTimeout(poll, 15000);
+      return;
+    }
     await checkBackendHealth({ timeoutMs: DEFAULT_TIMEOUT_MS });
-    checkTimeout = setTimeout(poll, 10000);
+    checkTimeout = setTimeout(poll, 15000);
   };
   poll();
 }

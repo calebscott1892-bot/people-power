@@ -27,6 +27,7 @@ import { toastFriendlyError } from '@/utils/toastErrors';
 import { httpFetch } from '@/utils/httpFetch';
 import { usePendingGuard } from '@/hooks/usePendingGuard';
 import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
+import { startPerfTimer } from '@/utils/perfLog';
 import IntroScreen from '@/components/home/IntroScreen';
 import UpdateBanner from '@/components/updates/UpdateBanner';
 import UpdatesPanel from '@/components/updates/UpdatesPanel';
@@ -117,6 +118,9 @@ function LayoutContent({ children }) {
   const userProfileQuery = useQuery({
     queryKey: queryKeys.userProfile.me(profileEmail),
     enabled: !!profileEmail && !!accessToken,
+    // Profile staleTime is generous: we have manual visibility-change refetch
+    // and mutations that patch the cache, so no need for aggressive refetching.
+    staleTime: 2 * 60 * 1000, // 2 minutes
     retry: (failureCount, error) => {
       const status = getHttpStatus(error);
       if (status === 401 || status === 403) return false;
@@ -135,10 +139,13 @@ function LayoutContent({ children }) {
       if (!profileEmail) return null;
       if (!accessToken) return null;
 
+      const perfTimer = startPerfTimer('profile_fetch', { endpoint: '/me/profile', method: 'GET' });
       try {
         const profile = await fetchMyProfile({ accessToken, profileEmail });
+        perfTimer.end({ ok: true });
         return profile || null;
       } catch (e) {
+        perfTimer.end({ ok: false, error: e?.message });
         if (!allowLocalProfileFallback) throw e;
         try {
           const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
@@ -192,13 +199,25 @@ function LayoutContent({ children }) {
   const userProfileIsError = userProfileQuery.isError;
   const debugEnabled = isDebugUiEnabledForUser(profileEmail);
 
-  const syncGuard = usePendingGuard('profile-sync', { timeoutMs: 20_000 });
+  // Delayed syncing indicator: only show after 1.5s of fetching to avoid
+  // flash-of-syncing on fast requests. This is the key UX improvement.
+  const [showSyncBanner, setShowSyncBanner] = useState(false);
+  useEffect(() => {
+    if (!userProfileFetching) {
+      setShowSyncBanner(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowSyncBanner(true), 1500);
+    return () => clearTimeout(timer);
+  }, [userProfileFetching]);
+
+  const syncGuard = usePendingGuard('profile-sync', { timeoutMs: 8_000 });
 
   useEffect(() => {
     syncGuard.watch(userProfileFetching, {
       retry: () => userProfileQuery.refetch(),
       onTimeout: async () => {
-        // Force-clear the UI banner after 20s.
+        // Force-clear the UI banner after 8s.
         showPendingTimeoutToast({
           retry: () => {
             syncGuard.stop();
@@ -212,13 +231,13 @@ function LayoutContent({ children }) {
           endpoint: '/me/profile',
           method: 'GET',
           request_id: requestId || null,
-          error_message: 'Pending state timed out (20s)',
+          error_message: 'Pending state timed out (8s)',
         });
 
         // Best-effort ping to include in debug info.
         try {
           const startedAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
-          const res = await httpFetch('/diag/ping', { method: 'GET', cache: 'no-store', timeoutMs: 8_000, retry: 0, label: 'diag-ping' });
+          const res = await httpFetch('/diag/ping', { method: 'GET', cache: 'no-store', timeoutMs: 5_000, retry: 0, label: 'diag-ping' });
           const elapsedMs =
             (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()) -
             startedAt;
@@ -228,7 +247,7 @@ function LayoutContent({ children }) {
             endpoint: '/me/profile',
             method: 'GET',
             request_id: requestId || null,
-            error_message: 'Pending state timed out (20s)',
+            error_message: 'Pending state timed out (8s)',
             ping: {
               ok: !!res?.ok,
               request_id: pingRequestId || null,
@@ -242,7 +261,7 @@ function LayoutContent({ children }) {
             endpoint: '/me/profile',
             method: 'GET',
             request_id: requestId || null,
-            error_message: 'Pending state timed out (20s)',
+            error_message: 'Pending state timed out (8s)',
             ping: {
               ok: false,
               request_id: null,
@@ -366,7 +385,7 @@ function LayoutContent({ children }) {
             <span>Reconnecting to People Power — some data may be out of date.</span>
           </div>
         </div>
-      ) : userProfileFetching && !syncGuard.timedOut ? (
+      ) : showSyncBanner && !syncGuard.timedOut ? (
         <div className="w-full border-b border-slate-200 bg-white text-slate-700 px-4 sm:px-6 py-2">
           <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
             <Loader2 className="w-4 h-4 animate-spin" />
@@ -388,8 +407,8 @@ function LayoutContent({ children }) {
         </div>
       ) : null}
 
-      {/* Update notice banner (under backend status banner) */}
-      {authUser && accessToken && profileEmail && userProfile && !userProfileLoading && !userProfileFetching ? (
+      {/* Update notice banner (under backend status banner) — never gated on fetching state */}
+      {authUser && accessToken && profileEmail && userProfile && !userProfileLoading ? (
         <UpdateBanner
           profile={userProfile}
           profileEmail={profileEmail}

@@ -111,7 +111,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [exporting, setExporting] = useState(false);
   const queryClient = useQueryClient();
 
-  const pendingGuard = usePendingGuard('edit-profile', { timeoutMs: 20_000 });
+  const pendingGuard = usePendingGuard('edit-profile', { timeoutMs: 10_000 });
   const lastBannerFileRef = useRef(null);
 
   // Hard-stop any "Saving…" state if we detect a real session expiry.
@@ -185,7 +185,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const accessToken = (await getValidAccessToken()) || (session?.access_token ? String(session.access_token) : null);
       if (!accessToken) throw new Error('Please sign in to update your profile');
 
-      const updated = await upsertMyProfile(data, { accessToken, timeoutMs: 20_000 });
+      const updated = await upsertMyProfile(data, { accessToken, timeoutMs: 10_000 });
 
       if (allowLocalProfileFallback) {
         // Keep local cache in sync for migration-mode reads.
@@ -292,7 +292,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       const uploaded = await uploadBanner(file, {
         accessToken,
         allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
-        timeoutMs: 20_000,
+        timeoutMs: 10_000,
         onProgress: (pct) => setBannerUploadProgress(Number.isFinite(pct) ? pct : 0),
       });
       const nextUrl = uploaded?.url ? String(uploaded.url) : '';
@@ -358,7 +358,7 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
           const uploaded = await uploadAvatar(pendingPhotoFile, {
             accessToken,
             allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
-            timeoutMs: 20_000,
+            timeoutMs: 10_000,
             onProgress: (pct) => setAvatarUploadProgress(Number.isFinite(pct) ? pct : 0),
           });
           const uploadedUrl = uploaded?.url ? String(uploaded.url) : '';
