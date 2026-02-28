@@ -1,5 +1,6 @@
 import { SERVER_BASE } from '@/api/serverBase';
 import { captureRequestDebugInfo } from '@/utils/requestDebug';
+import { classifyResponse, hasHtmlContentType } from '@/utils/responseClassifier';
 
 const AUTH_EXPIRED_EVENT = 'pp:auth-expired';
 const BACKEND_AUTH_FAILED_EVENT = 'backend-auth-failed';
@@ -312,7 +313,51 @@ export function installAuthFetch() {
     let res = await attempt();
 
     // If we got a clear auth failure, try one refresh+retry before forcing logout.
+    // BUT: first check if this is actually an HTML challenge/interstitial page
+    // (e.g. Cloudflare) rather than a real API auth response.
     if (isBackend && (res.status === 401 || res.status === 403)) {
+      // Quick synchronous check before the more expensive async classification.
+      const isHtml = hasHtmlContentType(res);
+
+      if (isHtml) {
+        // This is likely a Cloudflare challenge or WAF block -- NOT a real auth failure.
+        // Do NOT trigger auth-refresh/logout. Classify and capture diagnostics instead.
+        const classification = await classifyResponse(res, { snippetLength: 400 });
+        const endpoint = (() => {
+          try {
+            if (url.startsWith('/')) return url.split('?')[0];
+            return new URL(url).pathname;
+          } catch {
+            return url;
+          }
+        })();
+
+        captureRequestDebugInfo({
+          label: 'authFetch:html-intercept',
+          endpoint,
+          method: requestInit?.method || 'GET',
+          status: res.status,
+          request_id: res?.headers?.get ? res.headers.get('x-request-id') : null,
+          elapsed_ms: null,
+          error_message: `HTML response on API request (${classification.classification})`,
+          response_class: {
+            classification: classification.classification,
+            content_type: classification.contentType,
+            is_html: classification.isHtml,
+            looks_like_cf_challenge: classification.looksLikeCfChallenge,
+            looks_like_interstitial: classification.looksLikeInterstitial,
+            cf_markers_found: classification.cfMarkersFound,
+            snippet: classification.snippet ? classification.snippet.slice(0, 200) : null,
+          },
+        });
+
+        // Return the response as-is. The caller (httpFetch / React Query) will see
+        // the non-ok status and handle it as a normal API error, which is correct --
+        // retries may succeed once the challenge clears.
+        return res;
+      }
+
+      // Not HTML -- proceed with normal auth-failure handling.
       if (DEV) {
         try {
           console.debug('[PeoplePower] backend auth response', { url, status: res.status });
@@ -335,7 +380,41 @@ export function installAuthFetch() {
         }
       }
 
+      // After retry, check again -- but also re-check for HTML interstitial on the retry response.
       if (isAuthFailure && (res.status === 401 || res.status === 403)) {
+        const retryIsHtml = hasHtmlContentType(res);
+        if (retryIsHtml) {
+          // Retry also got an HTML page. Capture and return without forcing logout.
+          const retryClassification = await classifyResponse(res, { snippetLength: 400 });
+          const endpoint = (() => {
+            try {
+              if (url.startsWith('/')) return url.split('?')[0];
+              return new URL(url).pathname;
+            } catch {
+              return url;
+            }
+          })();
+          captureRequestDebugInfo({
+            label: 'authFetch:html-intercept-retry',
+            endpoint,
+            method: requestInit?.method || 'GET',
+            status: res.status,
+            request_id: res?.headers?.get ? res.headers.get('x-request-id') : null,
+            elapsed_ms: null,
+            error_message: `HTML response on retry (${retryClassification.classification})`,
+            response_class: {
+              classification: retryClassification.classification,
+              content_type: retryClassification.contentType,
+              is_html: retryClassification.isHtml,
+              looks_like_cf_challenge: retryClassification.looksLikeCfChallenge,
+              looks_like_interstitial: retryClassification.looksLikeInterstitial,
+              cf_markers_found: retryClassification.cfMarkersFound,
+              snippet: retryClassification.snippet ? retryClassification.snippet.slice(0, 200) : null,
+            },
+          });
+          return res;
+        }
+
         if (!handlingAuthFailure) {
           handlingAuthFailure = true;
 
