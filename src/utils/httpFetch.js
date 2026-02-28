@@ -1,5 +1,4 @@
 import { SERVER_BASE } from '@/api/serverBase';
-import { getValidAccessToken } from '@/api/supabaseClient';
 import { captureRequestDebugInfo, captureRequestId } from '@/utils/requestDebug';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -16,32 +15,6 @@ const DIAG_ENABLED = (() => {
 })();
 
 const DIAG_INVALID_SESSION_URL = '/__diag/invalid-session-401';
-
-function isBackendApiUrl(url) {
-  const raw = String(url || '');
-  if (!raw) return false;
-
-  if (raw.startsWith('/')) {
-    return (
-      raw.startsWith('/me/') ||
-      raw.startsWith('/api/') ||
-      raw.startsWith('/auth/') ||
-      raw.startsWith('/users/') ||
-      raw.startsWith('/movements') ||
-      raw.startsWith('/platform-acknowledgment') ||
-      raw.startsWith('/incidents') ||
-      raw.startsWith('/events') ||
-      raw.startsWith('/notifications') ||
-      raw.startsWith('/reports') ||
-      raw.startsWith('/resources') ||
-      raw.startsWith('/uploads') ||
-      raw.startsWith('/diag/') ||
-      raw.startsWith('/admin/')
-    );
-  }
-
-  return SERVER_BASE ? raw.startsWith(String(SERVER_BASE)) : false;
-}
 
 function shouldTreat401AsExpired(responseText) {
   const text = String(responseText || '').toLowerCase();
@@ -78,22 +51,28 @@ function dispatchAuthExpired(detail) {
   }
 }
 
-function withAuthHeader(existingHeaders, token) {
-  const headers = new Headers(existingHeaders || {});
-  if (token) headers.set('Authorization', `Bearer ${String(token)}`);
-  return headers;
-}
-
-function ensureJsonContentType(headers, requestInit) {
-  const h = new Headers(headers || {});
-  if (h.has('content-type')) return h;
-  const body = requestInit?.body;
-  if (typeof body !== 'string') return h;
-  const trimmed = body.trim();
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    h.set('content-type', 'application/json');
+function isBackendApiUrl(url) {
+  const raw = String(url || '');
+  if (!raw) return false;
+  if (raw.startsWith('/')) {
+    return (
+      raw.startsWith('/me/') ||
+      raw.startsWith('/api/') ||
+      raw.startsWith('/auth/') ||
+      raw.startsWith('/users/') ||
+      raw.startsWith('/movements') ||
+      raw.startsWith('/platform-acknowledgment') ||
+      raw.startsWith('/incidents') ||
+      raw.startsWith('/events') ||
+      raw.startsWith('/notifications') ||
+      raw.startsWith('/reports') ||
+      raw.startsWith('/resources') ||
+      raw.startsWith('/uploads') ||
+      raw.startsWith('/diag/') ||
+      raw.startsWith('/admin/')
+    );
   }
-  return h;
+  return SERVER_BASE ? raw.startsWith(String(SERVER_BASE)) : false;
 }
 
 export function httpFetch(input, init) {
@@ -217,32 +196,18 @@ export function httpFetch(input, init) {
 
     const isBackend = isBackendApiUrl(url);
 
-    let headers = requestInit?.headers;
-    if (isBackend) {
-      let token = null;
-      try {
-        token = await getValidAccessToken();
-      } catch {
-        token = null;
-      }
-      headers = withAuthHeader(headers, token);
-      headers = ensureJsonContentType(headers, requestInit);
-    }
+    // Auth/session token attachment is handled exclusively by authFetch (installed
+    // via installAuthFetch in AuthProvider). httpFetch does NOT attach tokens to
+    // avoid double-session-acquisition stalls (the primary reliability issue).
+    // Callers that pass an explicit Authorization header (e.g. userProfileClient)
+    // have it preserved by authFetch's withAuthHeader which prefers the fresher
+    // token but keeps the header present either way.
 
-    const fetchPromise = f(input, { ...requestInit, headers, signal: controller.signal });
-    const timeoutPromise = new Promise((_, reject) => {
-      const id = setTimeout(() => {
-        const err = new Error('Request timed out');
-        err.name = 'TimeoutError';
-        err.code = 'TIMEOUT';
-        reject(err);
-      }, resolvedTimeoutMs);
-      fetchPromise.finally(() => clearTimeout(id));
-    });
+    const fetchPromise = f(input, { ...requestInit, signal: controller.signal });
 
     let res;
     try {
-      res = await Promise.race([fetchPromise, timeoutPromise]);
+      res = await fetchPromise;
     } catch (e) {
       const elapsedMs =
         (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()) -

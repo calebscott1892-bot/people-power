@@ -16,6 +16,7 @@ import { entities } from '@/api/appClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { queryKeys } from '@/lib/queryKeys';
+import { SERVER_BASE } from '@/api/serverBase';
 import {
   captureRequestDebugInfo,
   copyRequestDebugInfoToClipboard,
@@ -216,9 +217,11 @@ function LayoutContent({ children }) {
         });
 
         // Best-effort ping to include in debug info.
+        // Uses SERVER_BASE so the ping tests the same origin as the profile request.
         try {
+          const pingUrl = `${SERVER_BASE.replace(/\/$/, '')}/diag/ping`;
           const startedAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
-          const res = await httpFetch('/diag/ping', { method: 'GET', cache: 'no-store', timeoutMs: 8_000, retry: 0, label: 'diag-ping' });
+          const res = await httpFetch(pingUrl, { method: 'GET', cache: 'no-store', timeoutMs: 8_000, retry: 0, label: 'diag-ping' });
           const elapsedMs =
             (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()) -
             startedAt;
@@ -231,8 +234,11 @@ function LayoutContent({ children }) {
             error_message: 'Pending state timed out (20s)',
             ping: {
               ok: !!res?.ok,
+              status: res?.status || null,
               request_id: pingRequestId || null,
               elapsed_ms: Math.round(Number(elapsedMs) || 0),
+              resolved_url: pingUrl,
+              origin: SERVER_BASE,
               error_message: res?.ok ? null : `Ping HTTP ${res?.status}`,
             },
           });
@@ -247,12 +253,21 @@ function LayoutContent({ children }) {
               ok: false,
               request_id: null,
               elapsed_ms: null,
+              resolved_url: `${SERVER_BASE.replace(/\/$/, '')}/diag/ping`,
+              origin: SERVER_BASE,
               error_message: e?.message ? String(e.message) : 'Ping failed',
             },
           });
         }
       },
     });
+
+    // Safety: always stop the guard timer when this effect cleans up.
+    // Prevents leaked timers if userProfileFetching transitions in ways the
+    // watch() dedup check (same-value early return) does not catch.
+    return () => {
+      syncGuard.stop();
+    };
   }, [syncGuard, userProfileFetching, userProfileQuery]);
 
   const hideFooter = location.pathname === '/login';

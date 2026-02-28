@@ -1,4 +1,5 @@
 import { SERVER_BASE } from '@/api/serverBase';
+import { captureRequestDebugInfo } from '@/utils/requestDebug';
 
 const AUTH_EXPIRED_EVENT = 'pp:auth-expired';
 const BACKEND_AUTH_FAILED_EVENT = 'backend-auth-failed';
@@ -166,6 +167,11 @@ export function installAuthFetch() {
   installed = true;
   originalFetch = window.fetch.bind(window);
 
+  const now = () =>
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+
   let handlingAuthFailure = false;
   let refreshInFlight = null;
 
@@ -186,18 +192,26 @@ export function installAuthFetch() {
     const { url, requestInit } = normalizeFetchArgs(input, init);
 
     const isBackend = isBackendUrl(url);
+
+    // -- Instrumentation: session retrieval timing --
+    const sessionStart = isBackend ? now() : 0;
     const currentSession = isBackend ? (getSession() || (await getSessionAsync().catch(() => null))) : null;
+    const sessionElapsed = isBackend ? Math.round(now() - sessionStart) : 0;
 
     // Proactively refresh if we're about to expire (mobile background/resume case).
+    let proactiveRefreshElapsed = 0;
     if (isBackend && currentSession && isSessionNearExpiry(currentSession)) {
+      const refreshStart = now();
       try {
         await refreshOnce();
       } catch {
         // ignore; we'll fall through and handle errors from the API if needed
       }
+      proactiveRefreshElapsed = Math.round(now() - refreshStart);
     }
 
     const attempt = async () => {
+      const tokenStart = now();
       let tokenNow = isBackend ? getAccessToken() : null;
       if (isBackend && !tokenNow) {
         try {
@@ -206,6 +220,7 @@ export function installAuthFetch() {
           // ignore
         }
       }
+      const tokenElapsed = isBackend ? Math.round(now() - tokenStart) : 0;
 
       const authAttached = isBackend && !!tokenNow;
       let headersNow = isBackend ? withAuthHeader(requestInit.headers, tokenNow) : requestInit.headers;
@@ -223,10 +238,42 @@ export function installAuthFetch() {
         }
       }
 
-      return originalFetch(input, {
+      const fetchStart = now();
+      const res = await originalFetch(input, {
         ...requestInit,
         headers: headersNow,
       });
+      const fetchElapsed = Math.round(now() - fetchStart);
+
+      // Structured timing capture for backend requests.
+      // This is the primary instrumentation for diagnosing stall points.
+      if (isBackend) {
+        const endpoint = (() => {
+          try {
+            if (url.startsWith('/')) return url.split('?')[0];
+            return new URL(url).pathname;
+          } catch {
+            return url;
+          }
+        })();
+        captureRequestDebugInfo({
+          label: 'authFetch',
+          endpoint,
+          method: requestInit?.method || 'GET',
+          status: res.status,
+          request_id: res?.headers?.get ? res.headers.get('x-request-id') : null,
+          elapsed_ms: fetchElapsed,
+          error_message: res.ok ? null : `HTTP ${res.status}`,
+          timing: {
+            session_ms: sessionElapsed,
+            proactive_refresh_ms: proactiveRefreshElapsed,
+            token_ms: tokenElapsed,
+            fetch_ms: fetchElapsed,
+          },
+        });
+      }
+
+      return res;
     };
 
     let res = await attempt();

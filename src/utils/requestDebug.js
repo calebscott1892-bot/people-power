@@ -76,6 +76,7 @@ export function captureRequestDebugInfo(input) {
     error_message: errorMessage || null,
     user_agent: userAgent,
     ping: input?.ping && typeof input.ping === 'object' ? input.ping : null,
+    timing: input?.timing && typeof input.timing === 'object' ? input.timing : null,
   };
 
   lastDebugInfo = record;
@@ -134,10 +135,21 @@ export function formatRequestDebugInfo(record) {
   if (record.ping && typeof record.ping === 'object') {
     const pingOk = record.ping.ok === true ? 'true' : (record.ping.ok === false ? 'false' : '');
     lines.push(`ping.ok: ${pingOk}`);
+    lines.push(`ping.status: ${record.ping.status != null ? String(record.ping.status) : ''}`);
     lines.push(`ping.request_id: ${record.ping.request_id || ''}`);
     lines.push(`ping.elapsed_ms: ${record.ping.elapsed_ms != null ? String(record.ping.elapsed_ms) : ''}`);
+    lines.push(`ping.resolved_url: ${record.ping.resolved_url || ''}`);
+    lines.push(`ping.origin: ${record.ping.origin || ''}`);
     lines.push(`ping.error_message: ${record.ping.error_message || ''}`);
   }
+
+  if (record.timing && typeof record.timing === 'object') {
+    lines.push(`timing.session_ms: ${record.timing.session_ms != null ? String(record.timing.session_ms) : ''}`);
+    lines.push(`timing.proactive_refresh_ms: ${record.timing.proactive_refresh_ms != null ? String(record.timing.proactive_refresh_ms) : ''}`);
+    lines.push(`timing.token_ms: ${record.timing.token_ms != null ? String(record.timing.token_ms) : ''}`);
+    lines.push(`timing.fetch_ms: ${record.timing.fetch_ms != null ? String(record.timing.fetch_ms) : ''}`);
+  }
+
   return lines.join('\n');
 }
 
