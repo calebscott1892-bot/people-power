@@ -239,10 +239,43 @@ export function installAuthFetch() {
       }
 
       const fetchStart = now();
-      const res = await originalFetch(input, {
-        ...requestInit,
-        headers: headersNow,
-      });
+      let res;
+      try {
+        res = await originalFetch(input, {
+          ...requestInit,
+          headers: headersNow,
+        });
+      } catch (fetchErr) {
+        const fetchElapsed = Math.round(now() - fetchStart);
+        // Capture timing even on network errors / aborts so the debug output
+        // shows where time was spent before the failure.
+        if (isBackend) {
+          const endpoint = (() => {
+            try {
+              if (url.startsWith('/')) return url.split('?')[0];
+              return new URL(url).pathname;
+            } catch {
+              return url;
+            }
+          })();
+          captureRequestDebugInfo({
+            label: 'authFetch',
+            endpoint,
+            method: requestInit?.method || 'GET',
+            status: null,
+            request_id: null,
+            elapsed_ms: fetchElapsed,
+            error_message: fetchErr?.message ? String(fetchErr.message) : 'fetch failed',
+            timing: {
+              session_ms: sessionElapsed,
+              proactive_refresh_ms: proactiveRefreshElapsed,
+              token_ms: tokenElapsed,
+              fetch_ms: fetchElapsed,
+            },
+          });
+        }
+        throw fetchErr;
+      }
       const fetchElapsed = Math.round(now() - fetchStart);
 
       // Structured timing capture for backend requests.
