@@ -15,14 +15,6 @@ function isDev() {
   }
 }
 
-function isProd() {
-  try {
-    return !!import.meta?.env?.PROD;
-  } catch {
-    return false;
-  }
-}
-
 function devLogOnce(kind, message) {
   if (!isDev()) return;
   if (kind === 'fallback') {
@@ -43,16 +35,6 @@ function isOnline() {
 }
 
 export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
-  // Messaging is currently disabled in production; do not open sockets.
-  if (isProd()) {
-    try {
-      if (typeof onStatus === 'function') onStatus('disabled');
-    } catch {
-      // ignore
-    }
-    return null;
-  }
-
   if (wsDisabledForSession) {
     try {
       if (typeof onStatus === 'function') onStatus('disabled');
@@ -161,14 +143,14 @@ export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
     if (retryTimer) return;
 
     // If WS repeatedly fails, disable for this page session to avoid console spam.
-    if (failures >= 3) {
+    if (failures >= 5) {
       wsDisabledForSession = true;
       emitStatus('disabled');
       devLogOnce('fallback', '[Messages] WebSocket unavailable, falling back to polling');
       return;
     }
 
-    const wait = Math.min(10_000, retryMs);
+    const wait = Math.min(15_000, retryMs);
     retryMs = Math.min(30_000, Math.floor(retryMs * 2));
     retryTimer = setTimeout(() => {
       retryTimer = null;

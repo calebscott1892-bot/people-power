@@ -341,7 +341,7 @@ function LayoutContent({ children }) {
     { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
     { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
-    { name: `${t('messages') || 'Messages'} (soon)`, page: 'Messages', icon: MessageCircle, comingSoon: true },
+    { name: t('messages') || 'Messages', page: 'Messages', icon: MessageCircle },
     { name: t('profile'), page: 'Profile', icon: User },
   ];
 

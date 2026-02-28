@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Check, CheckCheck, Image as ImageIcon, Loader2, MessageCircle, Plus, Search, Send, SmilePlus } from 'lucide-react';
+import { ArrowLeft, Check, CheckCheck, Image as ImageIcon, Loader2, MessageCircle, Plus, Search, Send, SmilePlus } from 'lucide-react';
 import { useAuth } from '@/auth/AuthProvider';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -52,7 +52,6 @@ import {
   MAX_UPLOAD_BYTES,
   validateFileUpload,
 } from '@/utils/uploadLimits';
-import MessagesComingSoon from '@/pages/MessagesComingSoon';
 import { queryKeys } from '@/lib/queryKeys';
 
 function safeJsonParse(text) {
@@ -273,6 +272,11 @@ function MessagesInner() {
   const [box, setBox] = useState('messages');
   const [search, setSearch] = useState('');
   const [pendingMessages, setPendingMessages] = useState([]);
+  const [mobileShowChat, setMobileShowChat] = useState(false);
+
+  const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
+  const draftInputRef = useRef(null);
 
   const realtimeRef = useRef(null);
   const [realtimeStatus, setRealtimeStatus] = useState('disconnected');
@@ -1132,6 +1136,37 @@ function MessagesInner() {
     });
   }, [messages, pendingMessages]);
 
+  // Auto-scroll to bottom when new messages arrive or conversation changes.
+  const prevMessageCountRef = useRef(0);
+  useLayoutEffect(() => {
+    const count = mergedMessages.length;
+    const wasEmpty = prevMessageCountRef.current === 0;
+    const hasNewMessages = count > prevMessageCountRef.current;
+    prevMessageCountRef.current = count;
+
+    if ((wasEmpty || hasNewMessages) && messagesEndRef.current) {
+      // Use instant scroll on first load, smooth scroll on new messages
+      messagesEndRef.current.scrollIntoView({
+        behavior: wasEmpty ? 'instant' : 'smooth',
+        block: 'end',
+      });
+    }
+  }, [mergedMessages.length]);
+
+  // Reset scroll tracker when conversation changes
+  useEffect(() => {
+    prevMessageCountRef.current = 0;
+  }, [selectedId]);
+
+  // Focus the draft input when a conversation is selected
+  useEffect(() => {
+    if (selectedId && draftInputRef.current) {
+      // Small delay to ensure the DOM is ready
+      const timer = setTimeout(() => draftInputRef.current?.focus(), 100);
+      return () => clearTimeout(timer);
+    }
+  }, [selectedId]);
+
   const markReadMutation = useMutation({
     mutationFn: async (conversationId) => markConversationRead(conversationId, { accessToken, myEmail }),
     onSuccess: () => {
@@ -1521,11 +1556,16 @@ function MessagesInner() {
   const handleConversationStarted = (convo) => {
     if (!convo?.id) return;
     setSelectedId(String(convo.id));
+    setMobileShowChat(true);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.set('conversationId', String(convo.id));
       return next;
     });
+  };
+
+  const handleBackToList = () => {
+    setMobileShowChat(false);
   };
 
   if (loading) {
@@ -1552,8 +1592,11 @@ function MessagesInner() {
     <div className="max-w-6xl mx-auto px-3 sm:px-4 py-6 sm:py-8">
       <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden">
         <div className="grid grid-cols-1 md:grid-cols-3 min-h-[70vh]">
-          {/* Left: conversations */}
-          <div className="border-b md:border-b-0 md:border-r border-slate-200">
+          {/* Left: conversations — hidden on mobile when chat is open */}
+          <div className={cn(
+            "border-b md:border-b-0 md:border-r border-slate-200",
+            mobileShowChat && selectedConversation ? "hidden md:block" : "block"
+          )}>
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <MessageCircle className="w-5 h-5 text-slate-700" />
@@ -1727,6 +1770,7 @@ function MessagesInner() {
                         key={id}
                         onClick={() => {
                           setSelectedId(id);
+                          setMobileShowChat(true);
                           setSearchParams((prev) => {
                             const next = new URLSearchParams(prev);
                             next.set('conversationId', id);
@@ -1801,8 +1845,11 @@ function MessagesInner() {
             )}
           </div>
 
-          {/* Right: chat */}
-          <div className="md:col-span-2 flex flex-col">
+          {/* Right: chat — shown on mobile only when a chat is selected */}
+          <div className={cn(
+            "md:col-span-2 flex flex-col",
+            !mobileShowChat && "hidden md:flex"
+          )}>
             {!selectedConversation ? (
               <div className="flex-1 flex items-center justify-center p-8 text-center">
                 <div className="space-y-3">
@@ -1814,6 +1861,15 @@ function MessagesInner() {
               <>
                 <div className="p-4 border-b border-slate-200">
                   <div className="flex items-start justify-between gap-3">
+                  {/* Mobile back button */}
+                  <button
+                    type="button"
+                    onClick={handleBackToList}
+                    className="md:hidden flex items-center gap-1 text-slate-600 hover:text-slate-900 mr-2 mt-1"
+                    aria-label="Back to conversations"
+                  >
+                    <ArrowLeft className="w-5 h-5" />
+                  </button>
                   <div className="flex items-start gap-3">
                       <Avatar className="h-10 w-10">
                         <AvatarImage
@@ -1830,7 +1886,11 @@ function MessagesInner() {
                       </Avatar>
                       <div>
                         <div className="font-black text-slate-900">{selectedTitle || 'Conversation'}</div>
-                        <div className="text-xs text-slate-500 font-bold mt-1">
+                        <div className="text-xs text-slate-500 font-bold mt-1 flex items-center gap-1.5">
+                          <span className={cn(
+                            "inline-block w-2 h-2 rounded-full",
+                            realtimeConnected ? "bg-green-500" : "bg-amber-400"
+                          )} />
                           End-to-end encrypted
                           {isGroupConversation
                             ? ` • ${groupParticipants.length} participants`
@@ -1909,7 +1969,7 @@ function MessagesInner() {
                   )}
                 </div>
 
-                <div className="flex-1 p-4 overflow-y-auto bg-slate-50">
+                <div ref={messagesContainerRef} className="flex-1 p-4 overflow-y-auto bg-slate-50">
                   {messagesLoading ? (
                     <div className="text-slate-600 font-semibold flex items-center gap-2">
                       <Loader2 className="w-4 h-4 animate-spin" />
@@ -2127,6 +2187,7 @@ function MessagesInner() {
                           </div>
                         );
                       })}
+                      <div ref={messagesEndRef} />
                     </div>
                   )}
                 </div>
@@ -2227,6 +2288,7 @@ function MessagesInner() {
                       <ImageIcon className="w-5 h-5" />
                     </Button>
                     <Input
+                      ref={draftInputRef}
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
                       placeholder="Write a message..."
@@ -2570,7 +2632,5 @@ function MessagesInner() {
 }
 
 export default function Messages() {
-  // Hard-disable messaging runtime in production builds.
-  if (import.meta?.env?.PROD) return <MessagesComingSoon />;
   return <MessagesInner />;
 }
