@@ -1,11 +1,11 @@
-import { entities } from '@/api/appClient';
-import { getAwTimeKey, getAwTimeKeyNDaysAgo } from '@/utils/awTime';
+import { SERVER_BASE } from './serverBase';
+import { httpFetch } from '@/utils/httpFetch';
+import { getAwTimeKey } from '@/utils/awTime';
 
-const CHALLENGES_ENABLED = !!import.meta?.env?.DEV;
+const BASE = () => String(SERVER_BASE || '').replace(/\/+$/, '');
 
-function assertChallengesEnabled() {
-  if (CHALLENGES_ENABLED) return;
-  throw new Error('Daily Challenges are temporarily disabled while we add server persistence.');
+async function safeReadJson(res) {
+  try { return await res.json(); } catch { return null; }
 }
 
 function normalizeEmail(email) {
@@ -13,89 +13,55 @@ function normalizeEmail(email) {
   return s || null;
 }
 
-export async function fetchOrCreateUserChallengeStats(userEmail) {
-  assertChallengesEnabled();
-  const email = normalizeEmail(userEmail);
-  if (!email) return null;
-
-  const existing = await entities.UserChallengeStats.filter({ user_email: email });
-  if (Array.isArray(existing) && existing.length > 0) return existing[0];
-
-  return entities.UserChallengeStats.create({
-    user_email: email,
-    total_points: 0,
-    current_streak: 0,
-    total_challenges_completed: 0,
-    unlocked_profile_accents: [],
-    unlocked_post_flair: [],
-    unlocked_profile_badges: [],
-    created_at: new Date().toISOString(),
-  });
+export async function fetchOrCreateUserChallengeStats(_userEmail) {
+  const url = `${BASE()}/challenge-stats`;
+  const res = await httpFetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const msg = body?.error || body?.message || 'Failed to load challenge stats';
+    throw new Error(msg);
+  }
+  return body || null;
 }
 
 export async function unlockExpressionReward(userEmail, reward) {
-  assertChallengesEnabled();
-  const email = normalizeEmail(userEmail);
-  if (!email) throw new Error('Missing user email');
-
-  const stats = await fetchOrCreateUserChallengeStats(email);
-  if (!stats?.id) throw new Error('Missing stats record');
-
-  const totalPoints = Number(stats?.total_points || 0);
-  const cost = Number(reward?.points || 0);
-  if (!Number.isFinite(cost) || cost <= 0) throw new Error('Invalid reward');
-
-  const type = String(reward?.type || '');
-  const rewardId = String(reward?.id || '');
-  if (!rewardId) throw new Error('Invalid reward');
-
-  const unlockedAccents = Array.isArray(stats?.unlocked_profile_accents) ? stats.unlocked_profile_accents : [];
-  const unlockedFlair = Array.isArray(stats?.unlocked_post_flair) ? stats.unlocked_post_flair : [];
-  const unlockedBadges = Array.isArray(stats?.unlocked_profile_badges) ? stats.unlocked_profile_badges : [];
-
-  const alreadyUnlocked =
-    (type === 'accent' && unlockedAccents.includes(rewardId)) ||
-    (type === 'flair' && unlockedFlair.includes(rewardId)) ||
-    (type === 'badge' && unlockedBadges.includes(rewardId));
-
-  if (alreadyUnlocked) return stats;
-  if (totalPoints < cost) throw new Error('Not enough points');
-
-  const updates = { total_points: totalPoints - cost };
-  if (type === 'accent') updates.unlocked_profile_accents = [...new Set([...unlockedAccents, rewardId])];
-  else if (type === 'flair') updates.unlocked_post_flair = [...new Set([...unlockedFlair, rewardId])];
-  else if (type === 'badge') updates.unlocked_profile_badges = [...new Set([...unlockedBadges, rewardId])];
-  else throw new Error('Invalid reward type');
-
-  return entities.UserChallengeStats.update(stats.id, updates);
+  if (!reward?.id) throw new Error('Invalid reward');
+  const url = `${BASE()}/challenge-stats/unlock`;
+  const res = await httpFetch(url, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: String(reward.type || ''),
+      id: String(reward.id || ''),
+      points: Number(reward.points || 0),
+    }),
+  });
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const msg = body?.error || body?.message || 'Failed to unlock reward';
+    throw new Error(msg);
+  }
+  return body || null;
 }
 
 function todayKey() {
   return getAwTimeKey();
 }
 
-function yesterdayKey() {
-  return getAwTimeKeyNDaysAgo(1);
-}
-
-function getEffectiveCurrentStreak(stats) {
-  const last = stats?.last_completion_date ? String(stats.last_completion_date) : null;
-  if (!last) return 0;
-  const t = todayKey();
-  const y = yesterdayKey();
-  if (last === t || last === y) return Number(stats?.current_streak || 0) || 0;
-  return 0;
-}
-
 export async function listChallengeCompletions({ userEmail } = {}) {
-  assertChallengesEnabled();
   const email = normalizeEmail(userEmail);
-  if (email) return entities.ChallengeCompletion.filter({ user_email: email });
-  return entities.ChallengeCompletion.list();
+  let url = `${BASE()}/challenge-completions`;
+  if (email) url += `?user_email=${encodeURIComponent(email)}`;
+  const res = await httpFetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const msg = body?.error || body?.message || 'Failed to load completions';
+    throw new Error(msg);
+  }
+  return Array.isArray(body) ? body : [];
 }
 
 export async function recordChallengeCompletion(userEmail, challenge, completionPayload) {
-  assertChallengesEnabled();
   const email = normalizeEmail(userEmail);
   if (!email) throw new Error('Missing user email');
   if (!challenge?.id) throw new Error('Missing challenge');
@@ -114,73 +80,24 @@ export async function recordChallengeCompletion(userEmail, challenge, completion
     if (hasImage) return 'image';
     return String(completionPayload?.evidence_type || 'none');
   })();
-  const isVerified = !!(evidenceText && evidenceText.trim()) || !!evidenceImageUrl;
 
-  // Prevent duplicate completion of the same challenge on the same day.
-  const existingToday = await entities.ChallengeCompletion.filter({
-    user_email: email,
-    challenge_id: challengeId,
-    date: t,
+  const url = `${BASE()}/challenge-completions`;
+  const res = await httpFetch(url, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      challenge_id: challengeId,
+      date: t,
+      points,
+      evidence_type: derivedEvidenceType,
+      evidence_text: evidenceText,
+      evidence_image_url: evidenceImageUrl,
+    }),
   });
-  if (Array.isArray(existingToday) && existingToday.length > 0) return existingToday[0];
-
-  const completion = await entities.ChallengeCompletion.create({
-    user_email: email,
-    challenge_id: challengeId,
-    date: t,
-    points,
-    evidence_type: derivedEvidenceType,
-    evidence_text: evidenceText,
-    evidence_image_url: evidenceImageUrl,
-    is_verified: !!isVerified,
-    created_at: new Date().toISOString(),
-  });
-
-  // Update aggregated stats.
-  const stats = await fetchOrCreateUserChallengeStats(email);
-  if (!stats?.id) return completion;
-
-  const last = stats?.last_completion_date ? String(stats.last_completion_date) : null;
-  const y = yesterdayKey();
-  const didAdvanceStreak = last !== t;
-
-  const prevEffectiveStreak = getEffectiveCurrentStreak(stats);
-  let nextStreak = prevEffectiveStreak;
-  if (didAdvanceStreak) {
-    if (last === y) nextStreak = prevEffectiveStreak + 1;
-    else nextStreak = 1;
+  const body = await safeReadJson(res);
+  if (!res.ok) {
+    const msg = body?.error || body?.message || 'Failed to record completion';
+    throw new Error(msg);
   }
-
-  const nextLongest = Math.max(Number(stats?.longest_streak || 0) || 0, nextStreak);
-  const nextTotalChallengesCompleted = (Number(stats?.total_challenges_completed || 0) || 0) + 1;
-
-  let nextPoints = (Number(stats?.total_points || 0) || 0) + points;
-  let awardedBonus = 0;
-
-  // Award streak bonuses at milestones once per day.
-  const alreadyAwardedToday = String(stats?.last_streak_bonus_date || '') === t;
-  if (!alreadyAwardedToday && didAdvanceStreak) {
-    const milestoneBonuses = {
-      1: 5,
-      3: 15,
-      7: 40,
-      30: 200,
-    };
-    const bonus = milestoneBonuses[nextStreak] || 0;
-    if (bonus > 0) {
-      awardedBonus = bonus;
-      nextPoints += bonus;
-    }
-  }
-
-  await entities.UserChallengeStats.update(stats.id, {
-    total_points: nextPoints,
-    total_challenges_completed: nextTotalChallengesCompleted,
-    current_streak: nextStreak,
-    longest_streak: nextLongest,
-    last_completion_date: t,
-    last_streak_bonus_date: awardedBonus > 0 ? t : (stats?.last_streak_bonus_date || null),
-  });
-
-  return completion;
+  return body?.completion || body || null;
 }

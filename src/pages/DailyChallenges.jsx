@@ -51,17 +51,6 @@ function effectiveCurrentStreak(stats) {
   return 0;
 }
 
-function DailyChallengesProd() {
-  return (
-    <div className="max-w-2xl mx-auto px-6 py-10">
-      <BackButton label="Back" />
-      <div className="mt-4 p-4 rounded-2xl border border-slate-200 bg-slate-50 text-sm text-slate-700 font-semibold">
-        Daily Challenges are temporarily disabled while we add server persistence.
-      </div>
-    </div>
-  );
-}
-
 function DailyChallengesDev() {
   const { user, loading } = useAuth();
   const queryClient = useQueryClient();
@@ -411,6 +400,6 @@ function DailyChallengesDev() {
   );
 }
 
-const DailyChallenges = import.meta?.env?.DEV ? DailyChallengesDev : DailyChallengesProd;
+const DailyChallenges = DailyChallengesDev;
 
 export default DailyChallenges;

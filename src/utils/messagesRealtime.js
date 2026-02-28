@@ -3,9 +3,17 @@ import { getMessagesWsUrl } from '@/api/messagesClient';
 // Best-effort realtime: must be quiet and always fall back to polling.
 // Note: browsers may still print a single low-level WS failure message; we
 // prevent repeated reconnect spam by disabling WS after repeated failures.
+// The disabled flag is reset whenever a fresh connection is requested (e.g.
+// navigating back to Messages) or when the tab regains visibility.
 let wsDisabledForSession = false;
 let wsLoggedFallback = false;
 let wsLoggedStartup = false;
+
+// Allow external code (or a new connectMessagesRealtime call) to re-enable WS.
+export function resetWsDisabled() {
+  wsDisabledForSession = false;
+  wsLoggedFallback = false;
+}
 
 function isDev() {
   try {
@@ -35,14 +43,8 @@ function isOnline() {
 }
 
 export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
-  if (wsDisabledForSession) {
-    try {
-      if (typeof onStatus === 'function') onStatus('disabled');
-    } catch {
-      // ignore
-    }
-    return null;
-  }
+  // Each fresh call resets the disabled flag so WS can retry after failures.
+  wsDisabledForSession = false;
 
   const urlString = getMessagesWsUrl(accessToken);
   if (!urlString) return null;
@@ -54,6 +56,7 @@ export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
   let failures = 0;
   let openedOnce = false;
   let onlineListenerAttached = false;
+  let heartbeatTimer = null;
 
   function emitStatus(status) {
     try {
@@ -109,6 +112,15 @@ export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
       failures = 0;
       retryMs = 1000;
       emitStatus('connected');
+      // Start periodic heartbeat
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      heartbeatTimer = setInterval(() => {
+        try {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'ping' }));
+          }
+        } catch { /* ignore */ }
+      }, 25_000);
       try {
         socket.send(JSON.stringify({ type: 'ping' }));
       } catch {
@@ -143,7 +155,7 @@ export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
     if (retryTimer) return;
 
     // If WS repeatedly fails, disable for this page session to avoid console spam.
-    if (failures >= 5) {
+    if (failures >= 10) {
       wsDisabledForSession = true;
       emitStatus('disabled');
       devLogOnce('fallback', '[Messages] WebSocket unavailable, falling back to polling');
@@ -174,6 +186,10 @@ export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
     if (retryTimer) {
       clearTimeout(retryTimer);
       retryTimer = null;
+    }
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
     }
     try {
       socket?.close();

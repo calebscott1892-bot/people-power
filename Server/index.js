@@ -1152,6 +1152,259 @@ async function ensureChallengesTable() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges (status)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_challenges_dates ON challenges (start_date, end_date)');
 }
+
+// --- Challenge Completions & User Stats Tables ---
+async function ensureChallengeCompletionsTable() {
+  if (!isDbAvailable()) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS challenge_completions (
+      id TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      challenge_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      points INTEGER NOT NULL DEFAULT 0,
+      evidence_type TEXT DEFAULT 'none',
+      evidence_text TEXT NULL,
+      evidence_image_url TEXT NULL,
+      is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_cc_user ON challenge_completions (user_email)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_cc_date ON challenge_completions (date)');
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_cc_uniq ON challenge_completions (user_email, challenge_id, date)');
+}
+
+async function ensureUserChallengeStatsTable() {
+  if (!isDbAvailable()) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_challenge_stats (
+      id TEXT PRIMARY KEY,
+      user_email TEXT NOT NULL UNIQUE,
+      total_points INTEGER NOT NULL DEFAULT 0,
+      current_streak INTEGER NOT NULL DEFAULT 0,
+      longest_streak INTEGER NOT NULL DEFAULT 0,
+      total_challenges_completed INTEGER NOT NULL DEFAULT 0,
+      last_completion_date TEXT NULL,
+      last_streak_bonus_date TEXT NULL,
+      unlocked_profile_accents JSONB NOT NULL DEFAULT '[]',
+      unlocked_post_flair JSONB NOT NULL DEFAULT '[]',
+      unlocked_profile_badges JSONB NOT NULL DEFAULT '[]',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_ucs_email ON user_challenge_stats (user_email)');
+}
+
+// --- Challenge Completions API ---
+
+// GET /challenge-stats — fetch (or create) the current user's stats
+fastify.get('/challenge-stats', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
+
+  const myEmail = normalizeEmail(authedUser.email);
+  if (!myEmail) return reply.code(400).send({ error: 'Missing user email' });
+
+  await ensureUserChallengeStatsTable();
+
+  const existing = await pool.query('SELECT * FROM user_challenge_stats WHERE user_email = $1', [myEmail]);
+  if (existing.rows.length > 0) return reply.send(existing.rows[0]);
+
+  // Auto-create a fresh stats record
+  const id = randomUUID();
+  const now = nowIso();
+  const res = await pool.query(
+    `INSERT INTO user_challenge_stats (id, user_email, created_at, updated_at)
+     VALUES ($1, $2, $3, $3) ON CONFLICT (user_email) DO NOTHING RETURNING *`,
+    [id, myEmail, now]
+  );
+  if (res.rows.length > 0) return reply.send(res.rows[0]);
+
+  // Race: someone else inserted — re-fetch
+  const refetch = await pool.query('SELECT * FROM user_challenge_stats WHERE user_email = $1', [myEmail]);
+  return reply.send(refetch.rows[0] || null);
+});
+
+// GET /challenge-completions — list completions for the current user or all users
+fastify.get('/challenge-completions', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
+
+  await ensureChallengeCompletionsTable();
+
+  const myEmail = normalizeEmail(authedUser.email);
+  const userFilter = request.query?.user_email ? normalizeEmail(request.query.user_email) : null;
+  const dateFilter = request.query?.date ? String(request.query.date).trim() : null;
+
+  let query = 'SELECT * FROM challenge_completions';
+  const params = [];
+  const conditions = [];
+
+  if (userFilter) {
+    // Users can only see their own completions or all completions (no spying on specific others)
+    if (userFilter !== myEmail) {
+      return reply.code(403).send({ error: 'Cannot view other users\' completions' });
+    }
+    conditions.push(`user_email = $${params.length + 1}`);
+    params.push(userFilter);
+  }
+  if (dateFilter && /^\d{4}-\d{2}-\d{2}$/.test(dateFilter)) {
+    conditions.push(`date = $${params.length + 1}`);
+    params.push(dateFilter);
+  }
+
+  if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
+  query += ' ORDER BY created_at DESC LIMIT 500';
+
+  const res = await pool.query(query, params);
+  return reply.send(res.rows || []);
+});
+
+// POST /challenge-completions — record a challenge completion
+fastify.post('/challenge-completions', { config: { rateLimit: { max: 30, timeWindow: 60 * 60 * 1000 } } }, async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
+
+  const myEmail = normalizeEmail(authedUser.email);
+  if (!myEmail) return reply.code(400).send({ error: 'Missing user email' });
+
+  const body = request.body || {};
+  const challengeId = body.challenge_id ? String(body.challenge_id).trim() : null;
+  const date = body.date ? String(body.date).trim() : null;
+  const points = Number.isFinite(Number(body.points)) ? Math.max(0, Math.min(1000, Number(body.points))) : 0;
+  const evidenceText = body.evidence_text ? String(body.evidence_text).slice(0, 2000) : null;
+  const evidenceImageUrl = body.evidence_image_url ? String(body.evidence_image_url).slice(0, 800) : null;
+  const evidenceType = body.evidence_type ? String(body.evidence_type).slice(0, 20) : 'none';
+  const isVerified = !!(evidenceText && evidenceText.trim()) || !!evidenceImageUrl;
+
+  if (!challengeId) return reply.code(400).send({ error: 'challenge_id is required' });
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return reply.code(400).send({ error: 'Valid date (YYYY-MM-DD) is required' });
+
+  await ensureChallengeCompletionsTable();
+  await ensureUserChallengeStatsTable();
+
+  // Prevent duplicate completion on the same day
+  const dup = await pool.query(
+    'SELECT id FROM challenge_completions WHERE user_email = $1 AND challenge_id = $2 AND date = $3',
+    [myEmail, challengeId, date]
+  );
+  if (dup.rows.length > 0) {
+    return reply.send({ completion: dup.rows[0], duplicate: true });
+  }
+
+  const completionId = randomUUID();
+  const now = nowIso();
+  const compRes = await pool.query(
+    `INSERT INTO challenge_completions (id, user_email, challenge_id, date, points, evidence_type, evidence_text, evidence_image_url, is_verified, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [completionId, myEmail, challengeId, date, points, evidenceType, evidenceText, evidenceImageUrl, isVerified, now]
+  );
+  const completion = compRes.rows[0] || null;
+
+  // Update aggregated user stats
+  const statsRes = await pool.query('SELECT * FROM user_challenge_stats WHERE user_email = $1', [myEmail]);
+  let stats = statsRes.rows[0] || null;
+  if (!stats) {
+    const sid = randomUUID();
+    const insertRes = await pool.query(
+      `INSERT INTO user_challenge_stats (id, user_email, created_at, updated_at)
+       VALUES ($1, $2, $3, $3) ON CONFLICT (user_email) DO NOTHING RETURNING *`,
+      [sid, myEmail, now]
+    );
+    stats = insertRes.rows[0] || (await pool.query('SELECT * FROM user_challenge_stats WHERE user_email = $1', [myEmail])).rows[0];
+  }
+
+  if (stats) {
+    const lastDate = stats.last_completion_date ? String(stats.last_completion_date) : null;
+    const yesterdayDate = (() => {
+      const d = new Date(); d.setDate(d.getDate() - 1);
+      return d.toISOString().slice(0, 10);
+    })();
+    const didAdvance = lastDate !== date;
+
+    let nextStreak = Number(stats.current_streak || 0);
+    if (didAdvance) {
+      if (lastDate === yesterdayDate) nextStreak += 1;
+      else nextStreak = 1;
+    }
+    const nextLongest = Math.max(Number(stats.longest_streak || 0), nextStreak);
+    const nextTotal = (Number(stats.total_challenges_completed || 0)) + 1;
+    let nextPoints = (Number(stats.total_points || 0)) + points;
+
+    // Streak milestone bonuses
+    const alreadyBonusToday = String(stats.last_streak_bonus_date || '') === date;
+    let bonusAwarded = 0;
+    if (!alreadyBonusToday && didAdvance) {
+      const bonuses = { 1: 5, 3: 15, 7: 40, 30: 200 };
+      bonusAwarded = bonuses[nextStreak] || 0;
+      nextPoints += bonusAwarded;
+    }
+
+    await pool.query(
+      `UPDATE user_challenge_stats SET
+         total_points = $2,
+         current_streak = $3,
+         longest_streak = $4,
+         total_challenges_completed = $5,
+         last_completion_date = $6,
+         last_streak_bonus_date = CASE WHEN $7 > 0 THEN $6 ELSE last_streak_bonus_date END,
+         updated_at = $8
+       WHERE user_email = $1`,
+      [myEmail, nextPoints, nextStreak, nextLongest, nextTotal, date, bonusAwarded, now]
+    );
+  }
+
+  return reply.send({ completion, duplicate: false });
+});
+
+// POST /challenge-stats/unlock — unlock an expression reward
+fastify.post('/challenge-stats/unlock', async (request, reply) => {
+  const authedUser = await requireVerifiedUser(request, reply);
+  if (!authedUser) return;
+  if (!isDbAvailable()) return reply.code(503).send({ error: 'Database unavailable' });
+
+  const myEmail = normalizeEmail(authedUser.email);
+  if (!myEmail) return reply.code(400).send({ error: 'Missing user email' });
+
+  const body = request.body || {};
+  const rewardType = String(body.type || '').trim();
+  const rewardId = String(body.id || '').trim();
+  const cost = Number(body.points || 0);
+
+  if (!rewardId) return reply.code(400).send({ error: 'Reward id is required' });
+  if (!['accent', 'flair', 'badge'].includes(rewardType)) return reply.code(400).send({ error: 'Invalid reward type' });
+  if (!Number.isFinite(cost) || cost <= 0) return reply.code(400).send({ error: 'Invalid reward cost' });
+
+  await ensureUserChallengeStatsTable();
+
+  const statsRes = await pool.query('SELECT * FROM user_challenge_stats WHERE user_email = $1', [myEmail]);
+  const stats = statsRes.rows[0];
+  if (!stats) return reply.code(404).send({ error: 'No stats found — complete a challenge first' });
+
+  const totalPoints = Number(stats.total_points || 0);
+  if (totalPoints < cost) return reply.code(400).send({ error: 'Not enough points' });
+
+  const columnMap = { accent: 'unlocked_profile_accents', flair: 'unlocked_post_flair', badge: 'unlocked_profile_badges' };
+  const column = columnMap[rewardType];
+  const current = Array.isArray(stats[column]) ? stats[column] : [];
+  if (current.includes(rewardId)) return reply.send(stats); // Already unlocked
+
+  const updated = [...new Set([...current, rewardId])];
+  const now = nowIso();
+  await pool.query(
+    `UPDATE user_challenge_stats SET ${column} = $2, total_points = $3, updated_at = $4 WHERE user_email = $1`,
+    [myEmail, JSON.stringify(updated), totalPoints - cost, now]
+  );
+
+  const refreshed = await pool.query('SELECT * FROM user_challenge_stats WHERE user_email = $1', [myEmail]);
+  return reply.send(refreshed.rows[0] || stats);
+});
+
 // --- Research Mode Config API (admin-only) ---
 
 

@@ -43,6 +43,9 @@ export function createPageUrl(pageName: string) {
         CommunityHealth: '/community-health',
         FeatureFlags: '/feature-flags',
         ResearchConfig: '/research-config',
+        Notifications: '/notifications',
+        Leaderboard: '/leaderboard',
+        Messages: '/messages',
     };
 
     const toKebab = (s: string) =>

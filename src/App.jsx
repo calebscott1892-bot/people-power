@@ -31,6 +31,7 @@ const FeatureFlags = React.lazy(() => import('@/pages/FeatureFlags'));
 const ResearchConfig = React.lazy(() => import('@/pages/ResearchConfig'));
 const SystemHealth = React.lazy(() => import('@/pages/SystemHealth'));
 const Search = React.lazy(() => import('@/pages/Search'));
+const SafetyFAQ = React.lazy(() => import('@/pages/SafetyFAQ'));
 const ReportCenter = React.lazy(() => import('@/pages/ReportCenter'));
 const UserProfile = React.lazy(() => import('@/pages/UserProfile'));
 const TermsOfService = React.lazy(() => import('@/pages/TermsOfService'));
@@ -122,6 +123,7 @@ export default function App() {
               <Route path="/communityguidelines" element={<CommunityGuidelines />} />
               <Route path="/legalhub" element={<LegalHub />} />
               <Route path="/search" element={<Search />} />
+              <Route path="/safety-faq" element={<SafetyFAQ />} />
               <Route path="/report" element={<ReportCenter />} />
               <Route path="/help/report" element={<ReportCenter />} />
 

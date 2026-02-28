@@ -743,7 +743,7 @@ export async function actOnConversationRequest(conversationId, action, options) 
   const myEmail = options?.myEmail ? String(options.myEmail) : null;
 
   try {
-    return apiFetch(`/conversations/${encodeURIComponent(id)}/request`, {
+    return await apiFetch(`/conversations/${encodeURIComponent(id)}/request`, {
       method: 'POST',
       accessToken,
       body: { action },
@@ -764,7 +764,7 @@ export async function toggleMessageReaction(messageId, emoji, options) {
 
   try {
     if (!accessToken) throw new Error('Authentication required');
-    return apiFetch(`/messages/${encodeURIComponent(id)}/reactions`, {
+    return await apiFetch(`/messages/${encodeURIComponent(id)}/reactions`, {
       method: 'POST',
       accessToken,
       body: { emoji: cleanEmoji },

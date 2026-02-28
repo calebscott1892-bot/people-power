@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Megaphone, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2 } from 'lucide-react';
+import { Home, User, Zap, MessageCircle, Megaphone, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2, Trophy } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -340,7 +340,8 @@ function LayoutContent({ children }) {
     { name: searchName, page: 'Search', icon: Search },
     { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
-    { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
+    { name: t('leaderboard'), page: 'Leaderboard', icon: Trophy },
+    { name: t('notifications') || 'Notifications', page: 'Notifications', icon: Bell },
     { name: t('messages') || 'Messages', page: 'Messages', icon: MessageCircle },
     { name: t('profile'), page: 'Profile', icon: User },
   ];
