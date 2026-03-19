@@ -1,9 +1,10 @@
 export function resolveBackendBase(env = {}) {
   const candidates = [
+    // Single source of truth (preferred)
+    env.VITE_API_BASE_URL,
+    // Back-compat fallbacks (only if VITE_API_BASE_URL is unset)
     env.BACKEND_BASE_URL,
     env.API_BASE_URL,
-    env.VITE_SERVER_URL,
-    env.VITE_API_BASE_URL,
   ];
   for (const c of candidates) {
     const s = c ? String(c).trim() : '';

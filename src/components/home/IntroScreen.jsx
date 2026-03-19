@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Zap, ArrowRight } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Link } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
@@ -69,9 +69,9 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
                       }
                 }
                 transition={reduceMotion ? { duration: 0 } : { duration: 3, repeat: Infinity }}
-                className="w-16 h-16 sm:w-24 sm:h-24 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-3xl flex items-center justify-center"
+                className="w-16 h-16 sm:w-24 sm:h-24 rounded-3xl flex items-center justify-center overflow-hidden"
               >
-                <Zap className="w-10 h-10 sm:w-14 sm:h-14 text-[#FFC947]" fill="#FFC947" strokeWidth={3} />
+                <img src="/logo.png" alt="People Power" className="w-full h-full object-contain" />
               </motion.div>
             </div>
           </motion.div>

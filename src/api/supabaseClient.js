@@ -17,17 +17,15 @@ if (supabaseConfigError && import.meta?.env?.DEV) {
 
 const supabaseClient = supabaseConfigError
   ? null
-  : createClient(supabaseUrl, supabaseAnonKey, {
+   : createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
-        // Best-practice defaults for browser apps (mobile included):
-        // - persistSession: Supabase stores/loads session for us
-        // - autoRefreshToken: refreshes access tokens when possible
-        // - detectSessionInUrl: supports OAuth flows and magic links safely
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: true,
+        storage: window.localStorage,
       },
     });
+
 
 // NOTE: Supabase dashboard configuration required for email flows:
 // - Auth > URL Configuration: set a correct Site URL (e.g. https://peoplepower.app)

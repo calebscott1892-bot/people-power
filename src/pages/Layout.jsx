@@ -292,9 +292,9 @@ function LayoutContent({ children }) {
               >
                 <motion.div
                   whileHover={{ rotate: 10, scale: 1.1 }}
-                  className="w-9 h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/30"
+                  className="w-9 h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/30 overflow-hidden"
                 >
-                  <Zap className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 text-[#FFC947]" fill="#FFC947" strokeWidth={3} />
+                  <img src="/logo.png" alt="People Power" className="w-full h-full object-contain" />
                 </motion.div>
                 <div className="hidden sm:flex flex-col">
                   <span className="text-xl md:text-2xl font-black text-slate-900 leading-none tracking-tight">

@@ -112,38 +112,67 @@ const explicitCorsOrigins = (process.env.CORS_ORIGINS || '')
   .map((value) => value.trim())
   .filter(Boolean);
 
-const DEV_CORS_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
+const nodeEnv = String(process.env.NODE_ENV || '').trim().toLowerCase();
+const isProduction = nodeEnv === 'production';
+
+const corsMode = (() => {
+  if (!isProduction) return 'dev-regex';
+  if (explicitCorsOrigins.length > 0) return 'env-list';
+  return 'prod-default';
+})();
+console.log(`[cors] NODE_ENV=${nodeEnv || 'unknown'} mode=${corsMode}`);
+
+const DEV_ORIGIN_RE = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
+const PROD_DEFAULT_ORIGINS = new Set([
+  'https://people-power.onrender.com',
+  'https://peoplepower.app',
+  'https://www.peoplepower.app',
+]);
+const PROD_DEFAULT_HOST_SUFFIXES = ['.pages.dev'];
+
+function isAllowedOrigin({ origin }) {
+  // allow curl / server-to-server (no Origin header)
+  if (!origin) return true;
+
+  // Development: allow any Vite dev port on localhost / 127.0.0.1
+  if (!isProduction) {
+    return DEV_ORIGIN_RE.test(origin);
+  }
+
+  // Production: stay strict; never allow wildcard when credentials are true
+  if (origin === '*') return false;
+
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'https:') return false;
+
+    // If env list is set, ONLY allow origins/hosts from that list.
+    if (explicitCorsOrigins.length > 0) {
+      if (explicitCorsOrigins.includes(origin)) return true;
+      if (explicitCorsOrigins.includes(url.hostname)) return true;
+      return false;
+    }
+
+    // Otherwise fall back to known production allowlist.
+    if (PROD_DEFAULT_ORIGINS.has(origin)) return true;
+    if (PROD_DEFAULT_HOST_SUFFIXES.some((suffix) => url.hostname.endsWith(suffix))) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 fastify.register(require('@fastify/cors'), {
-  origin: (origin, cb) => {
-    // allow curl / server-to-server (no origin)
-    if (!origin) return cb(null, true);
-
-    // Explicit dev allowlist (avoid "any localhost port" surprises).
-    if (DEV_CORS_ORIGINS.has(origin)) return cb(null, true);
-
-    try {
-      const url = new URL(origin);
-      const host = url.hostname;
-      const isAllowedHost =
-        host === 'peoplepower.app' ||
-        host === 'www.peoplepower.app' ||
-        host.endsWith('.pages.dev') ||
-        explicitCorsOrigins.includes(origin) ||
-        explicitCorsOrigins.includes(host);
-      if (isAllowedHost) return cb(null, true);
-    } catch {
-      // ignore
-    }
-    return cb(null, false);
-  },
+  origin: (origin, cb) => cb(null, isAllowedOrigin({ origin })),
   // We use Authorization headers (Bearer tokens) and fetch() from the SPA.
   credentials: true,
   // Ensure CORS headers are added early and still present on 4xx/5xx.
   hook: 'onRequest',
   // Keep header names lowercase; preflight request headers are often lowercase.
-  allowedHeaders: ['content-type', 'authorization', 'accept', 'x-requested-with', 'x-client-info'],
+  allowedHeaders: ['authorization', 'content-type', 'accept', 'x-requested-with', 'x-client-info'],
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
   maxAge: 86400,
 });
 
