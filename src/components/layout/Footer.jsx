@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import C4FooterCredit from '@/components/c4-footer-credit/C4FooterCredit';
 
 export default function Footer() {
   const links = [
@@ -27,8 +28,18 @@ export default function Footer() {
           ))}
         </nav>
 
-        <div className="mt-2 text-center text-xs font-semibold text-slate-500">
-          {year} People Power
+        <div className="mt-2 flex items-center justify-center gap-x-3">
+          <span className="text-xs font-semibold text-slate-500">
+            {year} People Power
+          </span>
+          <span className="text-slate-300 select-none" aria-hidden="true">|</span>
+          <C4FooterCredit
+            href="https://c4studios.com.au/"
+            label="Designed with C4 Studios"
+            size="small"
+            showText={true}
+            colorScheme="light"
+          />
         </div>
       </div>
 
