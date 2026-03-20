@@ -53,27 +53,25 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
             initial={{ scale: 0, rotate: -180 }}
             animate={{ scale: 1, rotate: 0 }}
             transition={reduceMotion ? { duration: 0 } : { type: "spring", duration: 1, bounce: 0.5 }}
-            className="flex justify-center mb-8"
+            className="flex justify-center mb-10"
           >
-            <div className="relative">
-              <motion.div
-                animate={
-                  reduceMotion
-                    ? { boxShadow: "0 0 40px rgba(58, 61, 255, 0.4)" }
-                    : {
-                        boxShadow: [
-                          "0 0 40px rgba(58, 61, 255, 0.4)",
-                          "0 0 80px rgba(58, 61, 255, 0.6)",
-                          "0 0 40px rgba(58, 61, 255, 0.4)",
-                        ],
-                      }
-                }
-                transition={reduceMotion ? { duration: 0 } : { duration: 3, repeat: Infinity }}
-                className="w-16 h-16 sm:w-24 sm:h-24 rounded-3xl flex items-center justify-center overflow-hidden"
-              >
-                <img src="/logo.png" alt="People Power" className="w-full h-full object-contain" />
-              </motion.div>
-            </div>
+            <motion.img
+              src="/logo.png?v=20260320-1"
+              alt="People Power"
+              animate={
+                reduceMotion
+                  ? { filter: "drop-shadow(0 8px 16px rgba(15, 23, 42, 0.35))" }
+                  : {
+                      filter: [
+                        "drop-shadow(0 8px 16px rgba(15, 23, 42, 0.32))",
+                        "drop-shadow(0 12px 24px rgba(15, 23, 42, 0.45))",
+                        "drop-shadow(0 8px 16px rgba(15, 23, 42, 0.32))",
+                      ],
+                    }
+              }
+              transition={reduceMotion ? { duration: 0 } : { duration: 3, repeat: Infinity }}
+              className="w-20 h-20 sm:w-28 sm:h-28 object-contain"
+            />
           </motion.div>
 
           {/* Main Title */}
@@ -83,10 +81,10 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
             transition={{ delay: reduceMotion ? 0 : 0.3, duration: reduceMotion ? 0 : 0.8 }}
             className="text-center mb-12"
           >
-            <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black text-white mb-3 sm:mb-4 tracking-tight leading-none">
+            <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black text-white mb-3 sm:mb-4 tracking-[0.03em] leading-none">
               PEOPLE
             </h1>
-            <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black bg-gradient-to-r from-[#FFC947] to-[#FFD666] bg-clip-text text-transparent mb-4 sm:mb-6 tracking-tight leading-none">
+            <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black bg-gradient-to-r from-[#FFC947] to-[#FFD666] bg-clip-text text-transparent mb-5 sm:mb-7 tracking-[0.03em] leading-none">
               POWER
             </h1>
             <motion.div
@@ -147,7 +145,7 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
               <p className="text-2xl sm:text-3xl font-black text-white mb-2">
                 Welcome to People Power.
               </p>
-              <p className="text-base sm:text-xl font-bold text-slate-300 uppercase tracking-wider">
+              <p className="text-base sm:text-xl font-medium text-slate-100/95 uppercase tracking-[0.22em]">
                 Unite • Act • Transform
               </p>
             </div>

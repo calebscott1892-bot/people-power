@@ -226,6 +226,12 @@ function useFooterColours(colorScheme) {
       mono.fourArm = '#8a8b8c';
       mono.cArc = '#d0cecc';
       mono.text = '#e8e6e3';
+    } else {
+      /* Light-background overrides — medium grays for contrast on near-white surfaces */
+      dormant.fourBody = '#7b7d7e';
+      dormant.fourArm = '#8e9091';
+      dormant.cArc = '#8a8886';
+      mono.cArc = '#6b6966';
     }
 
     return { dormant, mono, colour: COLOURS.colour };
@@ -823,7 +829,7 @@ export default function C4FooterCredit({
         <span
           style={{
             fontSize: '11px',
-            opacity: 0.5,
+            opacity: 0.7,
             lineHeight: 1.4,
             letterSpacing: '0.02em',
             whiteSpace: 'nowrap',

@@ -286,21 +286,21 @@ function LayoutContent({ children }) {
               <button
                 type="button"
                 onClick={() => setShowIntroAgain(true)}
-                className="flex items-center gap-2 md:gap-3 group cursor-pointer"
+                className="flex items-center gap-2.5 md:gap-3.5 group cursor-pointer"
                 title="View welcome screen"
                 aria-label="View welcome screen"
               >
-                <motion.div
+                <motion.img
                   whileHover={{ rotate: 10, scale: 1.1 }}
-                  className="w-9 h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/30 overflow-hidden"
-                >
-                  <img src="/logo.png" alt="People Power" className="w-full h-full object-contain" />
-                </motion.div>
-                <div className="hidden sm:flex flex-col">
-                  <span className="text-xl md:text-2xl font-black text-slate-900 leading-none tracking-tight">
-                    PEOPLE POWER
+                  src="/logo.png?v=20260320-1"
+                  alt="People Power"
+                  className="w-10 h-10 sm:w-11 sm:h-11 md:w-12 md:h-12 object-contain drop-shadow-[0_4px_10px_rgba(15,23,42,0.18)]"
+                />
+                <div className="hidden sm:flex flex-col pt-0.5">
+                  <span className="text-xl md:text-2xl font-extrabold text-slate-900 leading-none tracking-[0.04em]">
+                    People Power
                   </span>
-                  <span className="text-xs font-bold text-[#3A3DFF] uppercase tracking-wider">
+                  <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-[0.2em] mt-0.5">
                     Unite • Act • Transform
                   </span>
                 </div>
