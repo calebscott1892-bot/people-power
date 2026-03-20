@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Megaphone, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2, Trophy } from 'lucide-react';
+import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -11,23 +11,13 @@ import { useAuth } from '@/auth/AuthProvider';
 import ErrorBoundary from '@/components/shared/ErrorBoundary';
 import Footer from '@/components/layout/Footer';
 import { useFeatureFlag } from '@/utils/featureFlags';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { allowLocalProfileFallback } from '@/utils/localFallback';
 import { queryKeys } from '@/lib/queryKeys';
-import {
-  captureRequestDebugInfo,
-  copyRequestDebugInfoToClipboard,
-  getRequestIdForEndpoint,
-  isDebugUiEnabledForUser,
-} from '@/utils/requestDebug';
 import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
-import { httpFetch } from '@/utils/httpFetch';
-import { usePendingGuard } from '@/hooks/usePendingGuard';
-import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
-import { startPerfTimer } from '@/utils/perfLog';
 import IntroScreen from '@/components/home/IntroScreen';
 import UpdateBanner from '@/components/updates/UpdateBanner';
 import UpdatesPanel from '@/components/updates/UpdatesPanel';
@@ -82,6 +72,7 @@ function EarlyAccessBanner() {
 
 function LayoutContent({ children }) {
   const [backendStatus, setBackendStatus] = useState(getCurrentBackendStatus());
+  const isFetchingCount = useIsFetching();
   const { user: authUser, session, isAdmin, logout } = useAuth();
   const [showIntroAgain, setShowIntroAgain] = useState(false);
   const location = useLocation();
@@ -100,52 +91,19 @@ function LayoutContent({ children }) {
   });
   const profileEmail = authUser?.email ? String(authUser.email) : null;
   const accessToken = session?.access_token ? String(session.access_token) : null;
-  const lastResumeRefetchAtRef = useRef(0);
-  const isFetchingRef = useRef(false);
-  const refetchRef = useRef(null);
 
-  const getHttpStatus = (err) => {
-    if (!err) return null;
-    const direct = err?.status ?? err?.statusCode;
-    if (typeof direct === 'number') return direct;
-    const resp = err?.response?.status ?? err?.response?.statusCode;
-    if (typeof resp === 'number') return resp;
-    const cause = err?.cause?.status ?? err?.cause?.statusCode;
-    if (typeof cause === 'number') return cause;
-    return null;
-  };
-
-  const userProfileQuery = useQuery({
+  const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
     queryKey: queryKeys.userProfile.me(profileEmail),
     enabled: !!profileEmail && !!accessToken,
-    // Profile staleTime is generous: we have manual visibility-change refetch
-    // and mutations that patch the cache, so no need for aggressive refetching.
-    staleTime: 2 * 60 * 1000, // 2 minutes
-    retry: (failureCount, error) => {
-      const status = getHttpStatus(error);
-      if (status === 401 || status === 403) return false;
-      return failureCount < 2;
-    },
-    retryDelay: (attemptIndex) => {
-      // Exponential backoff: 1s, 2s (capped).
-      const base = 1000;
-      const delay = base * Math.pow(2, attemptIndex);
-      return Math.min(delay, 8000);
-    },
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    refetchOnMount: false,
+    retry: 1,
     queryFn: async () => {
       if (!profileEmail) return null;
       if (!accessToken) return null;
 
-      const perfTimer = startPerfTimer('profile_fetch', { endpoint: '/me/profile', method: 'GET' });
       try {
-        const profile = await fetchMyProfile({ accessToken, profileEmail });
-        perfTimer.end({ ok: true });
+        const profile = await fetchMyProfile({ accessToken });
         return profile || null;
       } catch (e) {
-        perfTimer.end({ ok: false, error: e?.message });
         if (!allowLocalProfileFallback) throw e;
         try {
           const profiles = await entities.UserProfile.filter({ user_email: profileEmail });
@@ -155,124 +113,10 @@ function LayoutContent({ children }) {
         }
       }
     },
+    onError: (e) => {
+      toastFriendlyError(e, "Couldn't load your profile");
+    },
   });
-
-  useEffect(() => {
-    isFetchingRef.current = !!userProfileQuery.isFetching;
-    refetchRef.current = userProfileQuery.refetch;
-  }, [userProfileQuery.isFetching, userProfileQuery.refetch]);
-
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState !== 'visible') return;
-      if (!profileEmail || !accessToken) return;
-      if (isFetchingRef.current) return;
-
-      const now = Date.now();
-      if (now - lastResumeRefetchAtRef.current < 30_000) return;
-      lastResumeRefetchAtRef.current = now;
-
-      const refetch = refetchRef.current;
-      if (typeof refetch === 'function') refetch();
-    };
-
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [profileEmail, accessToken]);
-
-  const userProfile = userProfileQuery.data;
-    const [avatarLoadError, setAvatarLoadError] = useState(null);
-    const isMobile = useMemo(() => {
-      try {
-        const ua = typeof navigator !== 'undefined' && navigator.userAgent ? String(navigator.userAgent) : '';
-        return /iphone|ipad|ipod|android/i.test(ua);
-      } catch {
-        return false;
-      }
-    }, []);
-  const userProfileLoading = userProfileQuery.isLoading;
-  const userProfileFetching = userProfileQuery.isFetching;
-  const userProfileIsError = userProfileQuery.isError;
-  const debugEnabled = isDebugUiEnabledForUser(profileEmail);
-
-  // Delayed syncing indicator: only show after 1.5s of fetching to avoid
-  // flash-of-syncing on fast requests. This is the key UX improvement.
-  const [showSyncBanner, setShowSyncBanner] = useState(false);
-  useEffect(() => {
-    if (!userProfileFetching) {
-      setShowSyncBanner(false);
-      return;
-    }
-    const timer = setTimeout(() => setShowSyncBanner(true), 1500);
-    return () => clearTimeout(timer);
-  }, [userProfileFetching]);
-
-  const syncGuard = usePendingGuard('profile-sync', { timeoutMs: 8_000 });
-
-  useEffect(() => {
-    syncGuard.watch(userProfileFetching, {
-      retry: () => userProfileQuery.refetch(),
-      onTimeout: async () => {
-        // Force-clear the UI banner after 8s.
-        showPendingTimeoutToast({
-          retry: () => {
-            syncGuard.stop();
-            userProfileQuery.refetch();
-          },
-        });
-
-        const requestId = getRequestIdForEndpoint('/me/profile');
-        captureRequestDebugInfo({
-          label: 'profile-sync',
-          endpoint: '/me/profile',
-          method: 'GET',
-          request_id: requestId || null,
-          error_message: 'Pending state timed out (8s)',
-        });
-
-        // Best-effort ping to include in debug info.
-        try {
-          const startedAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
-          const res = await httpFetch('/diag/ping', { method: 'GET', cache: 'no-store', timeoutMs: 5_000, retry: 0, label: 'diag-ping' });
-          const elapsedMs =
-            (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()) -
-            startedAt;
-          const pingRequestId = res?.headers?.get ? res.headers.get('x-request-id') : null;
-          captureRequestDebugInfo({
-            label: 'profile-sync',
-            endpoint: '/me/profile',
-            method: 'GET',
-            request_id: requestId || null,
-            error_message: 'Pending state timed out (8s)',
-            ping: {
-              ok: !!res?.ok,
-              request_id: pingRequestId || null,
-              elapsed_ms: Math.round(Number(elapsedMs) || 0),
-              error_message: res?.ok ? null : `Ping HTTP ${res?.status}`,
-            },
-          });
-        } catch (e) {
-          captureRequestDebugInfo({
-            label: 'profile-sync',
-            endpoint: '/me/profile',
-            method: 'GET',
-            request_id: requestId || null,
-            error_message: 'Pending state timed out (8s)',
-            ping: {
-              ok: false,
-              request_id: null,
-              elapsed_ms: null,
-              error_message: e?.message ? String(e.message) : 'Ping failed',
-            },
-          });
-        }
-      },
-    });
-  }, [syncGuard, userProfileFetching, userProfileQuery]);
 
   const hideFooter = location.pathname === '/login';
 
@@ -340,9 +184,8 @@ function LayoutContent({ children }) {
     { name: searchName, page: 'Search', icon: Search },
     { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
-    { name: t('leaderboard'), page: 'Leaderboard', icon: Trophy },
-    { name: t('notifications') || 'Notifications', page: 'Notifications', icon: Bell },
-    { name: t('messages') || 'Messages', page: 'Messages', icon: MessageCircle },
+    { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
+    { name: `${t('messages') || 'Messages'} (soon)`, page: 'Messages', icon: MessageCircle, comingSoon: true },
     { name: t('profile'), page: 'Profile', icon: User },
   ];
 
@@ -386,30 +229,17 @@ function LayoutContent({ children }) {
             <span>Reconnecting to People Power — some data may be out of date.</span>
           </div>
         </div>
-      ) : showSyncBanner && !syncGuard.timedOut ? (
+      ) : isFetchingCount > 0 ? (
         <div className="w-full border-b border-slate-200 bg-white text-slate-700 px-4 sm:px-6 py-2">
           <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-bold">
             <Loader2 className="w-4 h-4 animate-spin" />
             <span>Syncing…</span>
           </div>
         </div>
-      ) : userProfileIsError ? (
-        <div className="w-full border-b border-amber-200 bg-amber-50 text-amber-900 px-4 sm:px-6 py-2">
-          <div className="max-w-7xl mx-auto flex items-center justify-center gap-3 text-sm font-bold">
-            <span>Couldn&apos;t load your profile.</span>
-            <button
-              type="button"
-              onClick={() => userProfileQuery.refetch()}
-              className="underline underline-offset-2"
-            >
-              Retry
-            </button>
-          </div>
-        </div>
       ) : null}
 
-      {/* Update notice banner (under backend status banner) — never gated on fetching state */}
-      {authUser && accessToken && profileEmail && userProfile && !userProfileLoading ? (
+      {/* Update notice banner (under backend status banner) */}
+      {authUser && accessToken && profileEmail && userProfile && !userProfileLoading && !userProfileFetching ? (
         <UpdateBanner
           profile={userProfile}
           profileEmail={profileEmail}
@@ -456,21 +286,21 @@ function LayoutContent({ children }) {
               <button
                 type="button"
                 onClick={() => setShowIntroAgain(true)}
-                className="flex items-center gap-2 md:gap-3 group cursor-pointer"
+                className="flex items-center gap-2.5 md:gap-3.5 group cursor-pointer"
                 title="View welcome screen"
                 aria-label="View welcome screen"
               >
-                <motion.div
+                <motion.img
                   whileHover={{ rotate: 10, scale: 1.1 }}
-                  className="w-9 h-9 sm:w-10 sm:h-10 md:w-12 md:h-12 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-2xl flex items-center justify-center shadow-xl shadow-indigo-500/30"
-                >
-                  <Zap className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 text-[#FFC947]" fill="#FFC947" strokeWidth={3} />
-                </motion.div>
-                <div className="hidden sm:flex flex-col">
-                  <span className="text-xl md:text-2xl font-black text-slate-900 leading-none tracking-tight">
-                    PEOPLE POWER
+                  src="/logo.png?v=20260320-1"
+                  alt="People Power"
+                  className="w-10 h-10 sm:w-11 sm:h-11 md:w-12 md:h-12 object-contain drop-shadow-[0_4px_10px_rgba(15,23,42,0.18)]"
+                />
+                <div className="hidden sm:flex flex-col pt-0.5">
+                  <span className="text-xl md:text-2xl font-extrabold text-slate-900 leading-none tracking-[0.04em]">
+                    People Power
                   </span>
-                  <span className="text-xs font-bold text-[#3A3DFF] uppercase tracking-wider">
+                  <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-[0.2em] mt-0.5">
                     Unite • Act • Transform
                   </span>
                 </div>
@@ -508,7 +338,7 @@ function LayoutContent({ children }) {
                     className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
                     aria-label="Send feedback or report a bug"
                   >
-                    <Megaphone className="w-4 h-4" />
+                    <MessageCircle className="w-4 h-4" />
                     <span className="hidden md:inline text-xs font-bold">Feedback</span>
                   </button>
                 ) : null}
@@ -535,39 +365,12 @@ function LayoutContent({ children }) {
                       {/* Avatar flow: local preview → authenticated upload on Save → profile_photo_url persisted via profile update. */}
                       <div className="w-10 h-10 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-full flex items-center justify-center text-white font-black text-sm shadow-lg overflow-hidden">
                         {profilePhotoUrl ? (
-                          <img
-                            src={profilePhotoUrl}
-                            alt={profileLabel}
-                            className="w-full h-full object-cover"
-                            onError={() => {
-                              const requestId = getRequestIdForEndpoint('/me/profile');
-                              const record = captureRequestDebugInfo({
-                                endpoint: 'image_load:header_avatar',
-                                request_id: requestId || null,
-                                error_message: `Header avatar failed to load: ${profilePhotoUrl}`,
-                              });
-                              setAvatarLoadError(record);
-                            }}
-                            onLoad={() => setAvatarLoadError(null)}
-                          />
+                          <img src={profilePhotoUrl} alt={profileLabel} className="w-full h-full object-cover" />
                         ) : (
                           profileInitial
                         )}
                       </div>
                     </Link>
-
-                    {avatarLoadError && debugEnabled ? (
-                      <button
-                        type="button"
-                        className="hidden sm:inline-flex text-[11px] font-black text-amber-900 underline"
-                        onClick={async () => {
-                          const ok = await copyRequestDebugInfoToClipboard(avatarLoadError);
-                          toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
-                        }}
-                      >
-                        Copy image debug
-                      </button>
-                    ) : null}
                     <button
                       type="button"
                       onClick={handleLogout}
