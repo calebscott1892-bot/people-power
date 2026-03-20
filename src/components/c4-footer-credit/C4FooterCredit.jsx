@@ -16,6 +16,15 @@ const FULL_ASPECT = 880 / 400;
 
 const LOCKUP_TRANSFORM = 'translate(18 -273) scale(1.5)';
 
+/* Visual-centering offsets — keep the lockup visually centred in the viewBox
+   regardless of whether only the C4 mark (dormant) or the full C4 + Studios
+   lockup (expanded) is visible.
+   Derived from: lockup geometry post-transform, viewBox centre = 490.
+   C4-mark centre  ≈ 329  →  shift = +161 (dormant)
+   Full-lockup centre ≈ 512  →  shift = −22  (expanded)                      */
+const DORMANT_SHIFT_X = 161;
+const EXPANDED_SHIFT_X = -22;
+
 const COLOURS = {
   dormant: {
     fourBody: '#b8b9ba',
@@ -300,6 +309,7 @@ export default function C4FooterCredit({
   const touchConsumedRef = useRef(false);
 
   /* Element refs */
+  const lockupShiftRef = useRef(null);
   const cBaseRef = useRef(null);
   const cColourRef = useRef(null);
   const bodyDormantRef = useRef(null);
@@ -401,6 +411,9 @@ export default function C4FooterCredit({
       gsap.set(backdropRef.current, { attr: { cx: 206, cy: 389, rx: 165, ry: 120 }, opacity: 0.15 });
     }
 
+    /* Centre the C4 mark in the viewBox while Studios is hidden */
+    gsap.set(lockupShiftRef.current, { x: DORMANT_SHIFT_X });
+
     /* Skip timeline construction when reduced motion is preferred */
     if (prefersReducedMotion) return undefined;
 
@@ -420,6 +433,9 @@ export default function C4FooterCredit({
         duration: 0.5, ease: 'power2.out',
       }, 0);
     }
+
+    /* Slide lockup from dormant-centred to full-lockup-centred */
+    monoTl.to(lockupShiftRef.current, { x: EXPANDED_SHIFT_X, duration: 0.5, ease: 'power2.inOut' }, 0);
 
     monoTl.to(bodyDormantRef.current, { opacity: 0, duration: 0.4, ease: 'power2.inOut' }, 0.05);
     monoTl.to(armDormantRef.current, { opacity: 0, duration: 0.4, ease: 'power2.inOut' }, 0.05);
@@ -586,6 +602,9 @@ export default function C4FooterCredit({
       }, 0.80);
     }
 
+    /* Slide lockup back to dormant-centred position */
+    dormantTl.to(lockupShiftRef.current, { x: DORMANT_SHIFT_X, duration: 0.5, ease: 'power2.inOut' }, 0.60);
+
     dormantTl.set(wordLetters, { y: 0, rotation: 0, x: 0, scaleY: 1, opacity: 0 }, 1.30);
 
     dormantTlRef.current = dormantTl;
@@ -696,7 +715,7 @@ export default function C4FooterCredit({
       style={{
         display: 'inline-flex',
         flexDirection: 'column',
-        alignItems: 'flex-start',
+        alignItems: 'center',
         gap: '6px',
         textDecoration: 'none',
         color: 'inherit',
@@ -736,6 +755,7 @@ export default function C4FooterCredit({
           </clipPath>
         </defs>
 
+        <g ref={lockupShiftRef}>
         <g transform={LOCKUP_TRANSFORM}>
           {/* Backdrop — soft translucent bubble */}
           <ellipse
@@ -795,6 +815,7 @@ export default function C4FooterCredit({
           <g ref={wordGroupRef}>
             <MorphWordPaths pairs={C4_WORDMARK_MORPH_PAIRS} fill={mono.text} refs={morphLetterRefs} />
           </g>
+        </g>
         </g>
       </svg>
 
