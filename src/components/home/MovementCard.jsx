@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { motion, useReducedMotion } from 'framer-motion';
-import { Flame, MapPin, TrendingUp, ThumbsDown, ThumbsUp, Users } from 'lucide-react';
+import { Flame, MapPin, TrendingUp, ThumbsDown, ThumbsUp, Users, Clock } from 'lucide-react';
 import { MapContainer, Marker, TileLayer } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -58,7 +58,30 @@ function getAuthorInfo(movement) {
     ''
   ).trim();
   const isAdminAuthor = authorEmail ? isAdminEmail(authorEmail) : false;
-  return { label, profilePath, isAdminAuthor };
+  const initial = label && label !== 'Unknown creator' ? label[0].toUpperCase() : '?';
+  return { label, profilePath, isAdminAuthor, initial };
+}
+
+function relativeTime(dateStr) {
+  try {
+    const now = Date.now();
+    const then = new Date(dateStr).getTime();
+    if (!Number.isFinite(then)) return null;
+    const diffMs = now - then;
+    if (diffMs < 0) return 'just now';
+    const mins = Math.floor(diffMs / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    if (days < 30) return `${days}d ago`;
+    const months = Math.floor(days / 30);
+    if (months < 12) return `${months}mo ago`;
+    return `${Math.floor(months / 12)}y ago`;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeTags(movement) {
@@ -146,7 +169,7 @@ function getTeaser(movement) {
   return s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-export default function MovementCard({ movement }) {
+function MovementCard({ movement }) {
   const reduceMotion = useReducedMotion();
   const navigate = useNavigate();
   const id = movement?.id ?? movement?._id;
@@ -155,6 +178,8 @@ export default function MovementCard({ movement }) {
   const author = getAuthorInfo(movement);
   const tags = normalizeTags(movement);
   const locationLabel = formatLocation(movement);
+  const createdAt = movement?.created_at || movement?.created_date || null;
+  const timeAgo = useMemo(() => relativeTime(createdAt), [createdAt]);
   const locationQuery = useMemo(() => locationQueryParts(movement), [movement]);
   const [coords, setCoords] = useState(null);
   const hasCoords = Number.isFinite(coords?.lat) && Number.isFinite(coords?.lon);
@@ -229,7 +254,10 @@ export default function MovementCard({ movement }) {
     const onScroll = () => {
       try {
         const remaining = el.scrollHeight - (el.scrollTop + el.clientHeight);
-        if (remaining < 200) setPreviewVoteEligible(true);
+        if (remaining < 200) {
+          setPreviewVoteEligible(true);
+          el.removeEventListener('scroll', onScroll);
+        }
       } catch {
         // ignore
       }
@@ -246,7 +274,7 @@ export default function MovementCard({ movement }) {
 
   return (
     <>
-    <motion.div whileHover={reduceMotion ? undefined : { y: -4 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm w-full max-w-md mx-auto">
+    <motion.div whileHover={reduceMotion ? undefined : { y: -2 }} transition={{ duration: 0.2 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm hover:shadow-lg hover:border-slate-300 transition-shadow w-full max-w-md mx-auto">
       <div
         role="button"
         tabIndex={0}
@@ -266,15 +294,18 @@ export default function MovementCard({ movement }) {
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="text-base sm:text-lg font-black text-slate-900 truncate">{String(title)}</h3>
+              <h3 className="text-base sm:text-lg font-bold text-slate-900 truncate">{String(title)}</h3>
               {isTrending ? (
-                <span className="inline-flex items-center gap-1 text-xs font-black text-[#FFC947]">
-                  <Flame className="w-4 h-4" fill="#FFC947" strokeWidth={2.5} />
+                <span className="inline-flex items-center gap-1 text-xs font-bold text-[#FFC947]">
+                  <Flame className="w-3.5 h-3.5" fill="#FFC947" strokeWidth={2.5} />
                   Trending
                 </span>
               ) : null}
             </div>
-            <div className="flex items-center gap-2 text-xs font-bold text-slate-500 truncate">
+            <div className="flex items-center gap-2 text-xs font-medium text-slate-500 truncate">
+              <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] flex items-center justify-center text-white text-[10px] font-semibold shrink-0">
+                {author.initial}
+              </div>
               <span>
                 By{' '}
                 {author.profilePath ? (
@@ -294,13 +325,21 @@ export default function MovementCard({ movement }) {
                   Admin
                 </span>
               ) : null}
-              {locationLabel ? <span>• {locationLabel}</span> : null}
+              {locationLabel ? <span className="text-slate-400">·</span> : null}
+              {locationLabel ? <span>{locationLabel}</span> : null}
+              {timeAgo ? <span className="text-slate-400">·</span> : null}
+              {timeAgo ? (
+                <span className="inline-flex items-center gap-1 text-slate-400">
+                  <Clock className="w-3 h-3" />
+                  {timeAgo}
+                </span>
+              ) : null}
             </div>
           </div>
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
-            <div className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-black">
-              <TrendingUp className="w-4 h-4" />
+            <div className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-50 text-slate-600 text-xs font-semibold">
+              <TrendingUp className="w-3.5 h-3.5" />
               {score}
             </div>
           </div>
@@ -309,12 +348,12 @@ export default function MovementCard({ movement }) {
         {tags.length ? (
           <div className="flex flex-wrap gap-2">
             {tags.slice(0, 4).map((t) => (
-              <span key={t} className="text-[11px] sm:text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-full">
+              <span key={t} className="text-[11px] sm:text-xs font-medium text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
                 {formatTagLabel(t)}
               </span>
             ))}
             {tags.length > 4 ? (
-              <span className="text-[11px] sm:text-xs font-bold text-slate-500">+{tags.length - 4} more</span>
+              <span className="text-[11px] sm:text-xs font-medium text-slate-500">+{tags.length - 4} more</span>
             ) : null}
           </div>
         ) : null}
@@ -322,13 +361,13 @@ export default function MovementCard({ movement }) {
         <p className="text-sm text-slate-600 line-clamp-3 sm:line-clamp-2">{String(description)}</p>
 
         {hasCoords ? (
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+          <div className="hidden sm:block rounded-xl border border-slate-100 bg-slate-50/50 p-2.5">
             <div className="flex items-center justify-between gap-3">
-              <div className="inline-flex items-center gap-2 text-xs font-black text-slate-700">
-                <MapPin className="w-4 h-4 text-slate-500" />
+              <div className="inline-flex items-center gap-2 text-xs font-medium text-slate-500">
+                <MapPin className="w-3.5 h-3.5 text-slate-400" />
                 Map preview (city-level)
               </div>
-              <div className="text-xs font-bold text-slate-600 truncate">
+              <div className="text-xs font-medium text-slate-600 truncate">
                 {locationLabel || 'Location set'}
               </div>
             </div>
@@ -358,7 +397,7 @@ export default function MovementCard({ movement }) {
                 <Marker position={[coords.lat, coords.lon]} />
               </MapContainer>
               {mapError ? (
-                <div className="absolute inset-0 flex items-center justify-center bg-white/80 text-xs font-bold text-slate-600">
+                <div className="absolute inset-0 flex items-center justify-center bg-white/80 text-xs font-medium text-slate-600">
                   Map preview unavailable
                 </div>
               ) : null}
@@ -369,34 +408,34 @@ export default function MovementCard({ movement }) {
             </div>
           </div>
         ) : (
-          <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-3 text-xs font-semibold text-slate-600">
+          <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 p-2.5 text-xs font-medium text-slate-600">
             No location set yet.
           </div>
         )}
 
         <div className="flex items-center gap-4 pt-1">
-          <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
+          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
             <Users className="w-4 h-4 text-slate-500" />
             Participants: {verifiedParticipants}
           </div>
           {unverifiedParticipants > 0 ? (
-            <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
+            <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
               <Users className="w-4 h-4 text-slate-400" />
               Unverified interest: {unverifiedParticipants}
             </div>
           ) : null}
-          <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
+          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
             <Users className="w-4 h-4 text-[#FFC947]" />
             Supporters: {supporters}
           </div>
         </div>
 
         <div className="flex items-center gap-4 pt-1">
-          <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
+          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
             <ThumbsUp className="w-4 h-4 text-[#3A3DFF]" />
             Boosts: {boosts}
           </div>
-          <div className="inline-flex items-center gap-1 text-xs font-black text-slate-700">
+          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
             <ThumbsDown className="w-4 h-4 text-slate-500" />
             Downvotes: {downvotes}
           </div>
@@ -413,7 +452,7 @@ export default function MovementCard({ movement }) {
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         <DialogContent className="sm:max-w-lg w-[92vw] max-h-[80vh]">
           <DialogHeader>
-            <DialogTitle className="text-xl font-black">{String(title)}</DialogTitle>
+            <DialogTitle className="text-xl font-bold">{String(title)}</DialogTitle>
           </DialogHeader>
 
           <div
@@ -427,7 +466,7 @@ export default function MovementCard({ movement }) {
             {tags.length ? (
               <div className="flex flex-wrap gap-2">
                 {tags.map((t) => (
-                  <span key={t} className="text-[11px] sm:text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded-full">
+                  <span key={t} className="text-[11px] sm:text-xs font-medium text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
                     {formatTagLabel(t)}
                   </span>
                 ))}
@@ -435,7 +474,7 @@ export default function MovementCard({ movement }) {
             ) : null}
 
             <div className="pt-1">
-              <div className="text-xs font-black text-slate-700 mb-2">Vote</div>
+              <div className="text-xs font-bold text-slate-700 mb-2">Vote</div>
               <BoostButtons
                 movementId={id}
                 movement={movement}
@@ -476,3 +515,5 @@ export default function MovementCard({ movement }) {
     </>
   );
 }
+
+export default React.memo(MovementCard);

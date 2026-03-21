@@ -54,7 +54,7 @@ export default function UpdatesPanel({ open, onOpenChange, profileEmail, accessT
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[100vw] h-[100vh] max-w-none rounded-none left-0 top-0 translate-x-0 translate-y-0 p-0 overflow-hidden sm:w-[95vw] sm:h-auto sm:max-w-2xl sm:max-h-[85vh] sm:rounded-2xl sm:left-[50%] sm:top-[50%] sm:translate-x-[-50%] sm:translate-y-[-50%] sm:shadow-2xl sm:border sm:border-slate-200">
+      <DialogContent className="w-[100vw] h-svh max-w-none rounded-none left-0 top-0 translate-x-0 translate-y-0 p-0 overflow-hidden sm:w-[95vw] sm:h-auto sm:max-w-2xl sm:max-h-[85vh] sm:rounded-2xl sm:left-[50%] sm:top-[50%] sm:translate-x-[-50%] sm:translate-y-[-50%] sm:shadow-2xl sm:border sm:border-slate-200">
 
         {/* Gradient Header */}
         <div className="bg-gradient-to-r from-violet-600 to-indigo-600 text-white px-6 py-5 sm:px-8 sm:py-6">

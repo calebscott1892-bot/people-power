@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, LogOut, HelpCircle, Loader2 } from 'lucide-react';
+import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, LogOut, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -51,7 +51,7 @@ function EarlyAccessBanner() {
     <div className="w-full border-b border-amber-200 bg-amber-50 text-amber-900 px-4 sm:px-6 py-3">
       <div className="max-w-7xl mx-auto flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
         <div className="flex-1">
-          <div className="font-black text-sm sm:text-base">People Power — Early Access</div>
+          <div className="font-bold text-sm sm:text-base">People Power — Early Access</div>
           <p className="text-xs sm:text-[13px] leading-snug text-amber-900/90">
             This is a pre-release version of People Power. Some features are still stabilising and data may be
             periodically reset during deployment. Thanks for helping us improve the platform.
@@ -185,7 +185,6 @@ function LayoutContent({ children }) {
     { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
     { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
-    { name: `${t('messages') || 'Messages'} (soon)`, page: 'Messages', icon: MessageCircle, comingSoon: true },
     { name: t('profile'), page: 'Profile', icon: User },
   ];
 
@@ -199,14 +198,12 @@ function LayoutContent({ children }) {
   const bottomStackPaddingPx = useMemo(() => 156, []);
 
   const hideBottomStack = useMemo(() => {
-    // Hide bottom navigation during intro/safety/onboarding gating on Home.
+    // Hide bottom navigation during intro/onboarding gating on Home.
     if (location.pathname !== '/') return false;
     try {
       const introSeen = localStorage.getItem('peoplepower_intro_seen') === 'true';
-      const safetyAccepted = localStorage.getItem('peoplepower_safety_accepted') === 'true';
-      const termsAccepted = localStorage.getItem('peoplepower_terms_accepted') === 'true';
       const onboardingInProgress = localStorage.getItem('peoplepower_onboarding_in_progress') === 'true';
-      return !(introSeen && safetyAccepted && termsAccepted) || onboardingInProgress;
+      return !introSeen || onboardingInProgress;
     } catch {
       return false;
     }
@@ -279,7 +276,7 @@ function LayoutContent({ children }) {
         }}
       >
         {/* Header */}
-        <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-xl border-b-4 border-slate-200 shadow-sm">
+        <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-xl border-b border-slate-200 shadow-sm">
           <div className="max-w-7xl mx-auto px-4 sm:px-6">
             <div className="flex items-center justify-between h-14 sm:h-16 md:h-20">
               {/* Logo */}
@@ -309,18 +306,6 @@ function LayoutContent({ children }) {
               {/* Desktop - Language & Profile */}
               <div className="flex items-center gap-3">
                 {multiLanguageEnabled ? <LanguageSwitcher /> : null}
-                {authUser ? (
-                  <button
-                    type="button"
-                    onClick={() => setTutorialOpen(true)}
-                    className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
-                    aria-label="Help and tutorial"
-                    title="Help & tutorial"
-                  >
-                    <HelpCircle className="w-4 h-4" />
-                    <span className="hidden md:inline text-xs font-bold">Help</span>
-                  </button>
-                ) : null}
                 <button
                   type="button"
                   onClick={() => setUpdatesOpen(true)}
@@ -363,7 +348,7 @@ function LayoutContent({ children }) {
                         </span>
                       ) : null}
                       {/* Avatar flow: local preview → authenticated upload on Save → profile_photo_url persisted via profile update. */}
-                      <div className="w-10 h-10 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-full flex items-center justify-center text-white font-black text-sm shadow-lg overflow-hidden">
+                      <div className="w-10 h-10 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-full flex items-center justify-center text-white font-bold text-sm shadow-lg overflow-hidden">
                         {profilePhotoUrl ? (
                           <img src={profilePhotoUrl} alt={profileLabel} className="w-full h-full object-cover" />
                         ) : (
@@ -384,7 +369,7 @@ function LayoutContent({ children }) {
                 ) : (
                   <Link
                     to="/login"
-                    className="px-4 py-2 md:px-6 md:py-3 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-xl font-black text-xs md:text-sm hover:shadow-xl shadow-lg shadow-yellow-400/40 transition-all uppercase tracking-wide"
+                    className="px-4 py-2 md:px-6 md:py-3 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-xl font-bold text-xs md:text-sm hover:shadow-lg shadow-md transition-all"
                   >
                     {t('signIn')}
                   </Link>
@@ -402,7 +387,7 @@ function LayoutContent({ children }) {
           <div className="px-4 sm:px-6 mt-3">
             <div className="max-w-7xl mx-auto rounded-2xl border border-slate-200 bg-white p-4 flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-sm font-black text-slate-900">New to People Power? Start a quick tour.</div>
+                <div className="text-sm font-bold text-slate-900">New to People Power? Start a quick tour.</div>
                 <div className="text-xs text-slate-600 font-semibold mt-1">
                   A guided walkthrough of movements, boosting, following, and what’s coming soon.
                 </div>
@@ -418,7 +403,7 @@ function LayoutContent({ children }) {
                 <button
                   type="button"
                   onClick={() => setTutorialOpen(true)}
-                  className="inline-flex items-center justify-center h-9 px-4 rounded-md bg-primary text-primary-foreground text-xs font-black"
+                  className="inline-flex items-center justify-center h-9 px-4 rounded-md bg-primary text-primary-foreground text-xs font-bold"
                 >
                   Start tour
                 </button>
@@ -451,7 +436,7 @@ function LayoutContent({ children }) {
       {!hideBottomStack ? (
       <div className="fixed inset-x-0 bottom-0 z-50">
         {/* Main bottom nav (no longer fixed itself; it sits above the legal footer) */}
-        <nav className="w-full bg-white border-t-4 border-slate-200 shadow-2xl">
+        <nav className="w-full bg-white border-t border-slate-200 shadow-lg">
           <div className="max-w-7xl mx-auto px-4 sm:px-6">
             <div className="flex items-center justify-around px-2 py-2">
               {navItems.map((item) => {
@@ -467,7 +452,7 @@ function LayoutContent({ children }) {
                     aria-label={item.name}
                     className={cn(
                       "flex flex-col items-center gap-1 px-3 py-2 rounded-xl transition-all min-w-[54px] sm:min-w-[60px]",
-                      isCreate && "-mt-5 sm:-mt-6 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 shadow-lg shadow-yellow-400/40",
+                      isCreate && "-mt-5 sm:-mt-6 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 shadow-lg",
                       !isCreate && (active ? "text-[#3A3DFF]" : (comingSoon ? "text-slate-400" : "text-slate-500"))
                     )}
                   >
@@ -481,7 +466,7 @@ function LayoutContent({ children }) {
                     <span
                       className={cn(
                         "hidden sm:inline text-xs font-bold",
-                        isCreate && "uppercase tracking-wide"
+                      isCreate && "tracking-wide"
                       )}
                     >
                       {item.name}

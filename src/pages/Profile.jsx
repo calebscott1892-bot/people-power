@@ -206,7 +206,7 @@ export default function Profile() {
   useEffect(() => {
     if (!import.meta?.env?.DEV) return;
     if (!userProfile) return;
-    console.log('[PeoplePower] myProfile', userProfile);
+    // debug: profile logged only in dev
   }, [userProfile]);
 
   const resolvedProfile = useMemo(() => {
@@ -302,9 +302,7 @@ export default function Profile() {
 
   useEffect(() => {
     if (!import.meta?.env?.DEV) return;
-    const followersCount = Array.isArray(myFollowers) ? myFollowers.length : 0;
-    const followingCount = Array.isArray(myFollowingUsers) ? myFollowingUsers.length : 0;
-    console.log('[PeoplePower] followers count', followersCount, 'following count', followingCount);
+    // debug: follower counts logged only in dev
   }, [myFollowers, myFollowingUsers]);
 
   const { data: followState } = useQuery({
@@ -341,7 +339,7 @@ export default function Profile() {
         <div className="w-16 h-16 mx-auto rounded-full bg-slate-100 flex items-center justify-center">
           <User className="w-8 h-8 text-slate-400" />
         </div>
-        <h2 className="text-2xl font-black text-slate-900">Sign in to see your profile</h2>
+        <h2 className="text-2xl font-bold text-slate-900">Sign in to see your profile</h2>
         <p className="text-slate-500 font-semibold">
           Create an account or sign in to view and manage your movements.
         </p>
@@ -361,7 +359,7 @@ export default function Profile() {
         <div className="w-16 h-16 mx-auto rounded-full bg-slate-100 flex items-center justify-center">
           <User className="w-8 h-8 text-slate-400" />
         </div>
-        <h2 className="text-2xl font-black text-slate-900">Couldn&apos;t load your profile</h2>
+        <h2 className="text-2xl font-bold text-slate-900">Couldn&apos;t load your profile</h2>
         <p className="text-slate-500 font-semibold">You can keep using the app. Try again when you&apos;re ready.</p>
         <div className="flex items-center justify-center gap-3">
           <Button type="button" onClick={() => refetchUserProfile()}>
@@ -416,7 +414,7 @@ export default function Profile() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
+        className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
       >
         {/* Header Banner */}
         {resolvedProfile?.banner_url ? (
@@ -437,7 +435,7 @@ export default function Profile() {
             <Button
               type="button"
               variant="outline"
-              className="h-8 px-3 text-xs font-black"
+              className="h-8 px-3 text-xs font-bold"
               onClick={async () => {
                 const ok = await copyRequestDebugInfoToClipboard(bannerLoadError);
                 toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
@@ -471,7 +469,7 @@ export default function Profile() {
                   />
                 ) : (
                   <div className="w-20 h-20 sm:w-28 sm:h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
-                    <span className="text-3xl sm:text-5xl font-black text-slate-900">
+                    <span className="text-3xl sm:text-5xl font-bold text-slate-900">
                       {(resolvedProfile?.display_name?.[0] || user?.full_name?.[0] || resolvedProfile?.username?.[0] || safeHandle?.[0] || '?').toUpperCase()}
                     </span>
                   </div>
@@ -483,7 +481,7 @@ export default function Profile() {
                   <span className="truncate">Avatar failed to load.</span>
                   <button
                     type="button"
-                    className="font-black underline"
+                    className="font-bold underline"
                     onClick={async () => {
                       const ok = await copyRequestDebugInfoToClipboard(avatarLoadError);
                       toast[ok ? 'success' : 'error'](ok ? 'Debug info copied' : 'Failed to copy');
@@ -494,19 +492,19 @@ export default function Profile() {
                 </div>
               ) : null}
               <div className="pt-2 sm:pt-4 flex-1">
-                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 mb-1">
+                <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-1">
                   {resolvedProfile?.display_name || user?.full_name || 'Anonymous User'}
                 </h1>
                 <p className="text-sm text-slate-500 font-semibold">
                   @{safeHandle || 'member'}
                 </p>
                 {resolvedProfile?.is_private ? (
-                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-slate-100 text-slate-700 text-[10px] font-black uppercase">
+                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold uppercase">
                     Private
                   </span>
                 ) : null}
                 {isAdmin ? (
-                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
+                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">
                     Admin
                   </span>
                 ) : null}
@@ -517,7 +515,7 @@ export default function Profile() {
                       setFollowListMode('followers');
                       setFollowListOpen(true);
                     }}
-                    className="px-3 py-2 rounded-xl border-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-black text-sm"
+                    className="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-bold text-sm"
                   >
                     Followers {followersCount}
                   </button>
@@ -527,7 +525,7 @@ export default function Profile() {
                       setFollowListMode('following');
                       setFollowListOpen(true);
                     }}
-                    className="px-3 py-2 rounded-xl border-2 border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-black text-sm"
+                    className="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-bold text-sm"
                   >
                     Following {followingCount}
                   </button>
@@ -544,14 +542,14 @@ export default function Profile() {
               <Button
                 onClick={() => setShowEditModal(true)}
                 variant="outline"
-                className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
+                className="h-12 font-bold rounded-xl border border-slate-200"
               >
                 Edit
               </Button>
               <Button
                 asChild
                 variant="outline"
-                className="h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
+                className="h-12 font-bold rounded-xl border border-slate-200"
               >
                 <Link to={createPageUrl('Settings')}>Settings</Link>
               </Button>
@@ -563,39 +561,39 @@ export default function Profile() {
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
             <motion.div 
               whileHover={{ scale: 1.05 }}
-              className="bg-gradient-to-br from-indigo-50 to-white p-5 rounded-2xl border-2 border-indigo-200 text-center"
+              className="bg-gradient-to-br from-indigo-50 to-white p-5 rounded-2xl border border-indigo-100 text-center"
             >
-              <div className="text-3xl font-black text-[#3A3DFF] mb-1">
+              <div className="text-3xl font-bold text-[#3A3DFF] mb-1">
                 {myMovements.length}
               </div>
-              <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+              <div className="text-xs font-semibold text-slate-500">
                 Created
               </div>
             </motion.div>
             
             <motion.div 
               whileHover={{ scale: 1.05 }}
-              className="bg-gradient-to-br from-yellow-50 to-white p-5 rounded-2xl border-2 border-yellow-200 text-center"
+              className="bg-gradient-to-br from-yellow-50 to-white p-5 rounded-2xl border border-yellow-100 text-center"
             >
-              <div className="text-3xl font-black text-[#FFC947] mb-1">
+              <div className="text-3xl font-bold text-[#FFC947] mb-1">
                 {followedMovements.length}
               </div>
-              <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+              <div className="text-xs font-semibold text-slate-500">
                 Movements Followed
               </div>
             </motion.div>
             
             <motion.div 
               whileHover={{ scale: 1.05 }}
-              className="bg-gradient-to-br from-purple-50 to-white p-5 rounded-2xl border-2 border-purple-200 text-center"
+              className="bg-gradient-to-br from-purple-50 to-white p-5 rounded-2xl border border-purple-100 text-center"
             >
               <div className="flex items-center justify-center gap-2 mb-1">
                 <Trophy className="w-6 h-6 text-purple-600" />
-                <div className="text-3xl font-black text-purple-600">
+                <div className="text-3xl font-bold text-purple-600">
                   {userStats?.total_points || 0}
                 </div>
               </div>
-              <div className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+              <div className="text-xs font-semibold text-slate-500">
                 Points
               </div>
             </motion.div>
@@ -603,9 +601,9 @@ export default function Profile() {
 
           {/* Challenge Stats */}
           {userStats && (userStats.current_streak > 0 || userStats.total_challenges_completed > 0) && (
-            <div className="mb-6 p-4 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-2xl border-2 border-indigo-100">
+            <div className="mb-6 p-4 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-2xl border border-indigo-100">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider">
+                <h3 className="text-sm font-bold text-slate-900">
                   Challenge Stats
                 </h3>
                 <Button
@@ -631,7 +629,7 @@ export default function Profile() {
                     <Flame className="w-5 h-5 text-white" fill="white" />
                   </motion.div>
                   <div>
-                    <div className="text-2xl font-black text-slate-900">
+                    <div className="text-2xl font-bold text-slate-900">
                       {userStats.current_streak}
                     </div>
                     <div className="text-xs text-slate-600 font-bold">
@@ -644,7 +642,7 @@ export default function Profile() {
                     <Zap className="w-5 h-5 text-white" fill="white" />
                   </div>
                   <div>
-                    <div className="text-2xl font-black text-slate-900">
+                    <div className="text-2xl font-bold text-slate-900">
                       {userStats.total_challenges_completed}
                     </div>
                     <div className="text-xs text-slate-600 font-bold">
@@ -658,7 +656,7 @@ export default function Profile() {
 
           {/* User Details */}
           {user?.created_date ? (
-            <div className="space-y-3 mb-6 p-4 bg-slate-50 rounded-2xl border-2 border-slate-200">
+              <div className="space-y-3 mb-6 p-4 bg-slate-50 rounded-2xl border border-slate-200">
               {/* Email intentionally hidden for privacy. */}
               <div className="flex items-center gap-3 text-slate-600">
                 <Calendar className="w-5 h-5 text-slate-400" />
@@ -688,7 +686,7 @@ export default function Profile() {
             >
               <Button
                 variant="outline"
-                className="w-full h-12 font-bold rounded-xl border-2 border-red-300 text-red-700 hover:bg-red-50 uppercase tracking-wide mb-3"
+                className="w-full h-12 font-bold rounded-xl border border-red-200 text-red-700 hover:bg-red-50 mb-3"
               >
                 <Shield className="w-4 h-4 mr-2" />
                 Admin Panel
@@ -700,7 +698,7 @@ export default function Profile() {
           <Button
             onClick={() => setFeedbackOpen(true)}
             variant="outline"
-            className="w-full h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide mb-3"
+            className="w-full h-12 font-bold rounded-xl border border-slate-200 mb-3"
           >
             <MessageCircle className="w-4 h-4 mr-2" />
             Feedback / Report Bug
@@ -709,7 +707,7 @@ export default function Profile() {
           <Button
             onClick={handleLogout}
             variant="outline"
-            className="w-full h-12 font-bold rounded-xl border-2 border-slate-300 uppercase tracking-wide"
+            className="w-full h-12 font-bold rounded-xl border border-slate-200"
           >
             <LogOut className="w-4 h-4 mr-2" />
             Sign Out
@@ -732,12 +730,12 @@ export default function Profile() {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1 }}
-        className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
+        className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
       >
-        <div className="p-6 border-b-2 border-slate-200 flex items-center justify-between bg-gradient-to-r from-slate-50 to-white">
-          <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">My Movements</h2>
+        <div className="p-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-r from-slate-50 to-white">
+          <h2 className="text-2xl font-bold text-slate-900">My Movements</h2>
           <Link to={createPageUrl('CreateMovement')}>
-            <Button className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 font-black rounded-xl h-10 px-5 uppercase tracking-wide">
+            <Button className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 font-bold rounded-xl h-10 px-5">
               <Plus className="w-4 h-4 mr-1" strokeWidth={3} />
               New
             </Button>
@@ -749,16 +747,16 @@ export default function Profile() {
             <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
               <Zap className="w-10 h-10 text-slate-400" />
             </div>
-            <h3 className="font-black text-xl text-slate-900 mb-2">No movements yet</h3>
+            <h3 className="font-bold text-xl text-slate-900 mb-2">No movements yet</h3>
             <p className="text-slate-500 mb-6 font-semibold">Start your first movement and inspire others!</p>
             <Link to={createPageUrl('CreateMovement')}>
-              <Button className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 font-black rounded-xl h-12 px-6 uppercase tracking-wide">
+              <Button className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 font-bold rounded-xl h-12 px-6">
                 Create Movement
               </Button>
             </Link>
           </div>
         ) : (
-          <div className="divide-y-2 divide-slate-100">
+          <div className="divide-y divide-slate-100">
             {myMovements.map((movement) => (
               <Link
                 key={movement.id}
@@ -767,14 +765,14 @@ export default function Profile() {
               >
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex-1 min-w-0">
-                    <h3 className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
+                    <h3 className="font-bold text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
                       {movement.title}
                     </h3>
                     <div className="flex items-center gap-4 text-sm mb-3">
                       <span className="text-slate-500 font-bold">
                         {safeDate(movement.created_date)}
                       </span>
-                      <span className="flex items-center gap-1 font-black text-[#3A3DFF]">
+                      <span className="flex items-center gap-1 font-bold text-[#3A3DFF]">
                         <TrendingUp className="w-4 h-4" />
                         {movement.momentum_score > 0 ? '+' : ''}{movement.momentum_score || 0}
                       </span>
@@ -801,12 +799,12 @@ export default function Profile() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
-          className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
+          className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
         >
-          <div className="p-6 border-b-2 border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-            <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Following</h2>
+          <div className="p-6 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+            <h2 className="text-2xl font-bold text-slate-900">Following</h2>
           </div>
-          <div className="divide-y-2 divide-slate-100">
+          <div className="divide-y divide-slate-100">
             {followedMovements.map((movement) => (
               <Link
                 key={movement.id}
@@ -815,7 +813,7 @@ export default function Profile() {
               >
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex-1 min-w-0">
-                    <h3 className="font-black text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
+                    <h3 className="font-bold text-lg text-slate-900 group-hover:text-[#3A3DFF] transition-colors mb-2 truncate">
                       {movement.title}
                     </h3>
                     <div className="text-sm text-slate-500 font-bold">
@@ -836,26 +834,26 @@ export default function Profile() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.25 }}
-          className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
+          className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
         >
-          <div className="p-6 border-b-2 border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-            <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Deleted</h2>
+          <div className="p-6 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+            <h2 className="text-2xl font-bold text-slate-900">Deleted</h2>
           </div>
 
           <div className="p-4 sm:p-6 space-y-4">
             {myDeletedMovements.length > 0 ? (
               <details>
-                <summary className="cursor-pointer select-none font-black text-slate-900 text-sm sm:text-base uppercase tracking-wide">
+                <summary className="cursor-pointer select-none font-bold text-slate-900 text-sm sm:text-base">
                   Deleted movements (audit log) ({myDeletedMovements.length})
                 </summary>
-                <div className="mt-3 divide-y-2 divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
+                <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
                   {myDeletedMovements.map((movement) => (
                     <Link
                       key={movement.id}
                       to={`/movement/${encodeURIComponent(String(movement.id))}`}
                       className="block p-4 bg-white hover:bg-slate-50 transition-colors"
                     >
-                      <div className="font-black text-slate-900 truncate">
+                      <div className="font-bold text-slate-900 truncate">
                         {movement.title || 'Deleted movement'}
                       </div>
                       <div className="mt-1 text-xs text-slate-600 font-bold">
@@ -879,17 +877,17 @@ export default function Profile() {
 
             {deletedFollowedMovements.length > 0 ? (
               <details>
-                <summary className="cursor-pointer select-none font-black text-slate-900 text-sm sm:text-base uppercase tracking-wide">
+                <summary className="cursor-pointer select-none font-bold text-slate-900 text-sm sm:text-base">
                   Deleted movements you followed ({deletedFollowedMovements.length})
                 </summary>
-                <div className="mt-3 divide-y-2 divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
+                <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200 overflow-hidden">
                   {deletedFollowedMovements.map((movement) => (
                     <Link
                       key={movement.id}
                       to={`/movement/${encodeURIComponent(String(movement.id))}`}
                       className="block p-4 bg-white hover:bg-slate-50 transition-colors"
                     >
-                      <div className="font-black text-slate-900 truncate">
+                      <div className="font-bold text-slate-900 truncate">
                         {movement.title || 'Deleted movement'}
                       </div>
                       <div className="mt-1 text-xs text-slate-600 font-bold">

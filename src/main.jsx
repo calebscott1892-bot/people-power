@@ -34,8 +34,6 @@ try {
   // ignore (non-browser)
 }
 
-console.log('[PeoplePower] SERVER_BASE:', SERVER_BASE);
-
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>

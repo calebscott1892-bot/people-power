@@ -182,6 +182,8 @@ export function AuthProvider({ children }) {
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
       applySession(data?.session ?? null);
+    }).catch(() => {
+      if (mounted) applySession(null);
     });
     const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
       applySession(newSession ?? null);
@@ -355,8 +357,9 @@ export function AuthProvider({ children }) {
       try {
         await syncUserWithBackend();
       } catch (e) {
-        // Log but do not block login
+        // Log but do not block login — schedule a single retry
         logError(e, 'Failed to sync user with backend after signIn');
+        setTimeout(() => { syncUserWithBackend().catch(() => {}); }, 3000);
       }
     }
     return { status: 'signed_in', session: data?.session ?? null, user: data?.user ?? null };
@@ -371,7 +374,15 @@ export function AuthProvider({ children }) {
       password,
       ...(emailRedirectTo ? { options: { emailRedirectTo } } : null),
     });
-    if (error) throw error;
+    if (error) {
+      const msg = String(error?.message || 'Sign-up failed');
+      if (msg.toLowerCase().includes('email not confirmed')) {
+        const e = new Error('Please verify your email address, then sign in.');
+        e.code = 'EMAIL_NOT_CONFIRMED';
+        throw e;
+      }
+      throw error;
+    }
 
     // Supabase behavior depends on project settings:
     // - If email confirmation is OFF, `data.session` is usually present => user is immediately signed in.
@@ -382,8 +393,9 @@ export function AuthProvider({ children }) {
       try {
         await syncUserWithBackend();
       } catch (e) {
-        // Log but do not block signup
+        // Log but do not block signup — schedule a single retry
         logError(e, 'Failed to sync user with backend after signUp');
+        setTimeout(() => { syncUserWithBackend().catch(() => {}); }, 3000);
       }
       return { status: 'signed_in', session: data.session, user: data.user ?? null };
     }
@@ -437,16 +449,20 @@ export function AuthProvider({ children }) {
   const logout = useCallback(async () => {
     const supabase = getSupabaseClient();
     if (supabaseConfigError || !supabase) throw new Error(AUTH_DISABLED_MESSAGE);
-    const { error } = await supabase.auth.signOut();
-    if (error) throw error;
-    setSession(null);
-    setUser(null);
-    setServerStaffRole(null);
-
     try {
-      queryClient.clear();
-    } catch {
-      // ignore
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+    } finally {
+      // Always clear local state so user isn't stuck in an inconsistent
+      // "signed-in locally but server session dead" state.
+      setSession(null);
+      setUser(null);
+      setServerStaffRole(null);
+      try {
+        queryClient.clear();
+      } catch {
+        // ignore
+      }
     }
   }, [queryClient]);
 

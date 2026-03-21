@@ -9,6 +9,7 @@ export default function Footer() {
     { to: '/community-guidelines', label: 'Community Guidelines' },
     { to: '/privacy-policy', label: 'Privacy Policy' },
     { to: '/report', label: 'Report a problem' },
+    { to: '/help', label: 'Help & Support' },
   ];
 
   const year = 2025;

@@ -247,14 +247,19 @@ export function installAuthFetch() {
         (res.status === 403 && shouldTreatForbiddenAsAuthFailure(text));
 
       if (isAuthFailure) {
+        // Every request that hits a 401/403 independently retries after the
+        // shared refresh completes. refreshOnce() deduplicates the actual
+        // token refresh so only one network call is made.
         try {
           await refreshOnce();
           res = await attempt();
         } catch {
-          // ignore
+          // ignore — fall through to expiry handling below
         }
       }
 
+      // After retry, if we still have an auth failure, trigger logout/toast.
+      // The handlingAuthFailure guard ensures only one toast + navigation fires.
       if (isAuthFailure && (res.status === 401 || res.status === 403)) {
         if (!handlingAuthFailure) {
           handlingAuthFailure = true;
@@ -272,10 +277,9 @@ export function installAuthFetch() {
           try {
             await onAuthExpired({ message, url, status: res.status, request_id: requestId || null, reason });
           } finally {
-            // allow future auth failures to be handled if user signs in again
             setTimeout(() => {
               handlingAuthFailure = false;
-            }, 1000);
+            }, 2000);
           }
         }
       }

@@ -62,6 +62,7 @@ fastify.get('/__health', async (_request, reply) => {
 });
 
 fastify.get('/__whoami', async (request, reply) => {
+  if (IS_NODE_PROD) return reply.code(404).send({ error: 'Not found' });
   const auth = String(request.headers.authorization || '');
   const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
   return reply.send({
@@ -96,6 +97,7 @@ fastify.get('/__authdiag', async (request, reply) => {
 // --- DB diagnostics (safe; no secrets) ---
 // Confirms whether DATABASE_URL is present and parses non-sensitive connection details.
 fastify.get('/__db', async (_request, reply) => {
+  if (IS_NODE_PROD) return reply.code(404).send({ error: 'Not found' });
   const raw = String(process.env.DATABASE_URL || '').trim();
   const hasDatabaseUrl = !!raw;
 
@@ -203,11 +205,24 @@ if (!IS_NODE_PROD) {
 // --- Register cookie parser early (needed for proof-only session auth) ---
 fastify.register(require('@fastify/cookie'));
 
+// --- Security headers (all environments) ---
+fastify.addHook('onSend', async (_request, reply) => {
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('X-Frame-Options', 'DENY');
+  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  reply.header('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+});
+
 // Global error mapping: any accidental DB access while dbReady=false becomes a fast 503.
 fastify.setErrorHandler((err, _request, reply) => {
   if (err?.code === DB_UNAVAILABLE_CODE) {
     if (reply.sent) return;
     return reply.code(503).send({ error: 'Database unavailable' });
+  }
+  // In production, never leak full error objects (stack traces, internal messages).
+  if (IS_NODE_PROD) {
+    const statusCode = err?.statusCode || 500;
+    return reply.code(statusCode).send({ error: statusCode < 500 ? (err?.message || 'Request error') : 'An unexpected error occurred' });
   }
   return reply.send(err);
 });
@@ -324,13 +339,13 @@ if (PROOF_MODE) {
   });
 
   // Register endpoint (proof mode: upsert into main users table)
-  fastify.post('/auth/proof/register', async (request, reply) => {
+  fastify.post('/auth/proof/register', { config: { rateLimit: { max: 5, timeWindow: 60 * 60 * 1000 } } }, async (request, reply) => {
     const { email, password } = request.body || {};
     if (!email || !password) return reply.code(400).send({ error: 'Email and password required' });
     if (typeof email !== 'string' || typeof password !== 'string') return reply.code(400).send({ error: 'Invalid input' });
     // Check if user exists in users table
     let existing = sqliteDb.prepare('SELECT * FROM users WHERE email = ?').get(email);
-    if (existing) return reply.code(409).send({ error: 'User already exists' });
+    if (existing) return reply.code(400).send({ error: 'Could not create account. Please try again or sign in.' });
     const id = randomUUID();
     const passwordHash = await bcrypt.hash(password, 10);
     require('./sqlite').upsertUser(sqliteDb, id, email, passwordHash);
@@ -342,7 +357,7 @@ if (PROOF_MODE) {
   });
 
   // Login endpoint (proof mode: check main users table)
-  fastify.post('/auth/proof/login', async (request, reply) => {
+  fastify.post('/auth/proof/login', { config: { rateLimit: { max: 10, timeWindow: 60 * 1000 } } }, async (request, reply) => {
     const { email, password } = request.body || {};
     if (!email || !password) return reply.code(400).send({ error: 'Email and password required' });
     const user = sqliteDb.prepare('SELECT * FROM users WHERE email = ?').get(email);
@@ -540,7 +555,8 @@ fastify.get('/api/health', async (_request, _reply) => {
 });
 
 
-fastify.get('/debug/storage-mode', async (_request, _reply) => {
+fastify.get('/debug/storage-mode', async (_request, reply) => {
+  if (IS_NODE_PROD) return reply.code(404).send({ error: 'Not found' });
   return {
     storageMode,
     hasDatabaseUrl: !!process.env.DATABASE_URL,
@@ -548,17 +564,17 @@ fastify.get('/debug/storage-mode', async (_request, _reply) => {
 });
 
 const RATE_LIMITS = {
-  global: { max: 100, timeWindow: 5 * 60 * 1000 }, // 5 minutes
-  admin: { max: 60, timeWindow: 60 * 1000 }, // 1 minute
+  global: { max: 60, timeWindow: 60 * 1000 }, // 60 per minute
+  admin: { max: 30, timeWindow: 60 * 1000 }, // 1 minute
   movementCreate: { max: 5, timeWindow: 60 * 60 * 1000 }, // 1 hour
   conversationCreate: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
-  messageSend: { max: 60, timeWindow: 60 * 1000 }, // 1 minute
+  messageSend: { max: 20, timeWindow: 60 * 1000 }, // 20 per minute
   reportCreate: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
   petitionSign: { max: 30, timeWindow: 60 * 60 * 1000 }, // 1 hour
   upload: { max: 20, timeWindow: 60 * 60 * 1000 }, // 1 hour
   evidenceSubmit: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
-  commentCreate: { max: 30, timeWindow: 60 * 60 * 1000 }, // 1 hour
-  search: { max: 60, timeWindow: 60 * 1000 }, // 1 minute
+  commentCreate: { max: 15, timeWindow: 60 * 60 * 1000 }, // 15 per hour
+  search: { max: 30, timeWindow: 60 * 1000 }, // 30 per minute
 };
 
 // NOTE: Safety: enforce max size / length to prevent abuse & excessive resource use.
@@ -999,8 +1015,12 @@ fastify.get('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }
   return reply.send({ flags: res.rows });
 });
 
-// Fetch all feature flags (public, for frontend)
-fastify.get('/feature-flags', async (_request, reply) => {
+// Fetch feature flags (requires auth header so internal config is not exposed publicly)
+fastify.get('/feature-flags', async (request, reply) => {
+  const auth = String(request.headers.authorization || '');
+  if (!auth.toLowerCase().startsWith('bearer ')) {
+    return reply.code(401).send({ error: 'Authentication required' });
+  }
   if (!isDbAvailable()) {
     // If a DB is configured but temporarily down, fail fast.
     if (hasDatabaseUrl || isProd) return reply.code(503).send({ error: 'Database unavailable' });
@@ -11215,6 +11235,47 @@ fastify.post('/reports', { config: { rateLimit: RATE_LIMITS.reportCreate } }, as
       return reply.code(201).send(responseBody);
     }
   }
+});
+
+// --- Auth Help (unauthenticated) ---
+// Allows locked-out users to request help via email.
+fastify.post('/auth-help', { config: { rateLimit: { max: 2, timeWindow: 60 * 60 * 1000 } } }, async (request, reply) => {
+  const email = String(request.body?.email || '').trim().toLowerCase();
+  const message = String(request.body?.message || '').trim();
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    return reply.code(400).send({ error: 'Valid email is required.' });
+  }
+  if (!message || message.length < 10) {
+    return reply.code(400).send({ error: 'Please provide a message (at least 10 characters).' });
+  }
+  if (message.length > 2000) {
+    return reply.code(400).send({ error: 'Message is too long (max 2000 characters).' });
+  }
+
+  const adminEmail = REPORT_EMAIL_REPLY_TO || REPORT_EMAIL_FROM;
+  if (!adminEmail || !canSendReportEmail()) {
+    fastify.log.warn('Auth-help request received but no email configuration available');
+    // Still return success to avoid leaking config info
+    return reply.code(200).send({ ok: true });
+  }
+
+  const sanitizedEmail = escapeHtml(email);
+  const sanitizedMessage = escapeHtml(message);
+
+  try {
+    await sendReportEmail({
+      to: adminEmail,
+      subject: `[People Power] Auth Help Request from ${email}`,
+      text: `Auth help request:\n\nFrom: ${email}\n\nMessage:\n${message}`,
+      html: `<div style="font-family:sans-serif;max-width:600px"><h2 style="color:#1e293b">Auth Help Request</h2><p><strong>From:</strong> ${sanitizedEmail}</p><hr style="border:none;border-top:1px solid #e2e8f0;margin:16px 0"><p style="white-space:pre-wrap">${sanitizedMessage}</p></div>`,
+    });
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Failed to send auth-help email');
+    return reply.code(503).send({ error: 'Could not send your message right now. Please try again later.' });
+  }
+
+  return reply.code(200).send({ ok: true });
 });
 
 fastify.get('/reports', { config: { rateLimit: RATE_LIMITS.admin } }, async (request, reply) => {

@@ -3,21 +3,24 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { useAuth } from '@/auth/AuthProvider';
+import { Navigate } from 'react-router-dom';
 const isProof = import.meta.env.VITE_C4_PROOF_PACK === "1";
 import BackButton from '@/components/shared/BackButton';
 import { toastFriendlyError } from '@/utils/toastErrors';
+import { getFriendlyError } from '@/utils/friendlyErrors';
 import { usePendingGuard } from '@/hooks/usePendingGuard';
 import { captureRequestDebugInfo } from '@/utils/requestDebug';
 import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
+import { PasswordStrength } from '@/components/ui/password-strength';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { syncUserWithBackend } from '@/api/usersClient';
 
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signIn, signUp, resendConfirmationEmail, resetPasswordForEmail, isSupabaseConfigured, authErrorMessage } = useAuth();
+  const { signIn, signUp, resendConfirmationEmail, resetPasswordForEmail, isSupabaseConfigured, authErrorMessage, user } = useAuth();
 
   // Current auth UX flow summary (frontend):
   // - Signup calls Supabase signUp.
@@ -28,6 +31,7 @@ export default function Login() {
   const [mode, setMode] = useState('login'); // 'login' | 'signup' | 'check_email' | 'forgot'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [termsAccepted, setTermsAccepted] = useState(false);
 
   const [pendingEmail, setPendingEmail] = useState('');
   const [pendingConfirmationSentAt, setPendingConfirmationSentAt] = useState(null);
@@ -113,7 +117,10 @@ export default function Login() {
   const submitForgotPassword = async (e) => {
     e?.preventDefault?.();
     setStatus('');
-    if (!isSupabaseConfigured) return;
+    if (!isSupabaseConfigured) {
+      setStatus(authErrorMessage || 'Sign-in is temporarily unavailable.');
+      return;
+    }
 
     const toEmail = String(forgotEmail || '').trim();
     if (!toEmail) {
@@ -178,17 +185,35 @@ export default function Login() {
 
     setLoading(true);
     try {
-      if (!isSupabaseConfigured) return;
+      if (!isSupabaseConfigured) {
+        setStatus(authErrorMessage || 'Sign-in is temporarily unavailable.');
+        return;
+      }
+      if (mode === 'signup' && String(password || '').length > 128) {
+        setStatus('Password must be 128 characters or fewer.');
+        return;
+      }
       if (mode === 'signup') {
         const result = await signUp(
           String(email || '').trim(),
           String(password || ''),
           redirectToEmailVerified ? { emailRedirectTo: redirectToEmailVerified } : undefined
         );
-        try { await syncUserWithBackend(); } catch { /* ignore for now */ }
+
+        // Persist terms acceptance so downstream gates (OnboardingFlow) recognize it
+        if (termsAccepted) {
+          try {
+            const emailKey = String(email || '').trim().toLowerCase();
+            const prefix = emailKey ? `peoplepower_terms_accepted:${emailKey}` : 'peoplepower_terms_accepted';
+            localStorage.setItem(prefix, 'true');
+            localStorage.setItem('peoplepower_terms_accepted', 'true');
+            localStorage.setItem('peoplepower_safety_accepted', 'true');
+          } catch { /* ignore */ }
+        }
+
         if (result?.status === 'signed_in') {
           toast.success('Account created. Welcome!');
-          navigate('/welcome', { replace: true, state: { from: toFromRoute(), signedInJustNow: true } });
+          navigate(toFromRoute() || '/', { replace: true });
           return;
         }
         const emailValue = String(email || '').trim();
@@ -199,8 +224,7 @@ export default function Login() {
         return;
       } else {
         await signIn(String(email || '').trim(), String(password || ''));
-        try { await syncUserWithBackend(); } catch { /* ignore for now */ }
-        navigate('/welcome', { replace: true, state: { from: toFromRoute(), signedInJustNow: true } });
+        navigate(toFromRoute() || '/', { replace: true });
       }
     } catch (err) {
       if (err?.code === 'EMAIL_NOT_CONFIRMED') {
@@ -211,7 +235,8 @@ export default function Login() {
         setStatus('');
         return;
       }
-      setStatus(err?.message ?? 'Auth error');
+      const friendly = getFriendlyError(err);
+      setStatus(friendly?.title || 'Something went wrong. Please try again.');
     } finally {
       setLoading(false);
       authPendingGuard.stop();
@@ -219,7 +244,10 @@ export default function Login() {
   };
 
   const submitResend = async () => {
-    if (!isSupabaseConfigured) return;
+    if (!isSupabaseConfigured) {
+      toast.error(authErrorMessage || 'Sign-in is temporarily unavailable.');
+      return;
+    }
     const toEmail = String(pendingEmail || email || '').trim();
     if (!toEmail) {
       toast.error('Enter your email address');
@@ -256,23 +284,67 @@ export default function Login() {
     }
   };
 
-  const headerTitle = mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Forgot password' : 'Sign in';
+  const showTabs = mode === 'login' || mode === 'signup';
+
+  const headerTitle = mode === 'forgot' ? 'Forgot password' : mode === 'check_email' ? 'Check your email' : null;
   const headerDesc =
-    mode === 'signup'
-      ? 'When you create an account, we’ll also email you to verify your address.'
-      : mode === 'forgot'
-        ? 'We’ll email you a password reset link.'
-        : 'Sign in to continue.';
+    mode === 'forgot'
+      ? 'We\u2019ll email you a password reset link.'
+      : mode === 'check_email'
+        ? 'We sent you a verification link.'
+        : null;
+
+  // If user is already authenticated, redirect to home
+  if (user) return <Navigate to="/" replace />;
 
   return (
-    <div className="min-h-[100vh] grid place-items-center px-4 py-10 bg-slate-50">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle className="text-2xl font-black">{headerTitle}</CardTitle>
-          <CardDescription>{headerDesc}</CardDescription>
-        </CardHeader>
+    <div className="min-h-svh grid place-items-center px-4 py-10 bg-gradient-to-br from-slate-50 via-white to-blue-50">
+      <div className="w-full max-w-md space-y-6">
+        <div className="flex flex-col items-center gap-2">
+          <img src="/logo.png?v=20260320-1" alt="People Power" className="w-14 h-14 object-contain" />
+          <span className="text-xs font-semibold text-slate-500">Organize. Connect. Act.</span>
+        </div>
 
-        <CardContent className="space-y-4">
+      <Card className="w-full max-w-md">
+        {showTabs ? (
+          <div className="flex border-b border-slate-200" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'login'}
+              onClick={() => { setStatus(''); setMode('login'); }}
+              className={`flex-1 py-3 text-sm font-bold transition-colors ${
+                mode === 'login'
+                  ? 'border-b-2 border-slate-900 text-slate-900'
+                  : 'text-slate-500 hover:text-slate-600'
+              }`}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'signup'}
+              onClick={() => { setStatus(''); setMode('signup'); }}
+              className={`flex-1 py-3 text-sm font-bold transition-colors ${
+                mode === 'signup'
+                  ? 'border-b-2 border-slate-900 text-slate-900'
+                  : 'text-slate-500 hover:text-slate-600'
+              }`}
+            >
+              Create Account
+            </button>
+          </div>
+        ) : null}
+
+        {headerTitle ? (
+          <CardHeader>
+            <CardTitle className="text-2xl font-black">{headerTitle}</CardTitle>
+            {headerDesc ? <CardDescription>{headerDesc}</CardDescription> : null}
+          </CardHeader>
+        ) : null}
+
+        <CardContent className={`space-y-4 ${showTabs ? 'pt-6' : ''}`}>
           {!isSupabaseConfigured && !isProof ? (
             <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
               {authErrorMessage || 'Sign-in is temporarily unavailable.'}
@@ -331,8 +403,9 @@ export default function Login() {
           ) : mode === 'forgot' ? (
             <form onSubmit={submitForgotPassword} className="space-y-3">
               <div className="space-y-1">
-                <div className="text-sm font-bold text-slate-800">Email</div>
+                <label htmlFor="forgot-email" className="text-sm font-bold text-slate-800">Email</label>
                 <Input
+                  id="forgot-email"
                   value={forgotEmail}
                   onChange={(e) => setForgotEmail(e.target.value)}
                   type="email"
@@ -353,30 +426,34 @@ export default function Login() {
           ) : (
             <form onSubmit={submit} className="space-y-3">
               <div className="space-y-1">
-                <div className="text-sm font-bold text-slate-800">Email</div>
+                <label htmlFor="login-email" className="text-sm font-bold text-slate-800">Email</label>
                 <Input
+                  id="login-email"
                   data-testid="login-email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   type="email"
                   required
                   placeholder="you@example.com"
+                  autoComplete="email"
                   disabled={loading || (!isSupabaseConfigured && !isProof)}
                 />
               </div>
 
               <div className="space-y-1">
-                <div className="text-sm font-bold text-slate-800">Password</div>
-                <Input
+                <label htmlFor="login-password" className="text-sm font-bold text-slate-800">Password</label>
+                <PasswordInput
+                  id="login-password"
                   data-testid="login-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  type="password"
                   required
                   minLength={6}
                   placeholder="••••••••"
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                   disabled={loading || (!isSupabaseConfigured && !isProof)}
                 />
+                {mode === 'signup' ? <PasswordStrength password={password} /> : null}
               </div>
 
               {mode === 'login' ? (
@@ -389,36 +466,48 @@ export default function Login() {
                   Forgot password?
                 </button>
               ) : (
-                <div className="text-xs text-slate-600 font-semibold">
-                  You may need to click the verification link in your email before you can log in.
-                </div>
+                <>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-5 w-5 rounded border-slate-300"
+                      checked={termsAccepted}
+                      onChange={(e) => setTermsAccepted(e.target.checked)}
+                    />
+                    <span className="font-semibold leading-snug">
+                      I agree to the{' '}
+                      <Link to="/terms-of-service" target="_blank" className="underline text-[#3A3DFF]">Terms of Service</Link>,{' '}
+                      <Link to="/privacy-policy" target="_blank" className="underline text-[#3A3DFF]">Privacy Policy</Link>, and{' '}
+                      <Link to="/community-guidelines" target="_blank" className="underline text-[#3A3DFF]">Community Guidelines</Link>.
+                    </span>
+                  </label>
+                  <div className="text-xs text-slate-500 font-semibold">
+                    We&apos;ll email you a verification link to confirm your address.
+                  </div>
+                </>
               )}
 
-              <Button data-testid="login-submit" type="submit" className="w-full" disabled={loading || (!isSupabaseConfigured && !isProof)}>
+              <Button data-testid="login-submit" type="submit" className="w-full" disabled={loading || (!isSupabaseConfigured && !isProof) || (mode === 'signup' && !termsAccepted)} aria-busy={loading}>
                 {loading ? 'Working…' : mode === 'signup' ? 'Create account' : 'Sign in'}
-              </Button>
-
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                onClick={() => {
-                  setStatus('');
-                  setMode(mode === 'signup' ? 'login' : 'signup');
-                }}
-                disabled={loading}
-              >
-                {mode === 'signup' ? 'Already have an account? Sign in' : 'New here? Create an account'}
               </Button>
             </form>
           )}
 
-          <BackButton
-            className="inline-flex items-center justify-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-700"
-            iconClassName="w-4 h-4"
-          />
+          <div className="flex items-center justify-between gap-2">
+            <BackButton
+              className="inline-flex items-center justify-center gap-2 text-sm font-bold text-slate-500 hover:text-slate-700"
+              iconClassName="w-4 h-4"
+            />
+            <Link
+              to="/help"
+              className="text-sm font-bold text-slate-500 hover:text-slate-700 underline underline-offset-2"
+            >
+              Can&apos;t sign in? Get help
+            </Link>
+          </div>
         </CardContent>
       </Card>
+      </div>
     </div>
   );
 }

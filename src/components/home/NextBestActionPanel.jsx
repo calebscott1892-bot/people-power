@@ -47,7 +47,7 @@ export default function NextBestActionPanel({
         to: '/create-movement',
         icon: Plus,
         disabled: !gateReady,
-        disabledHint: 'Accept safety & terms to continue',
+        disabledHint: 'Sign in to get started',
       };
     }
 
@@ -101,13 +101,13 @@ export default function NextBestActionPanel({
   const actions = [primaryAction, secondaryAction, tertiaryAction].filter(Boolean);
 
   return (
-    <div className="bg-white rounded-3xl border-3 border-slate-200 shadow-lg p-5">
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="text-xs font-black text-slate-600 uppercase tracking-wide">
+          <div className="text-xs font-semibold text-slate-500">
             Next best action
           </div>
-          <div className="text-lg font-black text-slate-900">
+          <div className="text-lg font-bold text-slate-900">
             Keep your momentum going
           </div>
           <div className="text-sm text-slate-600 font-semibold">
@@ -143,7 +143,7 @@ export default function NextBestActionPanel({
                 >
                   <Icon className={`w-4 h-4 ${disabled ? 'text-slate-500' : 'text-slate-900'}`} />
                 </div>
-                <div className="font-black">{a.title}</div>
+                <div className="font-bold">{a.title}</div>
               </div>
               <div className="mt-2 text-sm text-slate-600 font-semibold">{a.description}</div>
             </div>

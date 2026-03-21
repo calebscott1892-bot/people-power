@@ -102,7 +102,7 @@ export default function TutorialModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className={
-          'w-[100vw] h-[100vh] max-w-none rounded-none left-0 top-0 translate-x-0 translate-y-0 p-0 overflow-hidden ' +
+          'w-[100vw] h-svh max-w-none rounded-none left-0 top-0 translate-x-0 translate-y-0 p-0 overflow-hidden ' +
           'sm:w-[95vw] sm:h-auto sm:max-w-xl sm:rounded-2xl sm:left-[50%] sm:top-[50%] sm:translate-x-[-50%] sm:translate-y-[-50%] sm:shadow-2xl sm:border sm:border-slate-200'
         }
       >

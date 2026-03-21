@@ -23,6 +23,7 @@ export default function EmailVerified() {
 
   const [loading, setLoading] = useState(true);
   const [verified, setVerified] = useState(false);
+  const [errorHint, setErrorHint] = useState('');
 
   useEffect(() => {
     const supabase = getSupabaseClient();
@@ -53,14 +54,18 @@ export default function EmailVerified() {
           setLoading(false);
           if (ok) {
             setTimeout(() => {
-              navigate('/welcome', { replace: true, state: { verifiedJustNow: true } });
+              navigate('/', { replace: true });
             }, 900);
           }
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
           setVerified(false);
           setLoading(false);
+          const msg = String(err?.message || '').toLowerCase();
+          if (msg.includes('expired') || msg.includes('invalid') || msg.includes('used')) {
+            setErrorHint('This verification link may have expired or already been used. Try signing in — if your email is already confirmed you\u2019re all set. Otherwise, request a new verification from the sign-in page.');
+          }
         }
       }
     })();
@@ -71,7 +76,12 @@ export default function EmailVerified() {
   }, [code, navigate]);
 
   return (
-    <div className="min-h-[100vh] grid place-items-center px-4 py-10 bg-slate-50">
+    <div className="min-h-svh grid place-items-center px-4 py-10 bg-gradient-to-br from-slate-50 via-white to-blue-50">
+      <div className="w-full max-w-md space-y-6">
+        <div className="flex flex-col items-center gap-2">
+          <img src="/logo.png?v=20260320-1" alt="People Power" className="w-14 h-14 object-contain" />
+        </div>
+
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle className="text-xl font-black">Email verification</CardTitle>
@@ -87,7 +97,7 @@ export default function EmailVerified() {
                 Email verified! You can now start using People Power.
               </div>
               <Button asChild className="w-full">
-                <Link to="/welcome">Continue</Link>
+                <Link to="/">Continue</Link>
               </Button>
             </div>
           ) : (
@@ -96,7 +106,7 @@ export default function EmailVerified() {
                 We couldn’t confirm your email yet.
               </div>
               <div className="text-xs text-slate-500 font-semibold">
-                If you just clicked the verification link, try signing in again.
+                {errorHint || 'If you just clicked the verification link, try signing in again.'}
               </div>
               <Button asChild variant="outline" className="w-full">
                 <Link to="/login">Go to login</Link>
@@ -105,6 +115,7 @@ export default function EmailVerified() {
           )}
         </CardContent>
       </Card>
+      </div>
     </div>
   );
 }

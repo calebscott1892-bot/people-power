@@ -14,8 +14,7 @@ export function getStaffRole(email) {
   const normalized = normalizeEmail(email);
   if (!normalized) return 'user';
 
-  const fallbackAdmins = ['calebscott1892@gmail.com'];
-  const adminEmails = parseEmailList(import.meta?.env?.VITE_ADMIN_EMAILS).concat(fallbackAdmins);
+  const adminEmails = parseEmailList(import.meta?.env?.VITE_ADMIN_EMAILS);
   if (adminEmails.includes(normalized)) return 'admin';
 
   const modEmails = parseEmailList(import.meta?.env?.VITE_MODERATOR_EMAILS);

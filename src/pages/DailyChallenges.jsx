@@ -245,7 +245,7 @@ function DailyChallengesDev() {
   if (loading) {
     return (
       <div className="max-w-4xl mx-auto py-16">
-        <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 p-10 text-center">
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-10 text-center">
           <div className="text-slate-600 font-semibold">Loading...</div>
         </div>
       </div>
@@ -255,7 +255,7 @@ function DailyChallengesDev() {
   if (dailyChallengesLoading) {
     return (
       <div className="max-w-4xl mx-auto py-16">
-        <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 p-10 text-center">
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-10 text-center">
           <div className="text-slate-600 font-semibold">Loading challenges…</div>
         </div>
       </div>
@@ -265,8 +265,8 @@ function DailyChallengesDev() {
   if (!dailyChallengesEnabled) {
     return (
       <div className="max-w-4xl mx-auto py-16">
-        <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 p-10 text-center space-y-3">
-          <h1 className="text-3xl font-black text-slate-900">Daily Challenges</h1>
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-10 text-center space-y-3">
+          <h1 className="text-3xl font-bold text-slate-900">Daily Challenges</h1>
           <p className="text-slate-600 font-semibold">Daily Challenges are currently disabled.</p>
         </div>
       </div>
@@ -276,8 +276,8 @@ function DailyChallengesDev() {
   if (!user) {
     return (
       <div className="max-w-4xl mx-auto py-16">
-        <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 p-10 text-center space-y-3">
-          <h1 className="text-3xl font-black text-slate-900">Daily Challenges</h1>
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-10 text-center space-y-3">
+          <h1 className="text-3xl font-bold text-slate-900">Daily Challenges</h1>
           <p className="text-slate-600 font-semibold">Sign in to track your completions and streak.</p>
         </div>
       </div>
@@ -287,7 +287,7 @@ function DailyChallengesDev() {
   return (
     <div className="max-w-5xl mx-auto space-y-8">
       {showBackButton ? <BackButton /> : null}
-      <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden">
         <div className="p-6 sm:p-8 border-b border-slate-200">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6">
             <div className="flex items-center gap-3">
@@ -295,7 +295,7 @@ function DailyChallengesDev() {
                 <Zap className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-2xl sm:text-3xl font-black text-slate-900">Daily Challenges</h1>
+                <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">Daily Challenges</h1>
                 <p className="text-slate-600 font-semibold">
                   Optional, positive actions — track streaks and earn expression-only points.
                 </p>
@@ -303,7 +303,7 @@ function DailyChallengesDev() {
             </div>
 
             <div className="text-left sm:text-right">
-              <div className="text-2xl font-black text-[#FFC947]">{userStats?.total_points || 0}</div>
+              <div className="text-2xl font-bold text-[#FFC947]">{userStats?.total_points || 0}</div>
               <div className="text-xs text-slate-500 font-bold uppercase tracking-wide">Total points</div>
               <div className="text-xs text-slate-500 font-semibold mt-2">
                 Today: {completionsToday.length} completed
@@ -315,7 +315,7 @@ function DailyChallengesDev() {
         <div className="p-4 sm:p-6 space-y-6">
           {anyLoadError && (
             <div className="p-6 rounded-2xl border-2 border-slate-200 bg-slate-50 text-slate-700 space-y-3">
-              <div className="font-black">We couldn’t load challenges right now.</div>
+              <div className="font-bold">We couldn&apos;t load challenges right now.</div>
               <div className="text-sm font-semibold">Please try again.</div>
               <button
                 type="button"

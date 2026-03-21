@@ -59,7 +59,7 @@ export default function OnboardingFlow({ user, onComplete }) {
       const ageKey = email ? `peoplepower_age_confirmed:${email}` : 'peoplepower_age_confirmed';
       const safetyKey = email ? `peoplepower_safety_ack:${email}` : 'peoplepower_safety_ack';
       if (localStorage.getItem(ageKey) === 'true') setAgeConfirmed(true);
-      if (localStorage.getItem(safetyKey) === 'true') setSafetyAckAccepted(true);
+      if (localStorage.getItem(safetyKey) === 'true' || localStorage.getItem('peoplepower_safety_accepted') === 'true') setSafetyAckAccepted(true);
     } catch {
       // ignore
     }

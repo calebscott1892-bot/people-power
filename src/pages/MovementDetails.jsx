@@ -283,6 +283,7 @@ function EventRsvpControls({ event, movementId, accessToken, myEmail, backendSta
                   disabled={rsvpMutation.isPending || backendStatus !== 'healthy'}
                   className="h-9 w-9 rounded-xl border-2 border-slate-200 bg-white text-slate-700 hover:bg-slate-50 flex items-center justify-center"
                   title="Cancel RSVP"
+                  aria-label="Cancel RSVP"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -468,7 +469,7 @@ function TextInput({ value, onChange, placeholder, type = 'text' }) {
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full h-11 px-3 rounded-xl border-2 border-slate-200 bg-white text-slate-900 font-semibold outline-none"
+      className="w-full h-11 px-3 rounded-xl border-2 border-slate-200 bg-white text-slate-900 font-semibold outline-none focus:ring-2 focus:ring-slate-400"
     />
   );
 }
@@ -479,7 +480,7 @@ function TextArea({ value, onChange, placeholder }) {
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full min-h-24 p-3 rounded-xl border-2 border-slate-200 bg-white text-slate-900 font-semibold outline-none"
+      className="w-full min-h-24 p-3 rounded-xl border-2 border-slate-200 bg-white text-slate-900 font-semibold outline-none focus:ring-2 focus:ring-slate-400"
     />
   );
 }
@@ -3409,7 +3410,7 @@ export default function MovementDetails() {
                               }
                               setResourceFile(file);
                             }}
-                            className="w-full h-11 px-3 rounded-xl border-2 border-slate-200 bg-white text-slate-900 font-semibold outline-none"
+                            className="w-full h-11 px-3 rounded-xl border-2 border-slate-200 bg-white text-slate-900 font-semibold outline-none focus:ring-2 focus:ring-slate-400"
                             accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,application/pdf"
                           />
                         </div>

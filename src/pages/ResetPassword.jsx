@@ -8,7 +8,8 @@ import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 
 import { getSupabaseClient } from '@/api/supabaseClient';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
+import { PasswordStrength } from '@/components/ui/password-strength';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 function useQueryParam(name) {
@@ -88,6 +89,11 @@ export default function ResetPassword() {
       return;
     }
 
+    if (p.length > 128) {
+      toast.error('Password must be 128 characters or fewer.');
+      return;
+    }
+
     if (p !== c) {
       toast.error('Passwords do not match.');
       return;
@@ -132,7 +138,12 @@ export default function ResetPassword() {
   };
 
   return (
-    <div className="min-h-[100vh] grid place-items-center px-4 py-10 bg-slate-50">
+    <div className="min-h-svh grid place-items-center px-4 py-10 bg-gradient-to-br from-slate-50 via-white to-blue-50">
+      <div className="w-full max-w-md space-y-6">
+        <div className="flex flex-col items-center gap-2">
+          <img src="/logo.png?v=20260320-1" alt="People Power" className="w-14 h-14 object-contain" />
+        </div>
+
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle className="text-xl font-black">Reset password</CardTitle>
@@ -157,12 +168,13 @@ export default function ResetPassword() {
             <form onSubmit={onSubmit} className="space-y-3">
               <div className="space-y-1">
                 <div className="text-sm font-bold text-slate-800">New password</div>
-                <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={6} required />
+                <PasswordInput value={password} onChange={(e) => setPassword(e.target.value)} minLength={6} required />
+                <PasswordStrength password={password} />
               </div>
 
               <div className="space-y-1">
                 <div className="text-sm font-bold text-slate-800">Confirm password</div>
-                <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} minLength={6} required />
+                <PasswordInput value={confirm} onChange={(e) => setConfirm(e.target.value)} minLength={6} required />
               </div>
 
               <Button type="submit" className="w-full" disabled={saving}>
@@ -176,6 +188,7 @@ export default function ResetPassword() {
           </div>
         </CardContent>
       </Card>
+      </div>
     </div>
   );
 }

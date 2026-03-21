@@ -1,6 +1,6 @@
 import React, { Suspense } from 'react';
 import './App.css';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { Toaster as SonnerToaster } from 'sonner';
 import Layout from '@/pages/Layout';
@@ -10,9 +10,10 @@ import { BackNavProvider } from '@/components/shared/BackNavProvider';
 
 const Home = React.lazy(() => import('@/pages/Home'));
 const Login = React.lazy(() => import('@/pages/Login'));
+const Help = React.lazy(() => import('@/pages/Help'));
 const ResetPassword = React.lazy(() => import('@/pages/ResetPassword'));
 const EmailVerified = React.lazy(() => import('@/pages/EmailVerified'));
-const Welcome = React.lazy(() => import('@/pages/Welcome'));
+
 const Profile = React.lazy(() => import('@/pages/Profile'));
 const Settings = React.lazy(() => import('@/pages/Settings'));
 const CreateMovement = React.lazy(() => import('@/pages/CreateMovement'));
@@ -34,6 +35,7 @@ const Search = React.lazy(() => import('@/pages/Search'));
 const SafetyFAQ = React.lazy(() => import('@/pages/SafetyFAQ'));
 const ReportCenter = React.lazy(() => import('@/pages/ReportCenter'));
 const UserProfile = React.lazy(() => import('@/pages/UserProfile'));
+const NotFound = React.lazy(() => import('@/pages/NotFound'));
 const TermsOfService = React.lazy(() => import('@/pages/TermsOfService'));
 const ContentPolicy = React.lazy(() => import('@/pages/ContentPolicy'));
 const CommunityGuidelines = React.lazy(() => import('@/pages/CommunityGuidelines'));
@@ -93,8 +95,15 @@ const PrivacyPolicy = React.lazy(() =>
 
 function RouteLoading() {
   return (
-    <div className="min-h-[50vh] flex items-center justify-center text-slate-600 font-semibold">
-      Loading…
+    <div className="min-h-[50vh] flex flex-col items-center justify-center gap-4 p-4">
+      <div className="w-full max-w-md space-y-4 animate-pulse">
+        <div className="h-8 w-40 bg-slate-200 rounded-lg" />
+        <div className="h-4 w-56 bg-slate-100 rounded" />
+        <div className="space-y-3">
+          <div className="h-32 w-full bg-slate-100 rounded-2xl" />
+          <div className="h-32 w-full bg-slate-100 rounded-2xl" />
+        </div>
+      </div>
     </div>
   );
 }
@@ -110,18 +119,20 @@ export default function App() {
             <Route path="/email-verified" element={<EmailVerified />} />
 
             <Route element={<Layout />}>
-              {/* Public legal pages */}
+              {/* Public pages */}
+              <Route path="/help" element={<Help />} />
               <Route path="/terms-of-service" element={<TermsOfService />} />
               <Route path="/privacy-policy" element={<PrivacyPolicy />} />
               <Route path="/content-policy" element={<ContentPolicy />} />
               <Route path="/community-guidelines" element={<CommunityGuidelines />} />
               <Route path="/legal-hub" element={<LegalHub />} />
-              <Route path="/termsofservice" element={<TermsOfService />} />
-              <Route path="/PrivacyPolicy" element={<PrivacyPolicy />} />
-              <Route path="/privacy" element={<PrivacyPolicy />} />
-              <Route path="/contentpolicy" element={<ContentPolicy />} />
-              <Route path="/communityguidelines" element={<CommunityGuidelines />} />
-              <Route path="/legalhub" element={<LegalHub />} />
+              {/* Redirect legacy/alternate casing routes to canonical paths */}
+              <Route path="/termsofservice" element={<Navigate to="/terms-of-service" replace />} />
+              <Route path="/PrivacyPolicy" element={<Navigate to="/privacy-policy" replace />} />
+              <Route path="/privacy" element={<Navigate to="/privacy-policy" replace />} />
+              <Route path="/contentpolicy" element={<Navigate to="/content-policy" replace />} />
+              <Route path="/communityguidelines" element={<Navigate to="/community-guidelines" replace />} />
+              <Route path="/legalhub" element={<Navigate to="/legal-hub" replace />} />
               <Route path="/search" element={<Search />} />
               <Route path="/safety-faq" element={<SafetyFAQ />} />
               <Route path="/report" element={<ReportCenter />} />
@@ -134,16 +145,16 @@ export default function App() {
 
               {/* Protected app routes */}
               <Route element={<RequireAuth />}>
-                <Route path="/welcome" element={<Welcome />} />
+                <Route path="/welcome" element={<Navigate to="/" replace />} />
                 <Route path="/profile" element={<Profile />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/create-movement" element={<CreateMovement />} />
-                <Route path="/createmovement" element={<CreateMovement />} />
-                <Route path="/CreateMovement" element={<CreateMovement />} />
+                <Route path="/createmovement" element={<Navigate to="/create-movement" replace />} />
+                <Route path="/CreateMovement" element={<Navigate to="/create-movement" replace />} />
 
                 {/* Main content pages */}
                 <Route path="/messages" element={<Messages />} />
-                <Route path="/Messages" element={<Messages />} />
+                <Route path="/Messages" element={<Navigate to="/messages" replace />} />
                 <Route path="/daily-challenges" element={<DailyChallenges />} />
                 <Route path="/leaderboard" element={<Leaderboard />} />
                 <Route path="/notifications" element={<Notifications />} />
@@ -169,6 +180,9 @@ export default function App() {
                 <Route path="/user-profile" element={<UserProfile />} />
                 <Route path="/u/:username" element={<UserProfile />} />
               </Route>
+
+              {/* 404 catch-all */}
+              <Route path="*" element={<NotFound />} />
             </Route>
           </Routes>
         </BackNavProvider>

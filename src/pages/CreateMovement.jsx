@@ -640,7 +640,7 @@ export default function CreateMovement() {
                   onChange={(e) => setDescriptionText(e.target.value)}
                   placeholder="Summarize the purpose, who it’s for, and the impact you seek."
                   rows={6}
-                  className="w-full min-h-32 p-4 text-slate-900 font-semibold outline-none"
+                  className="w-full min-h-32 p-4 text-slate-900 font-semibold outline-none focus:ring-2 focus:ring-[#FFC947]"
                   disabled={!!movementLocks.description && !isOwnerOrAdmin}
                 />
               </div>

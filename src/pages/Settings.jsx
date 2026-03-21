@@ -41,25 +41,25 @@ export default function Settings() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-0 py-6 space-y-6">
-      <div className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden">
-        <div className="p-6 border-b-2 border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-          <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Settings</h1>
+      <div className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden">
+        <div className="p-6 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+          <h1 className="text-2xl font-bold text-slate-900">Settings</h1>
           <p className="text-sm text-slate-600 font-semibold mt-1">Manage your account preferences.</p>
         </div>
 
         <div className="p-6">
-          <div className="rounded-2xl border-2 border-slate-200 bg-white p-4 mb-4">
-            <div className="text-sm font-black text-slate-900 uppercase tracking-wider mb-2">Account</div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 mb-4">
+            <div className="text-sm font-bold text-slate-900 mb-2">Account</div>
             <div className="text-sm text-slate-800 font-semibold">
-              <span className="font-black">Email:</span> {user?.email || '—'}
+              <span className="font-bold">Email:</span> {user?.email || '—'}
             </div>
             <div className="text-xs text-slate-600 font-semibold mt-1">
               {isEmailVerified ? 'Email verified' : 'Email not verified yet'}
             </div>
           </div>
 
-          <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-            <div className="text-sm font-black text-slate-900 uppercase tracking-wider mb-2">Blocked users</div>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="text-sm font-bold text-slate-900 mb-2">Blocked users</div>
             <p className="text-xs text-slate-600 font-semibold mb-3">
               Blocking hides your profile, movements, and messages from each other. They won’t be notified.
             </p>

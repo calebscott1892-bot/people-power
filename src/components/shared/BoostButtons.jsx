@@ -279,15 +279,15 @@ export default function BoostButtons({
     <div className={`flex items-center gap-2 ${className}`}>
       <motion.button
         type="button"
-        whileTap={{ scale: 0.98 }}
+        whileTap={{ scale: 0.95 }}
         onClick={() => handleVote(1)}
         disabled={effectiveDisabled || !id || isBusy || !accessToken}
-        className={`px-3 py-2 rounded-xl border font-black text-xs ${
+        className={`px-3 py-2 rounded-xl border font-bold text-xs transition-colors ${
           (effectiveDisabled || !id)
             ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
             : boostActive
               ? 'border-[#3A3DFF] bg-[#3A3DFF] text-white'
-              : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
+              : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-100 hover:border-slate-300'
         }`}
         title={
           effectiveDisabled
@@ -300,15 +300,15 @@ export default function BoostButtons({
 
       <motion.button
         type="button"
-        whileTap={{ scale: 0.98 }}
+        whileTap={{ scale: 0.95 }}
         onClick={() => handleVote(-1)}
         disabled={effectiveDisabled || !id || isBusy || !accessToken}
-        className={`px-3 py-2 rounded-xl border font-black text-xs ${
+        className={`px-3 py-2 rounded-xl border font-bold text-xs transition-colors ${
           (effectiveDisabled || !id)
             ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed'
             : downActive
               ? 'border-slate-900 bg-slate-900 text-white'
-              : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
+              : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-100 hover:border-slate-300'
         }`}
         title={
           effectiveDisabled
@@ -319,7 +319,7 @@ export default function BoostButtons({
         Downvote ({downvotes})
       </motion.button>
 
-      <div className="text-xs font-black text-slate-700 px-3 py-2 rounded-xl border border-slate-200 bg-slate-50">
+      <div className="text-xs font-semibold text-slate-700 px-3 py-2 rounded-xl border border-slate-200 bg-slate-50">
         Momentum: {Math.round(momentum)}
       </div>
 

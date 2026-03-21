@@ -9,12 +9,11 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { fetchMovementsPage } from '@/api/movementsClient';
 import { fetchMyProfile, upsertMyProfile } from '@/api/userProfileClient';
 import { queryKeys } from '@/lib/queryKeys';
-import { Plus, Zap, Loader2, Sparkles } from 'lucide-react';
+import { Plus, Zap, Sparkles } from 'lucide-react';
 import { motion, useReducedMotion } from 'framer-motion';
 import FilterTabs from '../components/shared/FilterTabs';
 import MovementCard from '../components/home/MovementCard';
 import IntroScreen from '../components/home/IntroScreen';
-import SafetyModal from '../components/safety/SafetyModal';
 import OnboardingFlow from '../components/onboarding/OnboardingFlow';
 import FeatureTooltip from '../components/onboarding/FeatureTooltip';
 import { useLanguage } from '@/components/utils/LanguageContext';
@@ -112,7 +111,7 @@ export default function Home() {
   const [activeFilter, setActiveFilter] = useState('momentum');
   const [showIntro, setShowIntro] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
-  const [showSafetyModal, setShowSafetyModal] = useState(false);
+
   const [gateReady, setGateReady] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showSearchTooltip, setShowSearchTooltip] = useState(false);
@@ -149,14 +148,10 @@ export default function Home() {
 
   useEffect(() => {
     const hasSeenIntro = safeLsGet('peoplepower_intro_seen');
-    const hasAcceptedSafety = safeLsGet('peoplepower_safety_accepted');
-    const hasAcceptedTerms = safeLsGet('peoplepower_terms_accepted');
     setGateReady(readGateReady());
     
     if (!hasSeenIntro) {
       setShowIntro(true);
-    } else if (!hasAcceptedSafety || !hasAcceptedTerms) {
-      setShowSafetyModal(true);
     }
 
     loadUser(authUser, accessToken);
@@ -170,7 +165,10 @@ export default function Home() {
     if (!authUser) return;
 
     // Mark intro as completed for authed users so they don't get stuck behind it.
+    // Also auto-accept safety/terms since these are now handled at signup (Phase 1).
     safeLsSet('peoplepower_intro_seen', 'true');
+    safeLsSet('peoplepower_safety_accepted', 'true');
+    safeLsSet('peoplepower_terms_accepted', 'true');
     safeLsRemove('peoplepower_onboarding_in_progress');
 
     if (showIntro) {
@@ -184,7 +182,7 @@ export default function Home() {
     if (!import.meta?.env?.DEV) return;
     if (didLogIntroRef.current) return;
     didLogIntroRef.current = true;
-    console.log('[PeoplePower] Intro state:', { showIntro, isAuthenticated: !!authUser });
+    // debug: intro state logged only in dev
   }, [authUser, showIntro]);
 
   useEffect(() => {
@@ -223,7 +221,7 @@ export default function Home() {
     if (!user || !accessToken) return;
     if (!userProfile) return;
 
-    if (!onboarding?.completed && !showIntro && !showSafetyModal) {
+    if (!onboarding?.completed && !showIntro) {
       setShowOnboarding(true);
       return;
     }
@@ -231,7 +229,7 @@ export default function Home() {
     if (onboarding?.completed && !onboarding?.completed_tutorials?.includes('search')) {
       setTimeout(() => setShowSearchTooltip(true), 1000);
     }
-  }, [user, accessToken, userProfile, onboarding?.completed, onboarding?.completed_tutorials, showIntro, showSafetyModal]);
+  }, [user, accessToken, userProfile, onboarding?.completed, onboarding?.completed_tutorials, showIntro]);
 
   const loadUser = async (currentUser, token) => {
     if (!currentUser) {
@@ -316,22 +314,11 @@ export default function Home() {
     safeLsSet('peoplepower_intro_seen', 'true');
     setTimeout(() => {
       setShowIntro(false);
-      // Show safety modal after intro
-      const hasAcceptedSafety = safeLsGet('peoplepower_safety_accepted');
-      const hasAcceptedTerms = safeLsGet('peoplepower_terms_accepted');
-      if (!hasAcceptedSafety || !hasAcceptedTerms) {
-        setShowSafetyModal(true);
-      }
       setGateReady(readGateReady());
     }, 1200);
   };
 
-  const handleSafetyAccept = () => {
-    safeLsSet('peoplepower_safety_accepted', 'true');
-    safeLsSet('peoplepower_terms_accepted', 'true');
-    setShowSafetyModal(false);
-    setGateReady(true);
-  };
+
 
   const MOVEMENTS_PAGE_SIZE = 20;
   const MOVEMENT_FEED_FIELDS = [
@@ -664,7 +651,7 @@ export default function Home() {
   return (
     <>
       {showIntro && <IntroScreen onContinue={handleContinue} isExiting={isExiting} />}
-      {showSafetyModal && <SafetyModal onAccept={handleSafetyAccept} />}
+
       {showAgeVerification && <AgeVerification onVerify={handleAgeVerification} minAge={13} />}
       {showOnboarding && user && (
         <OnboardingFlow user={user} onComplete={handleOnboardingComplete} />
@@ -688,12 +675,12 @@ export default function Home() {
             scale: [1, 1.05, 1]
           }}
           transition={{ duration: 3, repeat: Infinity }}
-          className="inline-flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-full text-xs sm:text-sm font-black mb-4 sm:mb-6 shadow-lg shadow-yellow-400/40 uppercase tracking-wide"
+          className="inline-flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-full text-xs sm:text-sm font-bold mb-4 sm:mb-6 shadow-md"
         >
           <Sparkles className="w-4 h-4" />
           {t('theMovementEngine')}
         </motion.div>
-        <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black text-slate-900 mb-4 sm:mb-6 tracking-tight leading-none">
+        <h1 className="text-4xl sm:text-6xl lg:text-7xl font-extrabold text-slate-900 mb-4 sm:mb-6 tracking-tight leading-none">
           {t('peoplePower')}
         </h1>
         <p className="text-base sm:text-xl text-slate-600 max-w-2xl mx-auto leading-relaxed font-semibold">
@@ -703,13 +690,13 @@ export default function Home() {
 
       {!user ? (
         <div className="max-w-2xl mx-auto p-4 rounded-2xl border border-slate-200 bg-white shadow-sm text-center space-y-2">
-          <div className="text-sm font-black text-slate-900">Sign in to participate</div>
+          <div className="text-sm font-bold text-slate-900">Sign in to participate</div>
           <div className="text-xs sm:text-sm text-slate-600 font-semibold">
             Creating movements, messaging, reporting, and verified activity require an account.
           </div>
           <Link
             to="/login"
-            className="inline-flex items-center justify-center px-5 py-2 rounded-xl bg-[#3A3DFF] text-white text-xs sm:text-sm font-black hover:opacity-90"
+            className="inline-flex items-center justify-center px-5 py-2 rounded-xl bg-[#3A3DFF] text-white text-xs sm:text-sm font-bold hover:opacity-90"
           >
             Sign in / Create account
           </Link>
@@ -752,7 +739,7 @@ export default function Home() {
       ) : null}
 
       {/* Filter & Actions Bar */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-3 sm:p-4 rounded-2xl sm:rounded-3xl border-3 border-slate-200 shadow-lg">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-3 sm:p-4 rounded-2xl sm:rounded-3xl border border-slate-200 shadow-sm">
         <FilterTabs activeFilter={activeFilter} onFilterChange={setActiveFilter} />
 
         <div className="relative">
@@ -761,7 +748,7 @@ export default function Home() {
               <motion.button
                 whileHover={reduceMotion ? undefined : { scale: 1.05 }}
                 whileTap={reduceMotion ? undefined : { scale: 0.95 }}
-                className="flex items-center gap-2 px-5 py-3 sm:px-7 sm:py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-2xl font-black shadow-xl shadow-yellow-400/40 hover:shadow-yellow-400/60 transition-shadow uppercase tracking-wide"
+                className="flex items-center gap-2 px-5 py-3 sm:px-7 sm:py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-2xl font-bold shadow-lg hover:shadow-xl transition-shadow"
                 >
                 <Plus className="w-5 h-5" strokeWidth={3} />
                 {t('startMovement')}
@@ -772,10 +759,10 @@ export default function Home() {
               type="button"
               whileHover={reduceMotion ? undefined : { scale: 1.0 }}
               whileTap={reduceMotion ? undefined : { scale: 0.98 }}
-              className="flex items-center gap-2 px-5 py-3 sm:px-7 sm:py-4 bg-slate-200 text-slate-600 rounded-2xl font-black shadow-inner uppercase tracking-wide cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-3 sm:px-7 sm:py-4 bg-slate-200 text-slate-600 rounded-2xl font-bold shadow-inner cursor-not-allowed"
               disabled
               aria-disabled="true"
-              title="Accept safety & terms to continue"
+              title="Sign in to create a movement"
             >
               <Plus className="w-5 h-5" strokeWidth={3} />
               {t('startMovement')}
@@ -800,20 +787,26 @@ export default function Home() {
           </div>
         ) : null}
         {isLoading && !offlineMovements ? (
-          <div className="flex flex-col items-center justify-center py-16 sm:py-24">
-            <Loader2 className="w-10 h-10 text-[#3A3DFF] animate-spin mb-4" />
-            <p className="text-slate-500 font-bold">{t('loadingMovements')}</p>
+          <div className="space-y-4 sm:space-y-5">
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3 max-w-md mx-auto animate-pulse">
+                <div className="h-5 w-32 bg-slate-200 rounded" />
+                <div className="h-4 w-48 bg-slate-200 rounded" />
+                <div className="h-24 w-full bg-slate-100 rounded-xl" />
+                <div className="h-4 w-40 bg-slate-200 rounded" />
+              </div>
+            ))}
           </div>
         ) : !offlineMovements && isMovementsError ? (
           <div className="text-center py-16 sm:py-24">
             <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
               <Zap className="w-12 h-12 text-slate-400" />
             </div>
-            <h3 className="text-2xl font-black text-slate-900 mb-3">We couldn’t load movements right now.</h3>
+            <h3 className="text-2xl font-bold text-slate-900 mb-3">We couldn't load movements right now.</h3>
             <p className="text-slate-500 mb-6 font-semibold">Please try again.</p>
             <button
               onClick={() => refetchMovements()}
-              className="px-7 py-4 bg-white text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow border-2 border-slate-200 uppercase tracking-wide"
+              className="px-7 py-4 bg-white text-slate-900 rounded-xl font-bold shadow-lg hover:shadow-xl transition-shadow border border-slate-200"
             >
               Retry
             </button>
@@ -828,11 +821,11 @@ export default function Home() {
             <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
               <Zap className="w-12 h-12 text-slate-400" />
             </div>
-            <h3 className="text-2xl font-black text-slate-900 mb-3">{t('noMovementsYet')}</h3>
+            <h3 className="text-2xl font-bold text-slate-900 mb-3">{t('noMovementsYet')}</h3>
             <p className="text-slate-500 mb-6 font-semibold">{t('beTheFirst')}</p>
             {gateReady ? (
               <Link to={createPageUrl('CreateMovement')}>
-                <button className="px-5 py-3 sm:px-7 sm:py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow uppercase tracking-wide">
+                <button className="px-5 py-3 sm:px-7 sm:py-4 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-xl font-bold shadow-lg hover:shadow-xl transition-shadow">
                   {t('createFirstMovement')}
                 </button>
               </Link>
@@ -850,31 +843,31 @@ export default function Home() {
             </div>
             {activeFilter === 'local' && localConfig && !localConfig.hasCoords && !localConfig.hasCity ? (
               <>
-                <h3 className="text-2xl font-black text-slate-900 mb-3">Set your Local area</h3>
+                <h3 className="text-2xl font-bold text-slate-900 mb-3">Set your Local area</h3>
                 <p className="text-slate-500 mb-6 font-semibold">
                   Local is approximate. Set your city and radius in your profile to see nearby movements.
                 </p>
                 <Link to={createPageUrl('Profile')}>
-                  <button className="px-5 py-3 sm:px-7 sm:py-4 bg-white text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow border-2 border-slate-200 uppercase tracking-wide">
+                  <button className="px-5 py-3 sm:px-7 sm:py-4 bg-white text-slate-900 rounded-xl font-bold shadow-lg hover:shadow-xl transition-shadow border border-slate-200">
                     Update location
                   </button>
                 </Link>
               </>
             ) : activeFilter === 'local' && localConfig ? (
               <>
-                <h3 className="text-2xl font-black text-slate-900 mb-3">No nearby movements found</h3>
+                <h3 className="text-2xl font-bold text-slate-900 mb-3">No nearby movements found</h3>
                 <p className="text-slate-500 mb-6 font-semibold">
                   Try increasing your radius (currently ~{localConfig.radiusKm}km) to discover more.
                 </p>
                 <Link to={createPageUrl('Profile')}>
-                  <button className="px-5 py-3 sm:px-7 sm:py-4 bg-white text-slate-900 rounded-xl font-black shadow-lg hover:shadow-xl transition-shadow border-2 border-slate-200 uppercase tracking-wide">
+                  <button className="px-5 py-3 sm:px-7 sm:py-4 bg-white text-slate-900 rounded-xl font-bold shadow-lg hover:shadow-xl transition-shadow border border-slate-200">
                     Adjust radius
                   </button>
                 </Link>
               </>
             ) : (
               <>
-                <h3 className="text-2xl font-black text-slate-900 mb-3">Nothing to show here yet</h3>
+                <h3 className="text-2xl font-bold text-slate-900 mb-3">Nothing to show here yet</h3>
                 <p className="text-slate-500 mb-6 font-semibold">Try a different filter.</p>
               </>
             )}
@@ -894,7 +887,7 @@ export default function Home() {
                   type="button"
                   onClick={() => fetchNextPage()}
                   disabled={isFetchingNextPage}
-                  className="px-6 py-3 rounded-2xl bg-white border-2 border-slate-200 text-slate-900 font-black shadow-sm hover:shadow-md transition"
+                  className="px-6 py-3 rounded-2xl bg-white border border-slate-200 text-slate-900 font-bold shadow-sm hover:shadow-md transition"
                 >
                   {isFetchingNextPage ? 'Loading…' : 'Load more'}
                 </button>
@@ -915,17 +908,13 @@ export default function Home() {
               whileTap={reduceMotion ? undefined : { scale: 0.9 }}
               animate={
                 reduceMotion
-                  ? { boxShadow: "0 10px 30px rgba(58, 61, 255, 0.3)" }
+                  ? undefined
                   : {
-                      boxShadow: [
-                        "0 10px 30px rgba(58, 61, 255, 0.3)",
-                        "0 10px 40px rgba(58, 61, 255, 0.5)",
-                        "0 10px 30px rgba(58, 61, 255, 0.3)",
-                      ],
+                      scale: [1, 1.05, 1],
                     }
               }
               transition={reduceMotion ? { duration: 0 } : { duration: 2, repeat: Infinity }}
-              className="w-16 h-16 bg-gradient-to-br from-[#FFC947] to-[#FFD666] text-slate-900 rounded-full shadow-2xl flex items-center justify-center border-3 border-white"
+              className="w-16 h-16 bg-gradient-to-br from-[#FFC947] to-[#FFD666] text-slate-900 rounded-full shadow-2xl flex items-center justify-center border-2 border-white"
               aria-label={t('startMovement')}
               title={t('startMovement')}
             >

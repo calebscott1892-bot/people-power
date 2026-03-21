@@ -157,7 +157,7 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
               >
                 <Button
                   onClick={onContinue}
-                  className="h-12 sm:h-16 px-8 sm:px-12 bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-2xl font-black text-base sm:text-xl shadow-2xl shadow-yellow-400/40 uppercase tracking-wider"
+                  className="h-12 sm:h-16 px-8 sm:px-12 bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 rounded-2xl font-bold text-base sm:text-xl shadow-lg shadow-yellow-400/30 uppercase tracking-wider"
                 >
                   Continue
                   <ArrowRight className="w-6 h-6 ml-2" strokeWidth={3} />
@@ -166,7 +166,7 @@ export default function IntroScreen({ onContinue, isExiting: _isExiting }) {
               <Button
                 asChild
                 variant="outline"
-                className="h-12 sm:h-16 w-full sm:w-auto px-8 sm:px-10 rounded-2xl font-black text-base sm:text-xl bg-slate-900 text-white border border-slate-900 hover:bg-slate-800 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-900"
+                className="h-12 sm:h-16 w-full sm:w-auto px-8 sm:px-10 rounded-2xl font-bold text-base sm:text-xl bg-slate-900 text-white border border-slate-900 hover:bg-slate-800 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-900"
               >
                 {user ? (
                   <button type="button" onClick={() => signOut()}>
