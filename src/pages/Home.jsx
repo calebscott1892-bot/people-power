@@ -9,7 +9,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { fetchMovementsPage } from '@/api/movementsClient';
 import { fetchMyProfile, upsertMyProfile } from '@/api/userProfileClient';
 import { queryKeys } from '@/lib/queryKeys';
-import { Plus, Zap, Sparkles } from 'lucide-react';
+import { Plus, Zap } from 'lucide-react';
 import { motion, useReducedMotion } from 'framer-motion';
 import FilterTabs from '../components/shared/FilterTabs';
 import MovementCard from '../components/home/MovementCard';
@@ -651,45 +651,25 @@ export default function Home() {
     }
   };
 
+  // P0: Authenticated users skip blocking intro/onboarding overlays entirely.
+  // Unauthenticated visitors still see IntroScreen. Age verification is non-blocking for authed users.
+  const isAuthenticated = !!authUser && !authLoading;
+
   return (
     <>
-      {showIntro && <IntroScreen onContinue={handleContinue} isExiting={isExiting} />}
+      {showIntro && !isAuthenticated && <IntroScreen onContinue={handleContinue} isExiting={isExiting} />}
 
-      {showAgeVerification && <AgeVerification onVerify={handleAgeVerification} minAge={13} />}
-      {showOnboarding && user && (
+      {showAgeVerification && !isAuthenticated && <AgeVerification onVerify={handleAgeVerification} minAge={13} />}
+      {showOnboarding && user && !isAuthenticated && (
         <OnboardingFlow user={user} onComplete={handleOnboardingComplete} />
       )}
       
       <motion.div 
         initial={{ opacity: 0 }}
-        animate={{ opacity: showIntro ? 0 : 1 }}
-        transition={{ duration: 0.8, delay: showIntro ? 0 : 0.5 }}
+        animate={{ opacity: (showIntro && !isAuthenticated) ? 0 : 1 }}
+        transition={{ duration: 0.8, delay: (showIntro && !isAuthenticated) ? 0 : 0.3 }}
         className="space-y-6 sm:space-y-8 pb-24 sm:pb-32 min-h-[70vh]"
       >
-      {/* Hero Section */}
-      <motion.div 
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="text-center py-8 sm:py-12"
-      >
-        <motion.div 
-          animate={{ 
-            rotate: [0, 5, -5, 0],
-            scale: [1, 1.05, 1]
-          }}
-          transition={{ duration: 3, repeat: Infinity }}
-          className="inline-flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 rounded-full text-xs sm:text-sm font-bold mb-4 sm:mb-6 shadow-md"
-        >
-          <Sparkles className="w-4 h-4" />
-          {t('theMovementEngine')}
-        </motion.div>
-        <h1 className="text-4xl sm:text-6xl lg:text-7xl font-extrabold text-slate-900 mb-4 sm:mb-6 tracking-tight leading-none">
-          {t('peoplePower')}
-        </h1>
-        <p className="text-base sm:text-xl text-slate-600 max-w-2xl mx-auto leading-relaxed font-semibold">
-          {t('homeTagline')}
-        </p>
-      </motion.div>
 
       {!user ? (
         <div className="max-w-2xl mx-auto p-4 rounded-2xl border border-slate-200 bg-white shadow-sm text-center space-y-2">

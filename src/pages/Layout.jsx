@@ -2,14 +2,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, Zap, MessageCircle, Bell, Shield, Plus, Search, LogOut, Loader2 } from 'lucide-react';
+import { Home, User, MessageCircle, Bell, Shield, Plus, Search, LogOut, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
 import { LanguageProvider, useLanguage } from '@/components/utils/LanguageContext';
 import { useAuth } from '@/auth/AuthProvider';
 import ErrorBoundary from '@/components/shared/ErrorBoundary';
-import Footer from '@/components/layout/Footer';
 import { useFeatureFlag } from '@/utils/featureFlags';
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { entities } from '@/api/appClient';
@@ -131,8 +130,6 @@ function LayoutContent({ children }) {
     },
   });
 
-  const hideFooter = location.pathname === '/login';
-
   const hasSeenTutorialV2 = !!userProfile?.has_seen_tutorial_v2;
   const shouldShowTutorialPrompt =
     !!authUser &&
@@ -195,20 +192,20 @@ function LayoutContent({ children }) {
   const navItems = [
     { name: t('home'), page: 'Home', icon: Home },
     { name: searchName, page: 'Search', icon: Search },
-    { name: t('challenges') || 'Challenges', page: 'DailyChallenges', icon: Zap },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
-    { name: t('leaderboard'), page: 'Leaderboard', icon: Bell },
+    { name: t('notifications') || 'Notifications', page: 'Notifications', icon: Bell },
     { name: t('profile'), page: 'Profile', icon: User },
   ];
 
   const isActive = (page) => {
     const currentPath = location.pathname;
-    return currentPath.includes(page);
+    const pagePath = createPageUrl(page);
+    if (pagePath === '/') return currentPath === '/';
+    return currentPath.startsWith(pagePath);
   };
 
-  // Combined fixed bottom stack height (NAV + legal footer).
-  // Increased slightly so content never hides behind the stacked bars.
-  const bottomStackPaddingPx = useMemo(() => 156, []);
+  // Bottom nav height only (legal footer removed from fixed stack).
+  const bottomStackPaddingPx = useMemo(() => 64, []);
 
   const hideBottomStack = useMemo(() => {
     // Hide bottom navigation during intro/onboarding gating on Home.
@@ -445,10 +442,9 @@ function LayoutContent({ children }) {
         }}
       />
 
-      {/* ✅ Fixed bottom stack: NAV (top) + LEGAL FOOTER (bottom) */}
+      {/* Fixed bottom nav */}
       {!hideBottomStack ? (
       <div className="fixed inset-x-0 bottom-0 z-50">
-        {/* Main bottom nav (no longer fixed itself; it sits above the legal footer) */}
         <nav className="w-full bg-white border-t border-slate-200 shadow-lg">
           <div className="max-w-7xl mx-auto px-4 sm:px-6">
             <div className="flex items-center justify-around px-2 py-2">
@@ -491,8 +487,6 @@ function LayoutContent({ children }) {
           </div>
         </nav>
 
-        {/* Legal footer bar at very bottom */}
-        {!hideFooter ? <Footer /> : null}
       </div>
       ) : null}
     </div>
