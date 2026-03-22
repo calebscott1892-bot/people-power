@@ -148,7 +148,9 @@ export default function Login() {
     setLoading(true);
     try {
       await resetPasswordForEmail(toEmail, redirectToResetPassword ? { redirectTo: redirectToResetPassword } : undefined);
-      toast.success("If an account exists for this email, we've sent password reset instructions.");
+      const resetSentMessage = 'If an account exists for that email, we’ve sent a password reset link. Please check your inbox, spam, and junk folders.';
+      toast.success(resetSentMessage);
+      setStatus(resetSentMessage);
       setMode('login');
     } catch (err) {
       toastFriendlyError(err, "Couldn't send reset email");
