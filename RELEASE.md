@@ -120,10 +120,12 @@ This repo contains Cloudflare Pages scaffolding (see [wrangler.toml](wrangler.to
 ### Frontend environment variables (build-time)
 
 - `VITE_API_BASE_URL=https://<your-render-backend-origin>`
+- `VITE_SITE_URL=https://peoplepower.app`
 
 Notes:
 - Must be an absolute `http(s)` URL in production.
 - Must not include an `/api` path prefix.
+- `VITE_SITE_URL` must match the Site URL in Supabase Auth > URL Configuration.
 
 ## Post-deploy smoke tests (run with curl)
 

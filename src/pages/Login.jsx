@@ -46,13 +46,16 @@ export default function Login() {
   const forgotPendingGuard = usePendingGuard('Forgot password');
   const resendPendingGuard = usePendingGuard('Resend confirmation');
 
-  const redirectToEmailVerified = useMemo(() => {
-    return typeof window !== 'undefined' ? `${window.location.origin}/email-verified` : undefined;
+  // Use explicit VITE_SITE_URL for production (must match Supabase Redirect URLs allowlist).
+  // Falls back to window.location.origin so local dev still works.
+  const siteOrigin = useMemo(() => {
+    const env = import.meta?.env?.VITE_SITE_URL ? String(import.meta.env.VITE_SITE_URL).trim().replace(/\/+$/, '') : '';
+    if (env) return env;
+    return typeof window !== 'undefined' ? window.location.origin : '';
   }, []);
 
-  const redirectToResetPassword = useMemo(() => {
-    return typeof window !== 'undefined' ? `${window.location.origin}/reset-password` : undefined;
-  }, []);
+  const redirectToEmailVerified = siteOrigin ? `${siteOrigin}/email-verified` : undefined;
+  const redirectToResetPassword = siteOrigin ? `${siteOrigin}/reset-password` : undefined;
 
   const sanitizePostAuthRedirect = (to) => {
     const raw = String(to || '').trim();
