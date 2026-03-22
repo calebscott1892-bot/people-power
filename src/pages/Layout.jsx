@@ -95,7 +95,20 @@ function LayoutContent({ children }) {
   const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
     queryKey: queryKeys.userProfile.me(profileEmail),
     enabled: !!profileEmail && !!accessToken,
-    retry: 1,
+    // Profile staleTime is generous: we have manual visibility-change refetch
+    // and mutations that patch the cache, so no need for aggressive refetching.
+    staleTime: 2 * 60 * 1000, // 2 minutes
+    retry: (failureCount, error) => {
+      const status = getHttpStatus(error);
+      if (status === 401 || status === 403) return false;
+      return failureCount < 2;
+    },
+    retryDelay: (attemptIndex) => {
+      // Exponential backoff: 1s, 2s (capped).
+      const base = 1000;
+      const delay = base * Math.pow(2, attemptIndex);
+      return Math.min(delay, 8000);
+    },
     queryFn: async () => {
       if (!profileEmail) return null;
       if (!accessToken) return null;

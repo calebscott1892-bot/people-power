@@ -42,12 +42,14 @@ function isOnline() {
   }
 }
 
-export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
+export function connectMessagesRealtime({ accessToken, getAccessToken, onEvent, onStatus }) {
   // Each fresh call resets the disabled flag so WS can retry after failures.
   wsDisabledForSession = false;
 
-  const urlString = getMessagesWsUrl(accessToken);
-  if (!urlString) return null;
+  // Build the initial URL. On reconnect we'll rebuild it with a fresh token
+  // so that expired JWTs don't cause repeated auth failures.
+  const initialUrl = getMessagesWsUrl(accessToken);
+  if (!initialUrl) return null;
 
   let socket = null;
   let closedByUser = false;
@@ -90,6 +92,18 @@ export function connectMessagesRealtime({ accessToken, onEvent, onStatus }) {
         );
       }
       return;
+    }
+
+    // On reconnect, try to get a fresh token so we don't reuse an expired JWT.
+    let urlString = initialUrl;
+    if (openedOnce && typeof getAccessToken === 'function') {
+      try {
+        const freshToken = getAccessToken();
+        if (freshToken) {
+          const freshUrl = getMessagesWsUrl(freshToken);
+          if (freshUrl) urlString = freshUrl;
+        }
+      } catch { /* fall back to initial URL */ }
     }
 
     if (!wsLoggedStartup) {

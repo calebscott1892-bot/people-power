@@ -228,7 +228,12 @@ export async function fetchMovementById(id, options) {
       throw new Error(`Failed to fetch movement: ${res.status}`);
     }
   } catch (_err) {
-    // Network errors or parsing issues: fall back to list search. Use structured logging if needed.
+    // Only fall back to list search on 404-like errors.
+    // Rethrow real server errors (500, 403, etc.) and network timeouts so callers see them.
+    if (_err?.message && /failed to fetch movement: \d+/i.test(_err.message)) {
+      throw _err;
+    }
+    // True network failures (offline, DNS, etc.) — fall back to list search.
     void _err;
   }
 

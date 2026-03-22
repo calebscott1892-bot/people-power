@@ -191,10 +191,8 @@ export default function Profile() {
       const delay = base * Math.pow(2, attemptIndex);
       return Math.min(delay, 8000);
     },
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    refetchOnMount: false,
   });
+
 
   const softTrustMarkers = useMemo(() => {
     const movementsPosted = Array.isArray(myMovements) ? myMovements.length : 0;

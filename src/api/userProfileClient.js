@@ -3,10 +3,15 @@ import { httpFetch } from '@/utils/httpFetch';
 import { captureRequestDebugInfo, captureRequestId } from '@/utils/requestDebug';
 
 const DEV = !!import.meta?.env?.DEV;
-const FETCH_MY_PROFILE_COOLDOWN_MS = 2000;
+const FETCH_MY_PROFILE_COOLDOWN_MS = 500;
 const fetchMyProfileInflightByKey = new Map();
 const fetchMyProfileCooldownCacheByKey = new Map();
 let fetchMyProfileSeq = 0;
+
+/** Clear the profile cooldown cache so the next fetch hits the server. */
+export function clearProfileCooldownCache() {
+  fetchMyProfileCooldownCacheByKey.clear();
+}
 
 function toUploadsPath(input) {
   const raw = input == null ? '' : String(input);

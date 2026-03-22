@@ -90,9 +90,8 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
         };
       });
 
-      queryClient.setQueryData(['movements'], (old) => {
-        if (!Array.isArray(old)) return old;
-        return old.map((m) => {
+      queryClient.setQueriesData({ queryKey: ['movements'] }, (old) => {
+        const patchMovement = (m) => {
           const mid = String(m?.id ?? m?._id ?? '').trim();
           if (!mid || mid !== id) return m;
           return {
@@ -101,7 +100,17 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
             downvotes: next?.downvotes,
             score: next?.score,
           };
-        });
+        };
+        // Handle InfiniteQuery shape (pages array).
+        if (old && typeof old === 'object' && Array.isArray(old.pages)) {
+          return {
+            ...old,
+            pages: old.pages.map((page) => (Array.isArray(page) ? page.map(patchMovement) : page)),
+          };
+        }
+        // Handle flat array shape.
+        if (Array.isArray(old)) return old.map(patchMovement);
+        return old;
       });
     },
   });

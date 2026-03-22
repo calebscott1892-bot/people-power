@@ -959,6 +959,10 @@ export default function MovementDetails() {
       } catch {
         // best-effort
       }
+
+      // Refresh the home feed and followed-movements list so they reflect the follow/unfollow.
+      queryClient.invalidateQueries({ queryKey: queryKeys.movements.feed() });
+      queryClient.invalidateQueries({ queryKey: ['followedMovements'] });
     },
     onError: (e, _nextFollowing, context) => {
       // Rollback optimistic update on failure.
@@ -1940,6 +1944,9 @@ export default function MovementDetails() {
       setImpactContent('');
       await queryClient.invalidateQueries({ queryKey: ['movementImpact', movementId] });
     },
+    onError: (err) => {
+      toast.error(getInteractionErrorMessage(err, 'Failed to post impact update'));
+    },
   });
 
   const [discussionDraft, setDiscussionDraft] = useState('');
@@ -1951,6 +1958,9 @@ export default function MovementDetails() {
     onSuccess: async () => {
       setDiscussionDraft('');
       await queryClient.invalidateQueries({ queryKey: ['movementDiscussions', movementId] });
+    },
+    onError: (err) => {
+      toast.error(getInteractionErrorMessage(err, 'Failed to post discussion message'));
     },
   });
 
@@ -1985,6 +1995,9 @@ export default function MovementDetails() {
       setTaskDesc('');
       setTaskAssignee('');
       await queryClient.invalidateQueries({ queryKey: ['movementTasks', movementId] });
+    },
+    onError: (err) => {
+      toast.error(getInteractionErrorMessage(err, 'Failed to create task'));
     },
   });
 
@@ -3906,7 +3919,7 @@ export default function MovementDetails() {
                   queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(movementId) });
                   setDeleteMovementOpen(false);
                   setDeleteReason('');
-                  navigate(`/movement/${encodeURIComponent(String(movementId))}`, { replace: true });
+                  navigate('/', { replace: true });
                 } catch (err) {
                   toast.error(getInteractionErrorMessage(err, 'Failed to delete'));
                 } finally {

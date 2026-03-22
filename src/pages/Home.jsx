@@ -376,6 +376,8 @@ export default function Home() {
       if (list.length < MOVEMENTS_PAGE_SIZE) return undefined;
       return allPages.length * MOVEMENTS_PAGE_SIZE;
     },
+    // Auto-refresh the feed so new movements appear without manual reload.
+    refetchInterval: 60 * 1000, // every 60 seconds
   });
 
   const allowOfflineMovementCache = !!import.meta?.env?.DEV;
@@ -507,6 +509,7 @@ export default function Home() {
     queryKey: ['notifications:server', userEmail],
     enabled: !!userEmail && !!accessToken,
     staleTime: 30 * 1000,
+    refetchInterval: 30_000, // Poll for new notifications so badge stays current
     retry: 0,
     queryFn: async () => {
       if (!userEmail) return [];

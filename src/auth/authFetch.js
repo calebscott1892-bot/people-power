@@ -26,6 +26,8 @@ function isBackendUrl(url) {
       raw.startsWith('/auth/') ||
       raw.startsWith('/users/') ||
       raw.startsWith('/movements') ||
+      raw.startsWith('/conversations') ||
+      raw.startsWith('/public-keys') ||
       raw.startsWith('/platform-acknowledgment') ||
       raw.startsWith('/incidents') ||
       raw.startsWith('/events') ||

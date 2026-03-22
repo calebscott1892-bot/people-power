@@ -159,6 +159,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
       if (list.length < 20) return undefined;
       return pages.length * 20;
     },
+    refetchInterval: 15_000, // Poll every 15s so other users see new comments quickly
     retry: 1,
   });
 
@@ -273,10 +274,8 @@ export default function CommentSection({ movementId, movement, canModerate = fal
     onSuccess: async (_created, _vars, _context) => {
       // Refetch comments to replace the optimistic entry with the real one.
       await queryClient.invalidateQueries({ queryKey: queryKeys.movements.comments(safeMovementId) });
-      queryClient.setQueryData(queryKeys.movements.commentsCount(safeMovementId), (old) => {
-        const prev = typeof old === 'number' ? old : null;
-        return prev == null ? old : prev + 1;
-      });
+      // Also refetch the authoritative comment count from the server.
+      await queryClient.invalidateQueries({ queryKey: queryKeys.movements.commentsCount(safeMovementId) });
 
       const bumpCommentsCountOnMovement = (m) => {
         if (!m || typeof m !== 'object') return m;

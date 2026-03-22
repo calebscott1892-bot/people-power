@@ -56,6 +56,7 @@ export default function Notifications() {
       if (list.length < 20) return undefined;
       return pages.length * 20;
     },
+    refetchInterval: 30_000, // Poll every 30s so new notifications appear without manual refresh
   });
 
   const notifications = useMemo(() => {
@@ -90,6 +91,8 @@ export default function Notifications() {
     markNotificationsRead(unreadIds, { accessToken })
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['notifications', userEmail] });
+        // Also invalidate the Home badge counter which uses a different query key.
+        queryClient.invalidateQueries({ queryKey: ['notifications:server', userEmail] });
       })
       .catch(() => {
         // best-effort
@@ -112,6 +115,7 @@ export default function Notifications() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications', userEmail] });
+      queryClient.invalidateQueries({ queryKey: ['notifications:server', userEmail] });
     }
   });
 
@@ -123,6 +127,7 @@ export default function Notifications() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['notifications', userEmail] });
+      queryClient.invalidateQueries({ queryKey: ['notifications:server', userEmail] });
     }
   });
 

@@ -644,10 +644,13 @@ async function getAuthedEmailFromAccessToken(token) {
   const clean = token ? String(token).trim() : '';
   if (!clean) return null;
   try {
-    if (!supabase?.auth?.getUser) return null;
+    // Use the same auth client as the HTTP path (supabaseAdmin) for consistency.
+    // Fall back to supabase (which may be supabaseVerifier) if admin is unavailable.
+    const authClient = supabaseAdmin || supabase;
+    if (!authClient?.auth?.getUser) return null;
     const timeoutMs = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS || 7000);
     const { data, error } = await Promise.race([
-      supabase.auth.getUser(clean),
+      authClient.auth.getUser(clean),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Supabase auth timeout')), timeoutMs)),
     ]);
     if (error || !data?.user) return null;
@@ -877,6 +880,7 @@ function initRealtimeServer() {
     });
 
     ws.on('close', () => {
+      ws.__ppAlive = false; // prevent heartbeat from acting on closed sockets
       const e = normalizeEmail(wsEmailByClient.get(ws));
       if (!e) return;
       const set2 = wsClientsByEmail.get(e);
@@ -891,7 +895,38 @@ function initRealtimeServer() {
       // Keep low-noise; never throw.
       fastify.log.warn({ err, path: '/ws' }, 'ws client error');
     });
+
+    // Mark socket alive on pong (protocol-level).
+    ws.__ppAlive = true;
+    ws.on('pong', () => { ws.__ppAlive = true; });
   });
+
+  // --- Server-side WebSocket heartbeat ---
+  // Ping every client every 30s. If a client hasn't responded with a pong by the next
+  // heartbeat cycle, consider it dead and terminate it. This prevents ghost connections
+  // from blocking message delivery.
+  const WS_HEARTBEAT_INTERVAL_MS = 30_000;
+  setInterval(() => {
+    if (!realtimeWss) return;
+    for (const ws of realtimeWss.clients) {
+      if (ws.__ppAlive === false) {
+        // Client didn't respond to the last ping — terminate it.
+        try { ws.terminate(); } catch { /* ignore */ }
+        // Clean up the email mapping.
+        const email = normalizeEmail(wsEmailByClient.get(ws));
+        if (email) {
+          const set = wsClientsByEmail.get(email);
+          if (set) {
+            set.delete(ws);
+            if (set.size === 0) wsClientsByEmail.delete(email);
+          }
+        }
+        continue;
+      }
+      ws.__ppAlive = false;
+      try { ws.ping(); } catch { /* ignore */ }
+    }
+  }, WS_HEARTBEAT_INTERVAL_MS);
 }
 
 function rateLimitKeyGenerator(request) {
@@ -934,6 +969,9 @@ fastify.register(require('@fastify/rate-limit'), {
   allowList: isAdminRateLimitAllowList,
   errorResponseBuilder: () => ({ error: 'Too many requests, please slow down.' }),
 });
+
+// --- Email routes (non-DB, Resend-backed) ---
+fastify.register(require('./routes/email'));
 
 // --- Upload limits ---
 const MAX_UPLOAD_BYTES = process.env.MAX_UPLOAD_BYTES ? parseInt(process.env.MAX_UPLOAD_BYTES, 10) : 5 * 1024 * 1024; // 5MB default
@@ -2668,13 +2706,24 @@ async function poolQueryOnce(config) {
 async function poolQueryWithRetry(config) {
   try {
     return await poolQueryOnce(config);
-  } catch {
+  } catch (err) {
+    // Only recreate the pool on connection-level errors, not on query/constraint errors.
+    const code = err?.code || '';
+    const isConnectionError = [
+      'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT',
+      'CONNECTION_CLOSED', 'CONNECTION_ENDED',
+      '57P01', '57P03', '08000', '08003', '08006',
+    ].includes(code) || /connection|socket|terminate/i.test(err?.message || '');
+    if (!isConnectionError) throw err;
     // Connection pools can become stale (deploys, idle timeouts). Recreate and retry once.
+    const oldPool = pool;
     try {
       pool = wrapPoolQueryGuard(createPgPool({ useSsl: shouldUseSsl }));
     } catch {
       // ignore
     }
+    // Drain the old pool's connections to prevent leaks.
+    try { if (oldPool && typeof oldPool.end === 'function') oldPool.end().catch(() => {}); } catch { /* ignore */ }
     return poolQueryOnce(config);
   }
 }
@@ -2872,7 +2921,10 @@ fastify.addHook('onRequest', async (request, reply) => {
     url.startsWith('/health') ||
     url === '/auth/me' ||
     url.startsWith('/auth/proof') ||
-    url.startsWith('/uploads')
+    url.startsWith('/uploads') ||
+    url === '/api/support' ||
+    url === '/api/contact' ||
+    url === '/api/report'
   ) {
     return;
   }
@@ -3087,7 +3139,10 @@ async function ensureMovementExtrasColumns() {
   })();
 
   try {
-    return await ensureMovementExtrasColumnsPromise;
+    const result = await ensureMovementExtrasColumnsPromise;
+    // Clear the cached column list so getMovementsColumns() picks up newly-added columns.
+    movementsColumnsCache = null;
+    return result;
   } catch (e) {
     ensureMovementExtrasColumnsPromise = null;
     throw e;
@@ -9868,6 +9923,7 @@ fastify.post('/movements/:id/tasks', async (request, reply) => {
 
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
+  const creatorUserId = authedUser?.id ? String(authedUser.id) : null;
 
   const row = {
     id: randomUUID(),
@@ -10070,6 +10126,7 @@ fastify.post('/movements/:id/discussions', async (request, reply) => {
   const email = normalizeEmail(authedUser.email);
   if (!email) return reply.code(400).send({ error: 'User email is required' });
 
+  const authorUserId = authedUser?.id ? String(authedUser.id) : null;
   const ownerEmail = await getMovementOwnerEmail(id);
   if (ownerEmail && (await areUsersBlockedEitherDirection(email, ownerEmail))) {
     return sendBlockedInteraction(reply);
@@ -11809,6 +11866,12 @@ fastify.post('/conversations', async (request, reply) => {
       requester_email: myEmail,
       request_status: isRequest ? 'pending' : 'accepted',
     });
+    // Notify the recipient so their conversation list updates in real-time.
+    wsBroadcastToEmails([recipient], {
+      type: 'conversation:updated',
+      conversationId: String(convo.id),
+      conversation: convo,
+    });
     return reply.code(201).send(convo);
   }
 
@@ -11836,7 +11899,15 @@ fastify.post('/conversations', async (request, reply) => {
       [id, participants, isRequest, isRequest ? myEmail : null, isRequest ? 'pending' : 'accepted']
     );
 
-    return reply.code(201).send(created.rows?.[0] ?? { id });
+    const newConvo = created.rows?.[0] ?? { id };
+    // Notify the recipient so their conversation list updates in real-time.
+    wsBroadcastToEmails([recipient], {
+      type: 'conversation:updated',
+      conversationId: String(newConvo.id),
+      conversation: newConvo,
+    });
+
+    return reply.code(201).send(newConvo);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create conversation');
     return reply.code(500).send({ error: 'Failed to create conversation' });
@@ -13824,7 +13895,7 @@ async function handlePostMyProfile(request, reply) {
         },
         '[profile] persist start'
       );
-      await dbQueryWithRequestDiagnostics(request, {
+      const updateResult = await dbQueryWithRequestDiagnostics(request, {
         sql_label: 'me_profile_update',
         query: {
           text: `UPDATE user_profiles
@@ -13852,7 +13923,8 @@ async function handlePostMyProfile(request, reply) {
              onboarding_interests = $23,
              onboarding_completed_tutorials = $24,
              updated_at = $25
-         WHERE id = $1`,
+         WHERE id = $1
+         RETURNING *`,
           values: [
             existing.id,
             email,
@@ -13957,16 +14029,21 @@ async function handlePostMyProfile(request, reply) {
       );
     }
 
-    const updatedRes = userId
-      ? await dbQueryWithRequestDiagnostics(request, {
-          sql_label: 'me_profile_select_updated_by_user_id',
-          query: { text: 'SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', values: [userId] },
-        })
-      : await dbQueryWithRequestDiagnostics(request, {
-          sql_label: 'me_profile_select_updated_by_email',
-          query: { text: 'SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', values: [email] },
-        });
-    const updated = sanitizeUserProfileRecord(updatedRes.rows?.[0] || null);
+    // Use RETURNING * from the UPDATE when available, falling back to SELECT.
+    let updatedRow = updateResult?.rows?.[0] || null;
+    if (!updatedRow) {
+      const updatedRes = userId
+        ? await dbQueryWithRequestDiagnostics(request, {
+            sql_label: 'me_profile_select_updated_by_user_id',
+            query: { text: 'SELECT * FROM user_profiles WHERE user_id = $1 LIMIT 1', values: [userId] },
+          })
+        : await dbQueryWithRequestDiagnostics(request, {
+            sql_label: 'me_profile_select_updated_by_email',
+            query: { text: 'SELECT * FROM user_profiles WHERE user_email = $1 LIMIT 1', values: [email] },
+          });
+      updatedRow = updatedRes.rows?.[0] || null;
+    }
+    const updated = sanitizeUserProfileRecord(updatedRow);
 
     fastify.log.info(
       {

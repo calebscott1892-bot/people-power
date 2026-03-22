@@ -281,6 +281,12 @@ function MessagesInner() {
   const realtimeRef = useRef(null);
   const [realtimeStatus, setRealtimeStatus] = useState('disconnected');
   const realtimeConnected = realtimeStatus === 'connected';
+  const prevRealtimeConnectedRef = useRef(false);
+
+  // Keep a ref to the latest session so the WS reconnect can grab a fresh token
+  // without re-creating the entire connection effect.
+  const sessionRef = useRef(session);
+  useEffect(() => { sessionRef.current = session; }, [session]);
 
   const selectedIdRef = useRef(null);
   const myEmailNormalizedRef = useRef('');
@@ -418,10 +424,15 @@ function MessagesInner() {
         if (!pages || !pageParams) return old;
 
         const createdId = String(created?.id || '');
-        const first = Array.isArray(pages[0]) ? pages[0] : [];
-        const withoutDup = createdId ? first.filter((m) => String(m?.id || '') !== createdId) : first;
-        const nextFirst = [created, ...withoutDup];
-        const nextPages = [nextFirst, ...pages.slice(1)];
+        // Deduplicate across ALL pages, not just the first, to prevent
+        // duplicates when WS injection and polling overlap.
+        const dedupedPages = pages.map((page) => {
+          if (!Array.isArray(page)) return page;
+          return createdId ? page.filter((m) => String(m?.id || '') !== createdId) : page;
+        });
+        const first = Array.isArray(dedupedPages[0]) ? dedupedPages[0] : [];
+        const nextFirst = [created, ...first];
+        const nextPages = [nextFirst, ...dedupedPages.slice(1)];
         return { ...old, pages: nextPages };
       });
     },
@@ -501,6 +512,7 @@ function MessagesInner() {
 
     const client = connectMessagesRealtime({
       accessToken,
+      getAccessToken: () => sessionRef.current?.access_token || null,
       onStatus: (s) => setRealtimeStatus(String(s || 'disconnected')),
       onEvent: (evt) => {
         const type = String(evt?.type || '');
@@ -632,6 +644,20 @@ function MessagesInner() {
       setRealtimeStatus('disconnected');
     };
   }, [accessToken, myEmailNormalized, queryClient, bumpConversationInCache, upsertConversationIntoCache, upsertMessageIntoCache]);
+
+  // Gap-fill: when WS reconnects after a disconnect, refetch conversations and
+  // the active conversation's messages so nothing is lost during the gap.
+  useEffect(() => {
+    const wasDisconnected = !prevRealtimeConnectedRef.current;
+    prevRealtimeConnectedRef.current = realtimeConnected;
+    if (realtimeConnected && wasDisconnected && myEmailNormalized) {
+      queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
+      const activeId = selectedIdRef.current;
+      if (activeId) {
+        queryClient.invalidateQueries({ queryKey: ['messages', activeId, myEmailNormalized] });
+      }
+    }
+  }, [realtimeConnected, myEmailNormalized, queryClient]);
 
   // Ensure an identity keypair exists locally and publish the public key to the server.
   useEffect(() => {
@@ -1285,6 +1311,8 @@ function MessagesInner() {
         last_message_at: created?.created_at ?? null,
         updated_at: new Date().toISOString(),
       });
+      // Also refetch conversation list so sidebar reflects the latest message immediately.
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
     },
     onError: (e, _vars, context) => {
       if (context?.clientId) {

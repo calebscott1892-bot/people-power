@@ -1,5 +1,4 @@
 import { SERVER_BASE } from '@/api/serverBase';
-import { getValidAccessToken } from '@/api/supabaseClient';
 import { captureRequestDebugInfo, captureRequestId } from '@/utils/requestDebug';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -28,6 +27,8 @@ function isBackendApiUrl(url) {
       raw.startsWith('/auth/') ||
       raw.startsWith('/users/') ||
       raw.startsWith('/movements') ||
+      raw.startsWith('/conversations') ||
+      raw.startsWith('/public-keys') ||
       raw.startsWith('/platform-acknowledgment') ||
       raw.startsWith('/incidents') ||
       raw.startsWith('/events') ||
@@ -76,12 +77,6 @@ function dispatchAuthExpired(detail) {
   } catch {
     // ignore
   }
-}
-
-function withAuthHeader(existingHeaders, token) {
-  const headers = new Headers(existingHeaders || {});
-  if (token) headers.set('Authorization', `Bearer ${String(token)}`);
-  return headers;
 }
 
 function ensureJsonContentType(headers, requestInit) {
@@ -218,15 +213,10 @@ export function httpFetch(input, init) {
     const isBackend = isBackendApiUrl(url);
 
     let headers = requestInit?.headers;
+    // NOTE: Auth header injection is handled by authFetch (the global fetch patch).
+    // We only set Content-Type here to avoid a race between two token sources.
     if (isBackend) {
-      let token = null;
-      try {
-        token = await getValidAccessToken();
-      } catch {
-        token = null;
-      }
-      headers = withAuthHeader(headers, token);
-      headers = ensureJsonContentType(headers, requestInit);
+      headers = ensureJsonContentType(headers || new Headers(), requestInit);
     }
 
     const fetchPromise = f(input, { ...requestInit, headers, signal: controller.signal });
