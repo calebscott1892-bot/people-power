@@ -199,6 +199,8 @@ export function installAuthFetch() {
       }
     }
 
+    let hadAuthHeader = false;
+
     const attempt = async () => {
       let tokenNow = isBackend ? getAccessToken() : null;
       if (isBackend && !tokenNow) {
@@ -210,6 +212,7 @@ export function installAuthFetch() {
       }
 
       const authAttached = isBackend && !!tokenNow;
+      hadAuthHeader = authAttached;
       let headersNow = isBackend ? withAuthHeader(requestInit.headers, tokenNow) : requestInit.headers;
       headersNow = isBackend ? ensureJsonContentType(headersNow, requestInit) : headersNow;
 
@@ -234,7 +237,9 @@ export function installAuthFetch() {
     let res = await attempt();
 
     // If we got a clear auth failure, try one refresh+retry before forcing logout.
-    if (isBackend && (res.status === 401 || res.status === 403)) {
+    // Only act when the request actually carried an auth token — unauthenticated
+    // requests (public / logged-out views) should not trigger the fatal banner.
+    if (isBackend && hadAuthHeader && (res.status === 401 || res.status === 403)) {
       if (DEV) {
         try {
           console.debug('[PeoplePower] backend auth response', { url, status: res.status });
