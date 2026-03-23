@@ -2457,6 +2457,163 @@ async function notifyMessageRecipients({ conversation, body, senderEmail }) {
   await Promise.all(optedIn.map((email) => sendReportEmail({ to: email, ...message })));
 }
 
+// ---------------------------------------------------------------------------
+// Periodic unread-DM digest emails
+// ---------------------------------------------------------------------------
+// Sends a summary email to opted-in users who have unread direct messages.
+// Runs on a timer (default every 15 minutes). A per-user cooldown (1 hour)
+// prevents spamming if the same messages remain unread across cycles.
+// ---------------------------------------------------------------------------
+
+const UNREAD_DIGEST_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const UNREAD_DIGEST_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour per user
+
+function buildUnreadDigestEmail({ unreadCount, conversationPreviews }) {
+  const count = Number(unreadCount) || 0;
+  const plural = count === 1 ? 'message' : 'messages';
+  const subject = `You have ${count} unread ${plural} on People Power`;
+
+  // Build plain-text previews
+  const previewLines = (conversationPreviews || []).map((p) => {
+    const sender = p.senderEmail || 'Someone';
+    const preview = isEncryptedMessageBody(p.body) ? 'Encrypted message' : String(p.body || '').slice(0, 100);
+    const convLabel = p.isGroup ? String(p.groupName || 'Group chat') : 'Direct message';
+    return `  • ${convLabel} from ${sender}: ${preview}`;
+  });
+
+  const text = [
+    `You have ${count} unread ${plural} on People Power.`,
+    '',
+    ...(previewLines.length ? ['Recent messages:', ...previewLines, ''] : []),
+    'Open the app to read and reply.',
+  ].join('\n');
+
+  // Build HTML previews
+  const previewHtml = (conversationPreviews || []).map((p) => {
+    const sender = escapeHtml(p.senderEmail || 'Someone');
+    const preview = isEncryptedMessageBody(p.body) ? 'Encrypted message' : escapeHtml(String(p.body || '').slice(0, 100));
+    const convLabel = escapeHtml(p.isGroup ? String(p.groupName || 'Group chat') : 'Direct message');
+    return `<li><strong>${convLabel}</strong> from ${sender}: ${preview}</li>`;
+  }).join('');
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <p>You have <strong>${count}</strong> unread ${plural} on People Power.</p>
+      ${previewHtml ? `<p><strong>Recent messages:</strong></p><ul style="padding-left: 20px;">${previewHtml}</ul>` : ''}
+      <p>Open the app to read and reply.</p>
+      <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
+      <p style="color: #888; font-size: 12px;">You're receiving this because you opted in to email notifications. You can turn this off in your profile settings.</p>
+    </div>
+  `;
+
+  return { subject, text, html };
+}
+
+async function runUnreadDigestCycle() {
+  if (!canSendReportEmail()) return;
+  if (!isDbAvailable()) return;
+
+  try {
+    await ensureUserProfilesTable();
+    await ensureMessagesTables();
+
+    // 1. Find all users who opted in to email notifications and haven't been
+    //    sent a digest in the last UNREAD_DIGEST_COOLDOWN_MS.
+    const cooldownThreshold = new Date(Date.now() - UNREAD_DIGEST_COOLDOWN_MS).toISOString();
+    const optedInResult = await pool.query(
+      `SELECT user_email
+       FROM user_profiles
+       WHERE email_notifications_opt_in = TRUE
+         AND (last_unread_digest_at IS NULL OR last_unread_digest_at < $1)`,
+      [cooldownThreshold]
+    );
+    const candidates = (optedInResult.rows || [])
+      .map((r) => normalizeEmail(r?.user_email))
+      .filter(Boolean);
+    if (!candidates.length) return;
+
+    // 2. For each candidate, check if they have unread messages.
+    for (const email of candidates) {
+      try {
+        // Count total unread messages across all conversations
+        const unreadResult = await pool.query(
+          `SELECT
+             c.id AS conversation_id,
+             c.is_group,
+             c.group_name,
+             lm.sender_email,
+             lm.body,
+             COUNT(m.id)::int AS unread_count
+           FROM conversations c
+           INNER JOIN messages m
+             ON m.conversation_id = c.id
+             AND m.sender_email <> $1
+             AND NOT (m.read_by @> ARRAY[$1])
+           LEFT JOIN LATERAL (
+             SELECT sender_email, body
+             FROM messages m2
+             WHERE m2.conversation_id = c.id
+               AND m2.sender_email <> $1
+               AND NOT (m2.read_by @> ARRAY[$1])
+             ORDER BY m2.created_at DESC
+             LIMIT 1
+           ) lm ON TRUE
+           WHERE c.participant_emails @> ARRAY[$1]
+             AND c.request_status <> 'blocked'
+             AND c.request_status <> 'declined'
+           GROUP BY c.id, c.is_group, c.group_name, lm.sender_email, lm.body
+           HAVING COUNT(m.id) > 0
+           ORDER BY MAX(m.created_at) DESC
+           LIMIT 5`,
+          [email]
+        );
+
+        const rows = unreadResult.rows || [];
+        if (!rows.length) continue;
+
+        const totalUnread = rows.reduce((sum, r) => sum + (r.unread_count || 0), 0);
+        const previews = rows.map((r) => ({
+          senderEmail: r.sender_email,
+          body: r.body,
+          isGroup: !!r.is_group,
+          groupName: r.group_name,
+        }));
+
+        const emailContent = buildUnreadDigestEmail({
+          unreadCount: totalUnread,
+          conversationPreviews: previews,
+        });
+
+        await sendReportEmail({ to: email, ...emailContent });
+
+        // Update the cooldown timestamp so we don't re-email this user soon.
+        await pool.query(
+          'UPDATE user_profiles SET last_unread_digest_at = NOW() WHERE user_email = $1',
+          [email]
+        ).catch(() => { /* best-effort */ });
+      } catch (e) {
+        fastify.log.warn({ err: e, email }, 'Unread digest failed for user');
+      }
+    }
+  } catch (e) {
+    fastify.log.error({ err: e }, 'Unread digest cycle failed');
+  }
+}
+
+let unreadDigestTimer = null;
+
+function startUnreadDigestTimer() {
+  if (unreadDigestTimer) return;
+  unreadDigestTimer = setInterval(() => {
+    runUnreadDigestCycle().catch((e) => {
+      fastify.log.error({ err: e }, 'Unread digest timer error');
+    });
+  }, UNREAD_DIGEST_INTERVAL_MS);
+  // Don't block process exit.
+  if (unreadDigestTimer.unref) unreadDigestTimer.unref();
+  console.info(`[pp-server] unread DM digest timer started (every ${UNREAD_DIGEST_INTERVAL_MS / 60000}min, cooldown ${UNREAD_DIGEST_COOLDOWN_MS / 60000}min)`);
+}
+
 function buildCollaborationInviteEmail({ movementTitle, inviterEmail, inviterName, role }) {
   const safeTitle = escapeHtml(String(movementTitle || 'a movement').slice(0, 140));
   const safeInviter = escapeHtml(String(inviterEmail || '').slice(0, 160));
@@ -2925,6 +3082,9 @@ function startDbConnectionLoop() {
       ensureReportsTable().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure reports table at startup'));
       ensureMessagesTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure messages tables at startup'));
       ensureMovementExtrasTables().catch((e) => fastify.log.warn({ err: e }, 'Failed to ensure movement extras tables at startup'));
+
+      // Start the periodic unread-DM digest email timer once DB is available.
+      startUnreadDigestTimer();
     }
 
     if (isDbAvailable()) {
@@ -3765,6 +3925,9 @@ async function ensureUserProfilesTable() {
     );
     await pool.query(
       "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS onboarding_completed_tutorials TEXT[] NOT NULL DEFAULT '{}'"
+    );
+    await pool.query(
+      'ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS last_unread_digest_at TIMESTAMPTZ NULL'
     );
     await pool.query('CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles (user_id)');
     try {
