@@ -25,6 +25,7 @@ import { fetchMovementsPage } from '@/api/movementsClient';
 import { fetchPublicProfileByEmail, fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import { fetchMyBlocks, blockUser, unblockUser } from '@/api/blocksClient';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
+import { DM_DISABLED, DM_DISABLED_MESSAGE } from '@/config/clientFeatureGates';
 import FollowListDialog from '@/components/profile/FollowListDialog';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
@@ -704,11 +705,9 @@ export default function UserProfile() {
                     </Button>
                     <Button
                       onClick={async () => {
-                        const dmDisabled = !!import.meta?.env?.PROD;
+                        const dmDisabled = DM_DISABLED;
                         if (dmDisabled) {
-                          toast.message(
-                            'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
-                          );
+                          toast.message(DM_DISABLED_MESSAGE);
                           return;
                         }
 

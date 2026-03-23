@@ -9,7 +9,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { fetchMovementsPage } from '@/api/movementsClient';
 import { fetchMyProfile, upsertMyProfile } from '@/api/userProfileClient';
 import { queryKeys } from '@/lib/queryKeys';
-import { Plus, Zap } from 'lucide-react';
+import { Plus, Zap, MessageSquare } from 'lucide-react';
 import { motion, useReducedMotion } from 'framer-motion';
 import FilterTabs from '../components/shared/FilterTabs';
 import MovementCard from '../components/home/MovementCard';
@@ -17,7 +17,6 @@ import IntroScreen from '../components/home/IntroScreen';
 import OnboardingFlow from '../components/onboarding/OnboardingFlow';
 import FeatureTooltip from '../components/onboarding/FeatureTooltip';
 import { useLanguage } from '@/components/utils/LanguageContext';
-import { useMomentumDampening } from '../components/moderation/useMomentumDampening';
 import AgeVerification from '../components/safety/AgeVerification';
 import { getAgeFromBirthdate, shouldRestrictContent, getContentRiskLevel } from '../components/safety/ContentAgeFilter';
 import { applyDecentralizationBoost } from '@/components/governance/PowerConcentrationLimiter';
@@ -479,17 +478,15 @@ export default function Home() {
       }
     },
   });
-  // Apply momentum dampening
-  const { data: dampenedMovements = rawMovements, isLoading: isDampening } = useMomentumDampening(rawMovements);
 
   // Apply decentralization penalty (best-effort)
   const decentralizedMovements = useMemo(() => {
     try {
-      return applyDecentralizationBoost(dampenedMovements, leadershipCounts);
+      return applyDecentralizationBoost(rawMovements, leadershipCounts);
     } catch {
-      return dampenedMovements;
+      return rawMovements;
     }
-  }, [dampenedMovements, leadershipCounts]);
+  }, [rawMovements, leadershipCounts]);
   
   // Apply age-based filtering
   const movements = decentralizedMovements.filter(movement => {
@@ -498,7 +495,7 @@ export default function Home() {
     return !shouldRestrictContent(userAge, riskLevel);
   });
   
-  const isLoading = isLoadingMovements || isDampening;
+  const isLoading = isLoadingMovements;
 
   const userEmail = useMemo(() => {
     const e = user?.email ? String(user.email).trim().toLowerCase() : null;
@@ -879,6 +876,24 @@ export default function Home() {
           </>
         )}
       </div>
+
+      {/* Floating Messages Button (Mobile) — quick DM access */}
+      {gateReady && user ? (
+          <Link
+            to={createPageUrl('Messages')}
+            className="fixed bottom-44 right-5 md:hidden z-40"
+          >
+            <motion.button
+              whileHover={reduceMotion ? undefined : { scale: 1.1 }}
+              whileTap={reduceMotion ? undefined : { scale: 0.9 }}
+              className="w-14 h-14 bg-gradient-to-br from-[#3A3DFF] to-[#6366F1] text-white rounded-full shadow-2xl flex items-center justify-center border-2 border-white"
+              aria-label="Messages"
+              title="Messages"
+            >
+              <MessageSquare className="w-7 h-7" strokeWidth={2.5} />
+            </motion.button>
+          </Link>
+      ) : null}
 
       {/* Floating Create Button (Mobile) */}
       {gateReady ? (

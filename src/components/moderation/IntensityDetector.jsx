@@ -75,9 +75,8 @@ export class IntensityDetector {
       }
       
       return intensityData;
-    } catch (_error) {
-      // Use logError for structured error logging if needed
-      void _error;
+    } catch (error) {
+      logError(error, 'IntensityDetector analyzeMovement failed');
       return null;
     }
   }

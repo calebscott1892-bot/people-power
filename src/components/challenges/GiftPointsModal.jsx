@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Gift, Sparkles } from 'lucide-react';
 import { toast } from "sonner";
+import { logError } from '@/utils/logError';
 
 export default function GiftPointsModal({ open, onClose, toUser, userStats, onGift }) {
   const [amount, setAmount] = useState(10);
@@ -27,9 +28,15 @@ export default function GiftPointsModal({ open, onClose, toUser, userStats, onGi
     }
 
     setIsSubmitting(true);
-    await onGift({ amount, message });
-    setIsSubmitting(false);
-    onClose();
+    try {
+      await onGift({ amount, message });
+      onClose();
+    } catch (err) {
+      logError(err, 'GiftPointsModal gift failed');
+      toast.error('Failed to send gift. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

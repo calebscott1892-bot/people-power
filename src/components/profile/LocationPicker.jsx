@@ -75,11 +75,36 @@ export default function LocationPicker({
 
     setLoading(true);
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const newPos = [pos.coords.latitude, pos.coords.longitude];
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        const newPos = [lat, lng];
         setPosition(newPos);
-        onCoordinatesChange?.({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-        onLocationChange({ city, country });
+        onCoordinatesChange?.({ lat, lng });
+
+        // Reverse-geocode GPS coordinates to fill city/country
+        try {
+          const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=10&addressdetails=1`;
+          const res = await httpFetch(url, { headers: { Accept: 'application/json' } });
+          if (res.ok) {
+            const json = await res.json();
+            const addr = json?.address || {};
+            const resolvedCity = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+            const resolvedCountry = addr.country || '';
+            if (resolvedCity || resolvedCountry) {
+              setCity(resolvedCity);
+              setCountry(resolvedCountry);
+              onLocationChange({ city: resolvedCity, country: resolvedCountry });
+            } else {
+              onLocationChange({ city, country });
+            }
+          } else {
+            onLocationChange({ city, country });
+          }
+        } catch {
+          // Reverse geocode failed — still update with whatever text is in the inputs
+          onLocationChange({ city, country });
+        }
         setLoading(false);
       },
       () => {
@@ -94,9 +119,29 @@ export default function LocationPicker({
     onRadiusChange(value[0]);
   };
 
-  const handlePositionUpdate = (newPos) => {
+  const handlePositionUpdate = async (newPos) => {
     setPosition(newPos);
     onCoordinatesChange?.({ lat: newPos[0], lng: newPos[1] });
+
+    // Reverse-geocode the clicked map position to update city/country
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(newPos[0])}&lon=${encodeURIComponent(newPos[1])}&zoom=10&addressdetails=1`;
+      const res = await httpFetch(url, { headers: { Accept: 'application/json' } });
+      if (res.ok) {
+        const json = await res.json();
+        const addr = json?.address || {};
+        const resolvedCity = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+        const resolvedCountry = addr.country || '';
+        if (resolvedCity || resolvedCountry) {
+          setCity(resolvedCity);
+          setCountry(resolvedCountry);
+          onLocationChange({ city: resolvedCity, country: resolvedCountry });
+          return;
+        }
+      }
+    } catch {
+      // ignore reverse geocode failure
+    }
     onLocationChange({ city, country });
   };
 

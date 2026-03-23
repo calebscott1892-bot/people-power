@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Bell, Loader2, Check, Heart, UserPlus, MessageSquare } from 'lucide-react';
+import { Bell, Loader2, Heart, UserPlus, MessageSquare } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { format } from 'date-fns';
 import { Button } from "@/components/ui/button";
@@ -163,68 +163,58 @@ export default function Notifications() {
   const unreadCount = publicNotifications.filter((n) => !n.is_read).length;
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="max-w-2xl mx-auto">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-white rounded-3xl shadow-2xl border-3 border-slate-200 overflow-hidden"
+        className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden"
       >
         {/* Header */}
-        <div className="p-6 border-b-3 border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] rounded-2xl flex items-center justify-center">
-                <Bell className="w-6 h-6 text-white" strokeWidth={2.5} />
-              </div>
-              <div>
-                <h1 className="text-2xl font-black text-slate-900">Notifications</h1>
-                {unreadCount > 0 && (
-                  <p className="text-sm text-slate-500 font-bold">{unreadCount} unread</p>
-                )}
-              </div>
+        <div className="px-5 py-4 border-b border-slate-100">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Bell className="w-5 h-5 text-slate-700" strokeWidth={2} />
+              <h1 className="text-lg font-bold text-slate-900">Notifications</h1>
+              {unreadCount > 0 && (
+                <span className="text-xs font-semibold text-slate-500">{unreadCount} unread</span>
+              )}
             </div>
             {unreadCount > 0 && (
               <Button
                 onClick={() => markAllReadMutation.mutate()}
                 disabled={markAllReadMutation.isPending}
-                variant="outline"
-                className="border-2 rounded-xl font-bold"
+                variant="ghost"
+                className="text-sm font-semibold text-slate-600 hover:text-slate-900 h-8 px-3"
               >
-                <Check className="w-4 h-4 mr-2" />
                 Mark all read
               </Button>
             )}
           </div>
         </div>
 
-        {/* Notifications List */}
-        <div className="divide-y-2 divide-slate-100">
+        <div className="divide-y divide-slate-100">
           {isLoading ? (
             <div className="flex justify-center py-12">
               <Loader2 className="w-6 h-6 text-[#3A3DFF] animate-spin" />
             </div>
           ) : notificationsError ? (
-            <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
-              <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
-                <Bell className="w-8 h-8 text-slate-400" />
-              </div>
-              <h3 className="font-black text-lg text-slate-900 mb-2">Couldn’t load notifications</h3>
-              <p className="text-slate-500 text-sm font-semibold">Please try again.</p>
+            <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
+              <Bell className="w-8 h-8 text-slate-300 mb-3" />
+              <h3 className="font-bold text-base text-slate-900 mb-1">Couldn’t load notifications</h3>
+              <p className="text-slate-500 text-sm">Please try again.</p>
               <button
                 type="button"
                 onClick={() => refetchNotifications()}
-                className="mt-5 inline-flex items-center justify-center px-6 py-3 rounded-2xl bg-[#3A3DFF] text-white font-bold shadow-md hover:opacity-90 transition"
+                className="mt-4 inline-flex items-center justify-center px-5 py-2 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:opacity-90 transition"
               >
                 Retry
               </button>
             </div>
           ) : publicNotifications.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
-              <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
-                <Bell className="w-8 h-8 text-slate-400" />
-              </div>
-              <h3 className="font-black text-lg text-slate-900 mb-2">No activity yet</h3>
-              <p className="text-slate-500 text-sm">You&apos;ll see follows, boosts, and comments here</p>
+            <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
+              <Bell className="w-8 h-8 text-slate-300 mb-3" />
+              <h3 className="font-bold text-base text-slate-900 mb-1">No activity yet</h3>
+              <p className="text-sm text-slate-500">You’ll see follows, boosts, and comments here</p>
             </div>
           ) : (
             <>
@@ -236,12 +226,12 @@ export default function Notifications() {
                 />
               ))}
               {hasNextPage ? (
-                <div className="p-6 flex justify-center">
+                <div className="p-4 flex justify-center">
                   <button
                     type="button"
                     onClick={() => fetchNextPage()}
                     disabled={isFetchingNextPage}
-                    className="inline-flex items-center justify-center px-6 py-3 rounded-2xl bg-white border-2 border-slate-200 text-slate-900 font-black shadow-sm hover:shadow-md transition"
+                    className="text-sm font-semibold text-slate-600 hover:text-slate-900 transition"
                   >
                     {isFetchingNextPage ? 'Loading…' : 'Load more'}
                   </button>
@@ -306,22 +296,21 @@ function NotificationItem({ notification, onMarkRead }) {
 
   const link = getLink();
   const content = (
-    <motion.div
-      whileHover={{ backgroundColor: 'rgb(248 250 252)' }}
-      className={`p-4 transition-colors ${!notification.is_read ? 'bg-indigo-50' : ''}`}
+    <div
+      className={`px-5 py-3.5 transition-colors hover:bg-slate-50 cursor-pointer ${!notification.is_read ? 'bg-blue-50/50' : ''}`}
       onClick={() => !notification.is_read && onMarkRead()}
     >
-      <div className="flex gap-3">
-        <div className="flex-shrink-0 mt-1">
-          <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center border-2 border-slate-200">
+      <div className="flex gap-3 items-start">
+        <div className="flex-shrink-0 mt-0.5">
+          <div className="w-8 h-8 rounded-full flex items-center justify-center bg-slate-100">
             {getIcon()}
           </div>
         </div>
         <div className="flex-1 min-w-0">
-          <p className={`text-sm ${!notification.is_read ? 'font-bold text-slate-900' : 'text-slate-700'}`}>
+          <p className={`text-sm leading-snug ${!notification.is_read ? 'font-semibold text-slate-900' : 'text-slate-600'}`}>
             {getMessage()}
           </p>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-slate-400 mt-0.5">
             {created}
           </p>
         </div>
@@ -329,7 +318,7 @@ function NotificationItem({ notification, onMarkRead }) {
           <div className="w-2 h-2 bg-[#3A3DFF] rounded-full flex-shrink-0 mt-2" />
         )}
       </div>
-    </motion.div>
+    </div>
   );
 
   return link ? <Link to={link}>{content}</Link> : content;

@@ -130,10 +130,13 @@ export default function CreateEventModal({ open, onOpenChange, movementId, onCre
       role="presentation"
       onKeyDown={(e) => {
         trapFocusKeyDown(e, dialogRef.current);
-        if (e.key === 'Escape') close();
+        if (e.key === 'Escape') {
+          if (submitting) return;
+          close();
+        }
       }}
     >
-      <div className="absolute inset-0 bg-black/40" onClick={close} />
+      <div className="absolute inset-0 bg-black/40" onClick={() => { if (!submitting) close(); }} />
       <div
         ref={dialogRef}
         role="dialog"

@@ -6,6 +6,7 @@ import { BarChart2, Plus, X, Loader2, CheckCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from "sonner";
 import { entities } from "@/api/appClient";
+import { logError } from '@/utils/logError';
 
 function PollManagerProd() {
   return (
@@ -51,27 +52,37 @@ function PollManagerDev({ movementId, currentUser, canCreatePolls }) {
       setOptions(['', '']);
       setShowForm(false);
       toast.success('Poll created!');
+    },
+    onError: (e) => {
+      logError(e, 'Create poll failed');
+      toast.error('Could not create poll. Please try again.');
     }
   });
 
   const voteMutation = useMutation({
-    mutationFn: async ({ pollId, optionIndex, currentVotes }) => {
-      const newVotes = { ...currentVotes };
+    mutationFn: async ({ pollId, optionIndex }) => {
+      // Read fresh votes from server to avoid clobbering concurrent voters
+      const freshPoll = await entities.MovementPoll.getById(pollId);
+      const freshVotes = freshPoll?.votes && typeof freshPoll.votes === 'object' ? { ...freshPoll.votes } : {};
       const optionKey = optionIndex.toString();
       
       // Remove user from all options
-      Object.keys(newVotes).forEach(key => {
-        newVotes[key] = (newVotes[key] || []).filter(email => email !== currentUser.email);
+      Object.keys(freshVotes).forEach(key => {
+        freshVotes[key] = (freshVotes[key] || []).filter(email => email !== currentUser.email);
       });
       
       // Add user to selected option
-      if (!newVotes[optionKey]) newVotes[optionKey] = [];
-      newVotes[optionKey].push(currentUser.email);
+      if (!freshVotes[optionKey]) freshVotes[optionKey] = [];
+      freshVotes[optionKey].push(currentUser.email);
       
-      await entities.MovementPoll.update(pollId, { votes: newVotes });
+      await entities.MovementPoll.update(pollId, { votes: freshVotes });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['polls'] });
+    },
+    onError: (e) => {
+      logError(e, 'Poll vote failed');
+      toast.error('Could not record vote. Please try again.');
     }
   });
 
@@ -159,8 +170,7 @@ function PollManagerDev({ movementId, currentUser, canCreatePolls }) {
               poll={poll}
               onVote={(optionIndex) => voteMutation.mutate({ 
                 pollId: poll.id, 
-                optionIndex, 
-                currentVotes: poll.votes 
+                optionIndex
               })}
               currentUser={currentUser}
             />

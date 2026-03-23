@@ -82,6 +82,7 @@ import { toast } from 'sonner';
 import { toastFriendlyError } from '@/utils/toastErrors';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { useFeatureFlag } from '@/utils/featureFlags';
+import { DM_DISABLED, DM_DISABLED_MESSAGE } from '@/config/clientFeatureGates';
 import { getPageCache, setPageCache } from '@/utils/pageCache';
 import { queryKeys } from '@/lib/queryKeys';
 import {
@@ -2079,10 +2080,11 @@ export default function MovementDetails() {
         </div>
       ) : null}
 
-      <div className="p-4 sm:p-6 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-3">
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl sm:text-3xl font-black text-slate-900">{title}</h1>
+      <div className="p-5 sm:p-8 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-5">
+        {/* Title + visibility */}
+        <div>
+          <div className="flex items-start gap-2">
+            <h1 className="text-2xl sm:text-3xl font-black text-slate-900 leading-tight">{title}</h1>
             {(() => {
               const v = String(movement?.visibility || '').trim().toLowerCase();
               if (!v || v === 'public') return null;
@@ -2093,7 +2095,7 @@ export default function MovementDetails() {
                   : 'border-slate-200 bg-slate-50 text-slate-700';
               return (
                 <span
-                  className={`ml-2 px-2 py-1 rounded-full border text-xs font-black ${cls}`}
+                  className={`mt-1 shrink-0 px-2 py-0.5 rounded-full border text-[11px] font-bold ${cls}`}
                   title={v === 'private' ? 'Visible only to you' : 'Visible to followers'}
                 >
                   {label}
@@ -2101,12 +2103,12 @@ export default function MovementDetails() {
               );
             })()}
             {isTitleLocked && (
-              <span className="ml-2 px-2 py-1 rounded bg-yellow-100 text-yellow-800 text-xs font-bold" title="Locked by owner">Locked</span>
+              <span className="mt-1 shrink-0 px-2 py-0.5 rounded bg-yellow-100 text-yellow-800 text-[11px] font-bold" title="Locked by owner">Locked</span>
             )}
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-slate-200 bg-slate-50 font-bold text-slate-700">
-              <UserIcon className="w-4 h-4" />
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
+            <span className="inline-flex items-center gap-1.5 font-medium">
+              <UserIcon className="w-3.5 h-3.5" />
               {ownerProfilePath ? (
                 <Link to={ownerProfilePath} className="hover:text-[#3A3DFF]" title={ownerLabel}>
                   {ownerLabel}
@@ -2115,196 +2117,83 @@ export default function MovementDetails() {
                 <span>{ownerLabel}</span>
               )}
               {ownerIsAdmin ? (
-                <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
-                  Admin
-                </span>
+                <span className="px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">Admin</span>
               ) : null}
-            </div>
-
+            </span>
             {createdAt ? (
-              <div className="px-3 py-1 rounded-full border border-slate-200 bg-slate-50 font-bold text-slate-600">
-                Created {formatDate(createdAt)}
-              </div>
+              <span className="font-medium">{formatDate(createdAt)}</span>
             ) : null}
           </div>
         </div>
 
+        {/* Tags */}
         {tags.length > 0 ? (
-          <div className="flex flex-wrap gap-2 pt-2">
-            {tags.slice(0, 12).map((t) => (
+          <div className="flex flex-wrap gap-1.5">
+            {tags.slice(0, 8).map((t) => (
               <span
                 key={String(t)}
-                className="px-3 py-1 rounded-full bg-slate-100 border border-slate-200 text-xs font-black text-slate-700"
+                className="px-2.5 py-0.5 rounded-full bg-slate-100 text-[11px] font-semibold text-slate-600"
               >
                 {String(t)}
               </span>
             ))}
+            {tags.length > 8 ? (
+              <span className="text-[11px] font-medium text-slate-400">+{tags.length - 8}</span>
+            ) : null}
           </div>
         ) : null}
 
-        <div className="pt-2 grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50">
-            <div className="text-xs font-black text-slate-600">Participants</div>
-            <div className="mt-1 text-sm font-black text-slate-900 flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1">
-                <BadgeCheck className="w-4 h-4 text-[#3A3DFF]" />
-                {verifiedParticipants != null ? verifiedParticipants : 0} verified
-              </span>
-              {typeof unverifiedParticipants === 'number' && unverifiedParticipants > 0 ? (
-                <span className="text-xs text-slate-600 font-semibold">
-                  Unverified interest: {unverifiedParticipants}
-                </span>
-              ) : null}
-            </div>
-            <div className="mt-1 text-xs text-slate-500 font-semibold">
-              Participants are counted from author-approved evidence only.
-            </div>
-          </div>
-
-          <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50">
-            <div className="text-xs font-black text-slate-600">Supporters</div>
-            <div className="mt-1 text-sm font-black text-slate-900">{supporters != null ? supporters : '—'}</div>
-          </div>
-
-          <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50">
-            <div className="text-xs font-black text-slate-600">Following</div>
-            <div className="mt-1 flex items-center justify-between gap-2">
-              <div className="text-sm font-black text-slate-900">{displayedFollowersCount}</div>
-              <button
-                type="button"
-                disabled={!accessToken || followMutation.isPending}
-                onClick={() => followMutation.mutate(!following)}
-                className={`px-3 py-2 rounded-xl border text-xs font-black ${
-                  following
-                    ? 'border-slate-900 bg-slate-900 text-white'
-                    : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
-                } ${!accessToken ? 'opacity-60 cursor-not-allowed' : ''}`}
-                title={!accessToken ? 'Log in to follow' : following ? 'Unfollow' : 'Follow'}
-              >
-                {following ? 'Following' : 'Follow'}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="pt-2">
-          <div className="text-xs font-black text-slate-600">Location</div>
-          <div className="mt-1 inline-flex items-center gap-2 text-sm font-bold text-slate-800">
-            <MapPin className="w-4 h-4 text-slate-600" />
-            {locationCity ? (
-              <span>{locationCity} (city-level)</span>
-            ) : (
-              <span className="text-slate-500">Not specified</span>
-            )}
-          </div>
-          <div className="mt-1 text-xs text-slate-500 font-semibold">
-            Locations are shown at city-level for privacy.
-          </div>
-        </div>
-
-        <div className="pt-2">
-          <div className="flex items-center gap-2">
-            <div className="text-xs font-black text-slate-600">Description</div>
-            {isDescriptionLocked && (
-              <span className="ml-2 px-2 py-1 rounded bg-yellow-100 text-yellow-800 text-xs font-bold" title="Locked by owner">Locked</span>
-            )}
-          </div>
+        {/* Description */}
+        <div>
+          {isDescriptionLocked && (
+            <span className="inline-block mb-1 px-2 py-0.5 rounded bg-yellow-100 text-yellow-800 text-[11px] font-bold" title="Locked by owner">Locked</span>
+          )}
           {description ? (
             shouldRenderHtml ? (
               <div
-                className="prose prose-slate max-w-none font-semibold text-slate-800"
+                className="prose prose-slate prose-sm max-w-none text-slate-700"
                 dangerouslySetInnerHTML={{ __html: safeHtml }}
               />
             ) : (
-              <p className="text-slate-700 font-semibold leading-relaxed whitespace-pre-wrap">{description}</p>
+              <p className="text-sm sm:text-base text-slate-700 leading-relaxed whitespace-pre-wrap">{description}</p>
             )
           ) : (
-            <p className="text-slate-500 font-semibold">No description yet.</p>
+            <p className="text-sm text-slate-400">No description yet.</p>
           )}
+          <p className="text-[11px] text-slate-400 mt-2">Community-generated content. Not verified by People Power. Always act safely and responsibly.</p>
         </div>
 
-        <div className="pt-4 flex flex-wrap items-center gap-2">
-          {isTeamMember ? (
-            <>
-              <div className="text-xs font-black text-slate-600 uppercase tracking-wide mr-1">Organizer shortcuts</div>
-              <a
-                href="#events"
-                className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-              >
-                Events
-              </a>
-              {petitionsEnabled ? (
-                <a
-                  href="#petitions"
-                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-                >
-                  Petitions
-                </a>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => setInviteOpen(true)}
-                disabled={!currentUserForCollab}
-                className={`px-3 py-2 rounded-xl border text-xs font-black ${
-                  currentUserForCollab
-                    ? 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
-                    : 'border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed'
-                }`}
-                title={currentUserForCollab ? 'Invite collaborators' : 'Log in to invite'}
-              >
-                Invite collaborators
-              </button>
-              {(isOwner || isAdmin) ? (
-                <button
-                  type="button"
-                  onClick={() => setEditMovementOpen(true)}
-                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-                >
-                  Edit details
-                </button>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <div className="text-xs font-black text-slate-600 uppercase tracking-wide mr-1">Jump to</div>
-              <a
-                href="#events"
-                className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-              >
-                Events
-              </a>
-              {petitionsEnabled ? (
-                <a
-                  href="#petitions"
-                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-                >
-                  Petition
-                </a>
-              ) : null}
-              <a
-                href="#verified-activity"
-                className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-              >
-                Verified activity
-              </a>
-              <a
-                href="#comments"
-                className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
-              >
-                Comments
-              </a>
-            </>
-          )}
-
-          <a
-            href="#share"
-            className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-black hover:bg-slate-50"
+        {/* Compact stats + follow row */}
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-slate-600">
+          <span className="inline-flex items-center gap-1">
+            <BadgeCheck className="w-4 h-4 text-[#3A3DFF]" />
+            <strong>{verifiedParticipants ?? 0}</strong> participants
+          </span>
+          <span><strong>{supporters ?? 0}</strong> supporters</span>
+          <span><strong>{displayedFollowersCount}</strong> followers</span>
+          {locationCity ? (
+            <span className="inline-flex items-center gap-1 text-slate-500">
+              <MapPin className="w-3.5 h-3.5" />
+              {locationCity}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            disabled={!accessToken || followMutation.isPending}
+            onClick={() => followMutation.mutate(!following)}
+            className={`ml-auto px-4 py-1.5 rounded-xl border text-xs font-bold transition ${
+              following
+                ? 'border-slate-900 bg-slate-900 text-white'
+                : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
+            } ${!accessToken ? 'opacity-60 cursor-not-allowed' : ''}`}
+            title={!accessToken ? 'Log in to follow' : following ? 'Unfollow' : 'Follow'}
           >
-            Share
-          </a>
+            {following ? 'Following' : 'Follow'}
+          </button>
         </div>
 
-        <div id="share" className="pt-4 flex flex-wrap gap-3 items-center">
+        {/* Actions: boost / share / report + organizer tools */}
+        <div id="share" className="flex flex-wrap gap-2 items-center pt-1">
           <BoostButtons
             movementId={movementId}
             movement={movement}
@@ -2313,35 +2202,63 @@ export default function MovementDetails() {
           />
           <ShareButton movementId={movementId} movement={movement} />
           <ReportButton contentType="movement" contentId={movementId} />
+          {isTeamMember ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setInviteOpen(true)}
+                disabled={!currentUserForCollab}
+                className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-bold hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Invite
+              </button>
+              {(isOwner || isAdmin) ? (
+                <button
+                  type="button"
+                  onClick={() => setEditMovementOpen(true)}
+                  className="px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-bold hover:bg-slate-50"
+                >
+                  Edit
+                </button>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+
+        {/* Section anchors */}
+        <div className="flex flex-wrap gap-2 text-xs">
+          <a href="#engagement" className="text-slate-500 hover:text-slate-700 font-medium transition-colors">Engagement</a>
+          <span className="text-slate-300">·</span>
+          <a href="#events" className="text-slate-500 hover:text-slate-700 font-medium transition-colors">Events</a>
+          {petitionsEnabled ? (
+            <>
+              <span className="text-slate-300">·</span>
+              <a href="#petitions" className="text-slate-500 hover:text-slate-700 font-medium transition-colors">Petitions</a>
+            </>
+          ) : null}
+          <span className="text-slate-300">·</span>
+          <a href="#verified-activity" className="text-slate-500 hover:text-slate-700 font-medium transition-colors">Evidence</a>
+          <span className="text-slate-300">·</span>
+          <a href="#comments" className="text-slate-500 hover:text-slate-700 font-medium transition-colors">Comments</a>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6">
         <div id="engagement">
           <SectionCard title="Engagement">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="p-4 rounded-xl border border-slate-200 bg-white">
-                <div className="inline-flex items-center gap-2 text-xs font-black text-slate-600">
-                  <Heart className="w-4 h-4" /> Boosts
-                </div>
-                <div className="mt-1 text-2xl font-black text-slate-900">{boostsCount}</div>
-              </div>
-
-              <div className="p-4 rounded-xl border border-slate-200 bg-white">
-                <div className="inline-flex items-center gap-2 text-xs font-black text-slate-600">
-                  <MessageSquare className="w-4 h-4" /> Comments
-                </div>
-                <div className="mt-1 text-2xl font-black text-slate-900">
-                  {typeof commentsCount === 'number' ? commentsCount : 0}
-                </div>
-              </div>
-
-              <div className="p-4 rounded-xl border border-slate-200 bg-white">
-                <div className="inline-flex items-center gap-2 text-xs font-black text-slate-600">
-                  <Users className="w-4 h-4" /> Followers
-                </div>
-                <div className="mt-1 text-2xl font-black text-slate-900">{displayedFollowersCount}</div>
-              </div>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              <span className="inline-flex items-center gap-1.5 text-slate-700">
+                <Heart className="w-4 h-4 text-slate-500" />
+                <strong>{boostsCount}</strong> boosts
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-slate-700">
+                <MessageSquare className="w-4 h-4 text-slate-500" />
+                <strong>{typeof commentsCount === 'number' ? commentsCount : 0}</strong> comments
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-slate-700">
+                <Users className="w-4 h-4 text-slate-500" />
+                <strong>{displayedFollowersCount}</strong> followers
+              </span>
             </div>
 
             {(isOwner || isAdmin) ? (
@@ -2706,11 +2623,9 @@ export default function MovementDetails() {
                 <button
                   type="button"
                   onClick={() => {
-                    const dmDisabled = true;
+                    const dmDisabled = DM_DISABLED;
                     if (dmDisabled) {
-                      toast.message(
-                        'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
-                      );
+                      toast.message(DM_DISABLED_MESSAGE);
                       return;
                     }
                     // TODO: Re-enable movement group chats by removing this gate.
@@ -4001,11 +3916,9 @@ export default function MovementDetails() {
               type="button"
               className="px-4 py-2 rounded-xl bg-slate-900 text-white font-black hover:opacity-90 disabled:opacity-60"
               onClick={() => {
-                const dmDisabled = true;
+                const dmDisabled = DM_DISABLED;
                 if (dmDisabled) {
-                  toast.message(
-                    'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
-                  );
+                  toast.message(DM_DISABLED_MESSAGE);
                   setGroupChatOpen(false);
                   return;
                 }

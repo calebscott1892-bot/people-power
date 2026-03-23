@@ -53,8 +53,11 @@ export default function PetitionCard({ petition, currentUser, isPast = false }) 
         is_public: isPublic
       });
 
+      // Atomically increment — read current count from the entity, not the stale prop
+      const current = await entities.Petition.getById(petition.id);
+      const currentCount = Number(current?.signature_count || 0);
       await entities.Petition.update(petition.id, {
-        signature_count: (petition.signature_count || 0) + 1
+        signature_count: currentCount + 1
       });
     },
     onSuccess: () => {

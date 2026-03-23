@@ -1,28 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import React, { useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { isAdmin as isAdminEmail } from '@/utils/staff';
 import { motion, useReducedMotion } from 'framer-motion';
-import { Flame, MapPin, TrendingUp, ThumbsDown, ThumbsUp, Users, Clock } from 'lucide-react';
-import { MapContainer, Marker, TileLayer } from 'react-leaflet';
-import 'leaflet/dist/leaflet.css';
-import L from 'leaflet';
-import { httpFetch } from '@/utils/httpFetch';
-import BoostButtons from '@/components/shared/BoostButtons';
-import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-
-// Ensure Leaflet marker icons resolve correctly in Vite builds.
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon-2x.png',
-  iconUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-shadow.png',
-});
+import { Flame, MapPin, TrendingUp, Clock } from 'lucide-react';
 
 function toNumber(v) {
   const n = Number(v);
@@ -110,68 +90,14 @@ function formatLocation(movement) {
   return parts.slice(0, 2).join(', ');
 }
 
-function locationQueryParts(movement) {
-  const city = String(movement?.city || movement?.location_city || movement?.location?.city || '').trim();
-  const country = String(movement?.country || movement?.location_country || movement?.location?.country || '').trim();
-  const parts = [city, country].filter(Boolean);
-  return parts.length ? parts.join(', ') : null;
-}
-
-function geocodeCacheKey(query) {
-  return `peoplepower_geocode_${String(query || '').toLowerCase()}`;
-}
-
-async function geocodeCity(query) {
-  const q = String(query || '').trim();
-  if (!q) return null;
-
-  const cacheKey = geocodeCacheKey(q);
-  try {
-    const cached = sessionStorage.getItem(cacheKey);
-    if (cached) {
-      const parsed = JSON.parse(cached);
-      if (parsed && typeof parsed === 'object' && parsed.lat && parsed.lon) return parsed;
-    }
-  } catch {
-    // ignore
-  }
-
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-  const res = await httpFetch(url, {
-    headers: {
-      Accept: 'application/json',
-    },
-  });
-  if (!res.ok) return null;
-  const json = await res.json();
-  const first = Array.isArray(json) ? json[0] : null;
-  if (!first?.lat || !first?.lon) return null;
-
-  // Privacy: round to ~1km resolution.
-  const lat = Number(first.lat);
-  const lon = Number(first.lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-  const rounded = { lat: Number(lat.toFixed(2)), lon: Number(lon.toFixed(2)) };
-
-  try {
-    sessionStorage.setItem(cacheKey, JSON.stringify(rounded));
-  } catch {
-    // ignore
-  }
-
-  return rounded;
-}
-
 function getTeaser(movement) {
   const raw = movement?.summary || movement?.description || '';
   const s = String(raw || '').trim();
-  // If description is rich text HTML, strip tags for the teaser.
   return s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function MovementCard({ movement }) {
   const reduceMotion = useReducedMotion();
-  const navigate = useNavigate();
   const id = movement?.id ?? movement?._id;
   const title = movement?.title || movement?.name || 'Untitled movement';
   const description = getTeaser(movement);
@@ -180,339 +106,86 @@ function MovementCard({ movement }) {
   const locationLabel = formatLocation(movement);
   const createdAt = movement?.created_at || movement?.created_date || null;
   const timeAgo = useMemo(() => relativeTime(createdAt), [createdAt]);
-  const locationQuery = useMemo(() => locationQueryParts(movement), [movement]);
-  const [coords, setCoords] = useState(null);
-  const hasCoords = Number.isFinite(coords?.lat) && Number.isFinite(coords?.lon);
-  const [mapError, setMapError] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function run() {
-      // Prefer stored, privacy-rounded coordinates when present.
-      const directLat = movement?.location_lat ?? movement?.location?.coordinates?.lat ?? movement?.location?.lat;
-      const directLon = movement?.location_lon ?? movement?.location?.coordinates?.lon ?? movement?.location?.coordinates?.lng ?? movement?.location?.lng;
-      const lat = Number(directLat);
-      const lon = Number(directLon);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        setCoords({ lat, lon });
-        return;
-      }
-
-      if (!locationQuery) {
-        setCoords(null);
-        return;
-      }
-      try {
-        const found = await geocodeCity(locationQuery);
-        if (!cancelled) setCoords(found);
-      } catch {
-        if (!cancelled) setCoords(null);
-      }
-    }
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [locationQuery, movement]);
-
-  useEffect(() => {
-    setMapError(false);
-  }, [coords?.lat, coords?.lon]);
-
   const boosts = toNumber(movement?.boosts_count ?? movement?.upvotes ?? movement?.boosts);
-  const downvotes = toNumber(movement?.downvotes);
   const score = toNumber(movement?.score ?? movement?.momentum_score);
   const isTrending = score >= 10;
 
-  const verifiedParticipants = toNumber(
-    movement?.verified_participants ?? movement?.verified_participants_count ?? movement?.verifiedParticipants
-  );
-  const unverifiedParticipants = toNumber(
-    movement?.unverified_participants ?? movement?.unverified_participants_count ?? movement?.unverifiedParticipants
-  );
-  const supporters = toNumber(movement?.supporters ?? movement?.supporters_count ?? movement?.supporter_count);
-
   const to = id ? `/movement/${encodeURIComponent(String(id))}` : '/';
-
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewVoteEligible, setPreviewVoteEligible] = useState(false);
-  const previewScrollRef = useRef(null);
-
-  const canPreview = !!id && String(id) !== 'preview';
-
-  useEffect(() => {
-    if (!previewOpen) return;
-
-    setPreviewVoteEligible(false);
-    const timer = setTimeout(() => setPreviewVoteEligible(true), 3_000);
-
-    const el = previewScrollRef.current;
-    if (!el) {
-      return () => clearTimeout(timer);
-    }
-
-    const onScroll = () => {
-      try {
-        const remaining = el.scrollHeight - (el.scrollTop + el.clientHeight);
-        if (remaining < 200) {
-          setPreviewVoteEligible(true);
-          el.removeEventListener('scroll', onScroll);
-        }
-      } catch {
-        // ignore
-      }
-    };
-
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => {
-      clearTimeout(timer);
-      el.removeEventListener('scroll', onScroll);
-    };
-  }, [previewOpen]);
 
   if (!movement) return null;
 
   return (
-    <>
-    <motion.div whileHover={reduceMotion ? undefined : { y: -2 }} transition={{ duration: 0.2 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm hover:shadow-lg hover:border-slate-300 transition-shadow w-full max-w-md mx-auto">
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => {
-          if (!canPreview) return;
-          setPreviewOpen(true);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            if (!canPreview) return;
-            setPreviewOpen(true);
-          }
-        }}
-        className="block p-3 sm:p-4 space-y-3 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#3A3DFF]/40 rounded-2xl"
+    <motion.div whileHover={reduceMotion ? undefined : { y: -2 }} transition={{ duration: 0.2 }} className="rounded-2xl border border-slate-200 bg-white shadow-sm hover:shadow-md transition-all w-full max-w-md mx-auto">
+      <Link
+        to={to}
+        className="block p-4 space-y-2.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#3A3DFF]/40 rounded-2xl"
       >
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="text-base sm:text-lg font-bold text-slate-900 truncate">{String(title)}</h3>
-              {isTrending ? (
-                <span className="inline-flex items-center gap-1 text-xs font-bold text-[#FFC947]">
-                  <Flame className="w-3.5 h-3.5" fill="#FFC947" strokeWidth={2.5} />
-                  Trending
-                </span>
-              ) : null}
-            </div>
-            <div className="flex items-center gap-2 text-xs font-medium text-slate-500 truncate">
-              <div className="w-5 h-5 rounded-full bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] flex items-center justify-center text-white text-[10px] font-semibold shrink-0">
-                {author.initial}
-              </div>
-              <span>
-                By{' '}
-                {author.profilePath ? (
-                  <Link
-                    to={author.profilePath}
-                    className="hover:text-[#3A3DFF]"
-                    title={author.label}
-                  >
-                    {author.label}
-                  </Link>
-                ) : (
-                  <span>{author.label}</span>
-                )}
-              </span>
-              {author.isAdminAuthor ? (
-                <span className="inline-flex px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-black uppercase">
-                  Admin
-                </span>
-              ) : null}
-              {locationLabel ? <span className="text-slate-400">·</span> : null}
-              {locationLabel ? <span>{locationLabel}</span> : null}
-              {timeAgo ? <span className="text-slate-400">·</span> : null}
-              {timeAgo ? (
-                <span className="inline-flex items-center gap-1 text-slate-400">
-                  <Clock className="w-3 h-3" />
-                  {timeAgo}
-                </span>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 self-start sm:self-auto">
-            <div className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-50 text-slate-600 text-xs font-semibold">
+        {/* Title row */}
+        <div className="flex items-start justify-between gap-3">
+          <h3 className="text-base font-bold text-slate-900 line-clamp-2 leading-snug">{String(title)}</h3>
+          <div className="flex items-center gap-1.5 shrink-0 pt-0.5">
+            {isTrending ? (
+              <Flame className="w-4 h-4 text-amber-500" fill="currentColor" strokeWidth={0} />
+            ) : null}
+            <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500">
               <TrendingUp className="w-3.5 h-3.5" />
               {score}
-            </div>
+            </span>
           </div>
         </div>
 
+        {/* Description */}
+        {description ? (
+          <p className="text-sm text-slate-600 line-clamp-2 leading-relaxed">{String(description)}</p>
+        ) : null}
+
+        {/* Tags — max 3, quieter */}
         {tags.length ? (
-          <div className="flex flex-wrap gap-2">
-            {tags.slice(0, 4).map((t) => (
-              <span key={t} className="text-[11px] sm:text-xs font-medium text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
+          <div className="flex flex-wrap gap-1.5">
+            {tags.slice(0, 3).map((t) => (
+              <span key={t} className="text-[11px] font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">
                 {formatTagLabel(t)}
               </span>
             ))}
-            {tags.length > 4 ? (
-              <span className="text-[11px] sm:text-xs font-medium text-slate-500">+{tags.length - 4} more</span>
+            {tags.length > 3 ? (
+              <span className="text-[11px] font-medium text-slate-400">+{tags.length - 3}</span>
             ) : null}
           </div>
         ) : null}
 
-        <p className="text-sm text-slate-600 line-clamp-3 sm:line-clamp-2">{String(description)}</p>
-
-        {hasCoords ? (
-          <div className="hidden sm:block rounded-xl border border-slate-100 bg-slate-50/50 p-2.5">
-            <div className="flex items-center justify-between gap-3">
-              <div className="inline-flex items-center gap-2 text-xs font-medium text-slate-500">
-                <MapPin className="w-3.5 h-3.5 text-slate-400" />
-                Map preview (city-level)
-              </div>
-              <div className="text-xs font-medium text-slate-600 truncate">
-                {locationLabel || 'Location set'}
-              </div>
-            </div>
-
-            <div className="mt-2 h-24 sm:h-28 rounded-xl overflow-hidden border border-slate-200 bg-white relative z-0 isolate">
-              <MapContainer
-                center={[coords.lat, coords.lon]}
-                zoom={11}
-                zoomControl={false}
-                scrollWheelZoom={false}
-                dragging={false}
-                doubleClickZoom={false}
-                touchZoom={false}
-                boxZoom={false}
-                keyboard={false}
-                attributionControl={false}
-                className="h-full w-full pointer-events-none"
-                style={{ height: '100%', width: '100%' }}
-              >
-                <TileLayer
-                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                  eventHandlers={{
-                    tileerror: () => setMapError(true),
-                    tileload: () => setMapError(false),
-                  }}
-                />
-                <Marker position={[coords.lat, coords.lon]} />
-              </MapContainer>
-              {mapError ? (
-                <div className="absolute inset-0 flex items-center justify-center bg-white/80 text-xs font-medium text-slate-600">
-                  Map preview unavailable
-                </div>
-              ) : null}
-            </div>
-
-            <div className="mt-2 text-[11px] text-slate-500 font-semibold">
-              Approximate city-level location only.
-            </div>
+        {/* Meta row — author · location · time · boosts */}
+        <div className="flex items-center gap-1.5 text-xs text-slate-500 pt-0.5">
+          <div className="w-4 h-4 rounded-full bg-gradient-to-br from-[#3A3DFF] to-[#5B5EFF] flex items-center justify-center text-white text-[9px] font-semibold shrink-0">
+            {author.initial}
           </div>
-        ) : (
-          <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 p-2.5 text-xs font-medium text-slate-600">
-            No location set yet.
-          </div>
-        )}
-
-        <div className="flex items-center gap-4 pt-1">
-          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
-            <Users className="w-4 h-4 text-slate-500" />
-            Participants: {verifiedParticipants}
-          </div>
-          {unverifiedParticipants > 0 ? (
-            <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
-              <Users className="w-4 h-4 text-slate-400" />
-              Unverified interest: {unverifiedParticipants}
-            </div>
+          <span className="truncate font-medium">{author.label}</span>
+          {locationLabel ? (
+            <>
+              <span className="text-slate-300">·</span>
+              <span className="inline-flex items-center gap-0.5 truncate">
+                <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                {locationLabel}
+              </span>
+            </>
           ) : null}
-          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
-            <Users className="w-4 h-4 text-[#FFC947]" />
-            Supporters: {supporters}
-          </div>
+          {timeAgo ? (
+            <>
+              <span className="text-slate-300">·</span>
+              <span className="inline-flex items-center gap-0.5 text-slate-400 shrink-0">
+                <Clock className="w-3 h-3" />
+                {timeAgo}
+              </span>
+            </>
+          ) : null}
+          {boosts > 0 ? (
+            <>
+              <span className="text-slate-300">·</span>
+              <span className="font-semibold text-slate-500">{boosts} boost{boosts !== 1 ? 's' : ''}</span>
+            </>
+          ) : null}
         </div>
-
-        <div className="flex items-center gap-4 pt-1">
-          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
-            <ThumbsUp className="w-4 h-4 text-[#3A3DFF]" />
-            Boosts: {boosts}
-          </div>
-          <div className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
-            <ThumbsDown className="w-4 h-4 text-slate-500" />
-            Downvotes: {downvotes}
-          </div>
-        </div>
-
-        <div className="pt-1 text-xs text-slate-500 font-semibold space-y-1">
-          <div>Community-generated. Not verified by People Power.</div>
-          <div>Always act safely and responsibly.</div>
-        </div>
-      </div>
+      </Link>
     </motion.div>
-
-    {canPreview ? (
-      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        <DialogContent className="sm:max-w-lg w-[92vw] max-h-[80vh]">
-          <DialogHeader>
-            <DialogTitle className="text-xl font-bold">{String(title)}</DialogTitle>
-          </DialogHeader>
-
-          <div
-            ref={previewScrollRef}
-            className="max-h-[55vh] overflow-y-auto pr-1 space-y-4"
-          >
-            <div className="text-sm text-slate-600 font-semibold whitespace-pre-line">
-              {String(description || 'No description provided.')}
-            </div>
-
-            {tags.length ? (
-              <div className="flex flex-wrap gap-2">
-                {tags.map((t) => (
-                  <span key={t} className="text-[11px] sm:text-xs font-medium text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
-                    {formatTagLabel(t)}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-
-            <div className="pt-1">
-              <div className="text-xs font-bold text-slate-700 mb-2">Vote</div>
-              <BoostButtons
-                movementId={id}
-                movement={movement}
-                requireRead
-                isReadEligible={previewVoteEligible}
-              />
-              {!previewVoteEligible ? (
-                <div className="mt-2 text-xs text-slate-500 font-semibold">
-                  Read a bit first to unlock voting (scroll near the bottom or wait ~3s).
-                </div>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="flex items-center justify-end gap-2 pt-2">
-            <Button
-              type="button"
-              variant="outline"
-              className="rounded-xl font-bold"
-              onClick={() => setPreviewOpen(false)}
-            >
-              Close
-            </Button>
-            <Button
-              type="button"
-              className="rounded-xl font-bold"
-              onClick={() => {
-                setPreviewOpen(false);
-                navigate(to);
-              }}
-            >
-              View full movement
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-    ) : null}
-    </>
   );
 }
 

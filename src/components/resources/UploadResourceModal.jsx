@@ -79,10 +79,13 @@ export default function UploadResourceModal({ open, onOpenChange, movementId, on
       role="presentation"
       onKeyDown={(e) => {
         trapFocusKeyDown(e, dialogRef.current);
-        if (e.key === 'Escape') close();
+        if (e.key === 'Escape') {
+          if (submitting) return;
+          close();
+        }
       }}
     >
-      <div className="absolute inset-0 bg-black/40" onClick={close} />
+      <div className="absolute inset-0 bg-black/40" onClick={() => { if (!submitting) close(); }} />
       <div
         ref={dialogRef}
         role="dialog"
@@ -110,7 +113,8 @@ export default function UploadResourceModal({ open, onOpenChange, movementId, on
           <button
             type="button"
             onClick={close}
-            className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 font-black hover:bg-slate-50"
+            disabled={submitting}
+            className="px-4 py-2 rounded-xl border border-slate-200 bg-white text-slate-800 font-black hover:bg-slate-50 disabled:opacity-60"
           >
             Cancel
           </button>

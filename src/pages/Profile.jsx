@@ -4,8 +4,8 @@ import { createPageUrl } from '@/utils';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from "@/components/ui/button";
 import { 
-  User, Calendar, Zap, LogOut, MessageCircle,
-  Plus, ChevronRight, Loader2, TrendingUp, Trophy, Flame, Shield
+  User, Calendar, LogOut, MessageCircle, Mail,
+  Plus, ChevronRight, Loader2, TrendingUp, Shield
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { format } from 'date-fns';
@@ -412,7 +412,7 @@ export default function Profile() {
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
+        className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden"
       >
         {/* Header Banner */}
         {resolvedProfile?.banner_url ? (
@@ -446,9 +446,9 @@ export default function Profile() {
         
         {/* Profile Info */}
         <div className="px-4 sm:px-8 pb-6 sm:pb-8">
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6 mb-6 sm:mb-8">
-            <div className="flex items-start gap-4 sm:gap-6">
-              <div className="w-24 h-24 sm:w-32 sm:h-32 -mt-12 sm:-mt-16 bg-white rounded-full shadow-2xl flex items-center justify-center border-4 border-white overflow-hidden">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
+            <div className="flex items-start gap-4 sm:gap-5">
+              <div className="w-20 h-20 sm:w-24 sm:h-24 -mt-10 sm:-mt-12 bg-white rounded-full shadow-md flex items-center justify-center border-2 border-white overflow-hidden">
                 {profilePhotoUrl ? (
                   <img
                     src={profilePhotoUrl}
@@ -466,8 +466,8 @@ export default function Profile() {
                     onLoad={() => setAvatarLoadError(null)}
                   />
                 ) : (
-                  <div className="w-20 h-20 sm:w-28 sm:h-28 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
-                    <span className="text-3xl sm:text-5xl font-bold text-slate-900">
+                  <div className="w-16 h-16 sm:w-20 sm:h-20 bg-gradient-to-br from-[#FFC947] to-[#FFD666] rounded-full flex items-center justify-center">
+                    <span className="text-2xl sm:text-3xl font-bold text-slate-900">
                       {(resolvedProfile?.display_name?.[0] || user?.full_name?.[0] || resolvedProfile?.username?.[0] || safeHandle?.[0] || '?').toUpperCase()}
                     </span>
                   </div>
@@ -489,65 +489,62 @@ export default function Profile() {
                   </button>
                 </div>
               ) : null}
-              <div className="pt-2 sm:pt-4 flex-1">
-                <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-1">
+              <div className="pt-2 sm:pt-3 flex-1">
+                <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
                   {resolvedProfile?.display_name || user?.full_name || 'Anonymous User'}
                 </h1>
-                <p className="text-sm text-slate-500 font-semibold">
+                <p className="text-sm text-slate-500">
                   @{safeHandle || 'member'}
+                  {resolvedProfile?.is_private ? (
+                    <span className="ml-2 px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-bold uppercase">Private</span>
+                  ) : null}
+                  {isAdmin ? (
+                    <span className="ml-2 px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">Admin</span>
+                  ) : null}
                 </p>
-                {resolvedProfile?.is_private ? (
-                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold uppercase">
-                    Private
-                  </span>
-                ) : null}
-                {isAdmin ? (
-                  <span className="inline-flex mt-2 px-2 py-1 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">
-                    Admin
-                  </span>
-                ) : null}
-                <div className="mt-3 flex items-center gap-3">
+                <div className="mt-2 flex items-center gap-2 text-sm">
                   <button
                     type="button"
                     onClick={() => {
                       setFollowListMode('followers');
                       setFollowListOpen(true);
                     }}
-                    className="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-bold text-sm"
+                    className="text-slate-700 font-semibold hover:text-[#3A3DFF] transition-colors"
                   >
-                    Followers {followersCount}
+                    <strong>{followersCount}</strong> followers
                   </button>
+                  <span className="text-slate-300">·</span>
                   <button
                     type="button"
                     onClick={() => {
                       setFollowListMode('following');
                       setFollowListOpen(true);
                     }}
-                    className="px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-900 font-bold text-sm"
+                    className="text-slate-700 font-semibold hover:text-[#3A3DFF] transition-colors"
                   >
-                    Following {followingCount}
+                    <strong>{followingCount}</strong> following
                   </button>
                 </div>
                 {resolvedProfile?.bio ? (
-                  <p className="mt-2 text-sm sm:text-base text-slate-700 whitespace-pre-line">
+                  <p className="mt-2 text-sm text-slate-600 whitespace-pre-line leading-relaxed">
                     {resolvedProfile.bio}
                   </p>
                 ) : null}
               </div>
             </div>
 
-            <div className="sm:pt-4 flex flex-col sm:flex-row gap-3">
+            <div className="sm:pt-3 flex flex-wrap gap-2">
               <Button
                 onClick={() => setShowEditModal(true)}
                 variant="outline"
-                className="h-12 font-bold rounded-xl border border-slate-200"
+                className="h-9 text-sm font-semibold rounded-xl border border-slate-200"
               >
                 Edit
               </Button>
               <Button
                 asChild
                 variant="outline"
-                className="h-12 font-bold rounded-xl border border-slate-200"
+                className="h-9 text-sm font-semibold rounded-xl border border-slate-200"
               >
                 <Link to={createPageUrl('Settings')}>Settings</Link>
               </Button>
@@ -555,97 +552,83 @@ export default function Profile() {
             </div>
           </div>
 
-          {/* Stats Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
-            <motion.div 
-              whileHover={{ scale: 1.05 }}
-              className="bg-gradient-to-br from-indigo-50 to-white p-5 rounded-2xl border border-indigo-100 text-center"
-            >
-              <div className="text-3xl font-bold text-[#3A3DFF] mb-1">
+          {/* Stats */}
+          <div className="grid grid-cols-3 gap-3 mb-6">
+            <div className="p-4 rounded-xl border border-slate-100 bg-slate-50 text-center">
+              <div className="text-2xl font-bold text-slate-900">
                 {myMovements.length}
               </div>
-              <div className="text-xs font-semibold text-slate-500">
+              <div className="text-xs text-slate-500">
                 Created
               </div>
-            </motion.div>
+            </div>
             
-            <motion.div 
-              whileHover={{ scale: 1.05 }}
-              className="bg-gradient-to-br from-yellow-50 to-white p-5 rounded-2xl border border-yellow-100 text-center"
-            >
-              <div className="text-3xl font-bold text-[#FFC947] mb-1">
+            <div className="p-4 rounded-xl border border-slate-100 bg-slate-50 text-center">
+              <div className="text-2xl font-bold text-slate-900">
                 {followedMovements.length}
               </div>
-              <div className="text-xs font-semibold text-slate-500">
-                Movements Followed
+              <div className="text-xs text-slate-500">
+                Following
               </div>
-            </motion.div>
+            </div>
             
-            <motion.div 
-              whileHover={{ scale: 1.05 }}
-              className="bg-gradient-to-br from-purple-50 to-white p-5 rounded-2xl border border-purple-100 text-center"
-            >
-              <div className="flex items-center justify-center gap-2 mb-1">
-                <Trophy className="w-6 h-6 text-purple-600" />
-                <div className="text-3xl font-bold text-purple-600">
+            {challengesEnabled ? (
+              <div className="p-4 rounded-xl border border-slate-100 bg-slate-50 text-center">
+                <div className="text-2xl font-bold text-slate-900">
                   {userStats?.total_points || 0}
                 </div>
+                <div className="text-xs text-slate-500">
+                  Points
+                </div>
               </div>
-              <div className="text-xs font-semibold text-slate-500">
-                Points
+            ) : (
+              <div className="p-4 rounded-xl border border-slate-100 bg-slate-50 text-center">
+                <div className="text-2xl font-bold text-slate-900">
+                  {computeBoostsEarned(myMovements)}
+                </div>
+                <div className="text-xs text-slate-500">
+                  Boosts earned
+                </div>
               </div>
-            </motion.div>
+            )}
           </div>
 
           {/* Challenge Stats */}
           {userStats && (userStats.current_streak > 0 || userStats.total_challenges_completed > 0) && (
-            <div className="mb-6 p-4 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-2xl border border-indigo-100">
+            <div className="mb-6 p-4 rounded-xl border border-slate-200 bg-slate-50">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-bold text-slate-900">
-                  Challenge Stats
+                  Challenges
                 </h3>
                 <Button
                   asChild
                   size="sm"
-                  className="bg-[#3A3DFF] hover:bg-[#2A2DDD] rounded-lg font-bold text-xs"
+                  variant="outline"
+                  className="rounded-lg font-semibold text-xs h-8"
                 >
                   <Link
                     to={createPageUrl('DailyChallenges')}
                     state={{ fromLabel: 'Profile', fromPath: createPageUrl('Profile') }}
                   >
-                    View Challenges
+                    View
                   </Link>
                 </Button>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="flex items-center gap-3">
-                  <motion.div
-                    animate={{ rotate: [0, -5, 5, -5, 0] }}
-                    transition={{ duration: 2, repeat: Infinity, repeatDelay: 3 }}
-                    className="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center shadow-lg"
-                  >
-                    <Flame className="w-5 h-5 text-white" fill="white" />
-                  </motion.div>
-                  <div>
-                    <div className="text-2xl font-bold text-slate-900">
-                      {userStats.current_streak}
-                    </div>
-                    <div className="text-xs text-slate-600 font-bold">
-                      Day Streak
-                    </div>
+              <div className="flex items-center gap-6">
+                <div>
+                  <div className="text-xl font-bold text-slate-900">
+                    {userStats.current_streak}
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Day streak
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500 to-emerald-500 flex items-center justify-center shadow-lg">
-                    <Zap className="w-5 h-5 text-white" fill="white" />
+                <div>
+                  <div className="text-xl font-bold text-slate-900">
+                    {userStats.total_challenges_completed}
                   </div>
-                  <div>
-                    <div className="text-2xl font-bold text-slate-900">
-                      {userStats.total_challenges_completed}
-                    </div>
-                    <div className="text-xs text-slate-600 font-bold">
-                      Completed
-                    </div>
+                  <div className="text-xs text-slate-500">
+                    Completed
                   </div>
                 </div>
               </div>
@@ -654,23 +637,17 @@ export default function Profile() {
 
           {/* User Details */}
           {user?.created_date ? (
-              <div className="space-y-3 mb-6 p-4 bg-slate-50 rounded-2xl border border-slate-200">
-              {/* Email intentionally hidden for privacy. */}
-              <div className="flex items-center gap-3 text-slate-600">
-                <Calendar className="w-5 h-5 text-slate-400" />
-                <span className="font-bold">Joined {format(new Date(user.created_date), 'MMMM yyyy')}</span>
+              <div className="space-y-2 mb-6 p-3 bg-slate-50 rounded-xl border border-slate-100">
+              <div className="flex items-center gap-2 text-sm text-slate-600">
+                <Calendar className="w-4 h-4 text-slate-400" />
+                <span className="font-medium">Joined {format(new Date(user.created_date), 'MMMM yyyy')}</span>
               </div>
 
               {softTrustMarkers.length ? (
-                <div className="pt-2">
-                  <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-2">
-                    Trust markers (not official verification)
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {softTrustMarkers.map((label) => (
-                      <TagBadge key={label} tag={label} />
-                    ))}
-                  </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {softTrustMarkers.map((label) => (
+                    <TagBadge key={label} tag={label} />
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -684,7 +661,7 @@ export default function Profile() {
             >
               <Button
                 variant="outline"
-                className="w-full h-12 font-bold rounded-xl border border-red-200 text-red-700 hover:bg-red-50 mb-3"
+                className="w-full h-10 font-semibold rounded-xl border border-red-200 text-red-700 hover:bg-red-50 mb-2"
               >
                 <Shield className="w-4 h-4 mr-2" />
                 Admin Panel
@@ -692,11 +669,22 @@ export default function Profile() {
             </Link>
           )}
 
-          {/* Logout Button */}
+          {/* Messages */}
+          <Link to={createPageUrl('Messages')}>
+            <Button
+              variant="outline"
+              className="w-full h-10 font-semibold rounded-xl border border-slate-200 mb-2"
+            >
+              <Mail className="w-4 h-4 mr-2" />
+              Messages
+            </Button>
+          </Link>
+
+          {/* Feedback */}
           <Button
             onClick={() => setFeedbackOpen(true)}
             variant="outline"
-            className="w-full h-12 font-bold rounded-xl border border-slate-200 mb-3"
+            className="w-full h-10 font-semibold rounded-xl border border-slate-200 mb-2"
           >
             <MessageCircle className="w-4 h-4 mr-2" />
             Feedback / Report Bug
@@ -705,7 +693,7 @@ export default function Profile() {
           <Button
             onClick={handleLogout}
             variant="outline"
-            className="w-full h-12 font-bold rounded-xl border border-slate-200"
+            className="w-full h-10 font-semibold rounded-xl border border-slate-200"
           >
             <LogOut className="w-4 h-4 mr-2" />
             Sign Out
@@ -728,27 +716,24 @@ export default function Profile() {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1 }}
-        className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
+        className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden"
       >
-        <div className="p-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-r from-slate-50 to-white">
-          <h2 className="text-2xl font-bold text-slate-900">My Movements</h2>
+        <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+          <h2 className="text-lg font-bold text-slate-900">My Movements</h2>
           <Link to={createPageUrl('CreateMovement')}>
-            <Button className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] hover:from-[#FFD666] hover:to-[#FFC947] text-slate-900 font-bold rounded-xl h-10 px-5">
-              <Plus className="w-4 h-4 mr-1" strokeWidth={3} />
+            <Button variant="outline" className="font-semibold rounded-xl h-9 px-4 border-slate-200">
+              <Plus className="w-4 h-4 mr-1" strokeWidth={2.5} />
               New
             </Button>
           </Link>
         </div>
 
         {myMovements.length === 0 ? (
-          <div className="p-16 text-center">
-            <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-6">
-              <Zap className="w-10 h-10 text-slate-400" />
-            </div>
-            <h3 className="font-bold text-xl text-slate-900 mb-2">No movements yet</h3>
-            <p className="text-slate-500 mb-6 font-semibold">Start your first movement and inspire others!</p>
+          <div className="p-12 text-center">
+            <h3 className="font-bold text-lg text-slate-900 mb-1">No movements yet</h3>
+            <p className="text-sm text-slate-500 mb-4">Start your first movement and inspire others.</p>
             <Link to={createPageUrl('CreateMovement')}>
-              <Button className="bg-gradient-to-r from-[#FFC947] to-[#FFD666] text-slate-900 font-bold rounded-xl h-12 px-6">
+              <Button variant="outline" className="font-semibold rounded-xl h-10 px-5 border-slate-200">
                 Create Movement
               </Button>
             </Link>
@@ -797,10 +782,10 @@ export default function Profile() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
-          className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
+          className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden"
         >
-          <div className="p-6 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-            <h2 className="text-2xl font-bold text-slate-900">Following</h2>
+          <div className="p-5 border-b border-slate-100">
+            <h2 className="text-lg font-bold text-slate-900">Following</h2>
           </div>
           <div className="divide-y divide-slate-100">
             {followedMovements.map((movement) => (
@@ -832,10 +817,10 @@ export default function Profile() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.25 }}
-          className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden"
+          className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden"
         >
-          <div className="p-6 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
-            <h2 className="text-2xl font-bold text-slate-900">Deleted</h2>
+          <div className="p-5 border-b border-slate-100">
+            <h2 className="text-lg font-bold text-slate-900">Deleted</h2>
           </div>
 
           <div className="p-4 sm:p-6 space-y-4">

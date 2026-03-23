@@ -112,8 +112,8 @@ function DailyChallengesDev() {
       try {
         const list = await fetchChallenges();
         return Array.isArray(list) ? list : [];
-      } catch (_err) {
-        void _err;
+      } catch (err) {
+        logError(err, 'Failed to fetch daily challenges');
         return [];
       }
     },

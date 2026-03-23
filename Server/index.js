@@ -575,6 +575,7 @@ const RATE_LIMITS = {
   evidenceSubmit: { max: 10, timeWindow: 60 * 60 * 1000 }, // 1 hour
   commentCreate: { max: 15, timeWindow: 60 * 60 * 1000 }, // 15 per hour
   search: { max: 30, timeWindow: 60 * 1000 }, // 30 per minute
+  email: { max: 5, timeWindow: 60 * 60 * 1000 }, // 5 per hour (unauthenticated email sending)
 };
 
 // NOTE: Safety: enforce max size / length to prevent abuse & excessive resource use.
@@ -877,6 +878,49 @@ function initRealtimeServer() {
           fastify.log.warn({ err: e }, 'WS read ack failed');
         }
       }
+
+      // Typing indicator: lightweight broadcast to other participants.
+      // No DB writes — purely ephemeral.
+      if (type === 'typing') {
+        const conversationId = msg?.conversationId ? String(msg.conversationId) : '';
+        if (!conversationId) return;
+        try {
+          if (!hasDatabaseUrl) {
+            const convo = getMemoryConversationById(conversationId);
+            if (!convo) return;
+            const participants = Array.isArray(convo?.participant_emails)
+              ? convo.participant_emails.map((x) => normalizeEmail(x)).filter(Boolean)
+              : [];
+            if (!participants.includes(byEmail)) return;
+            const others = participants.filter((e) => e !== byEmail);
+            wsBroadcastToEmails(others, {
+              type: 'typing',
+              conversationId,
+              by: byEmail,
+              ts: Date.now(),
+            });
+            return;
+          }
+          if (!dbReady) return;
+          await ensureMessagesTables();
+          const convoRes = await pool.query('SELECT participant_emails FROM conversations WHERE id = $1 LIMIT 1', [conversationId]);
+          const convo = convoRes.rows?.[0] || null;
+          if (!convo) return;
+          const participants = Array.isArray(convo.participant_emails)
+            ? convo.participant_emails.map((x) => normalizeEmail(x)).filter(Boolean)
+            : [];
+          if (!participants.includes(byEmail)) return;
+          const others = participants.filter((e) => e !== byEmail);
+          wsBroadcastToEmails(others, {
+            type: 'typing',
+            conversationId,
+            by: byEmail,
+            ts: Date.now(),
+          });
+        } catch {
+          // Typing indicator failures are non-critical — swallow silently.
+        }
+      }
     });
 
     ws.on('close', () => {
@@ -1055,10 +1099,8 @@ fastify.get('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } }
 
 // Fetch feature flags (requires auth header so internal config is not exposed publicly)
 fastify.get('/feature-flags', async (request, reply) => {
-  const auth = String(request.headers.authorization || '');
-  if (!auth.toLowerCase().startsWith('bearer ')) {
-    return reply.code(401).send({ error: 'Authentication required' });
-  }
+  const user = await requireVerifiedUser(request, reply);
+  if (!user) return;
   if (!isDbAvailable()) {
     // If a DB is configured but temporarily down, fail fast.
     if (hasDatabaseUrl || isProd) return reply.code(503).send({ error: 'Database unavailable' });
@@ -1175,8 +1217,16 @@ fastify.get('/challenges', async (_request, reply) => {
   return reply.send({ challenges: res.rows || [] });
 });
 // --- Feature Flags Table ---
+// Guard: skip DDL if already initialized this process lifetime
+const _tablesInitialized = new Set();
+function _skipIfInit(name) {
+  if (_tablesInitialized.has(name)) return true;
+  _tablesInitialized.add(name);
+  return false;
+}
+
 async function ensureFeatureFlagsTable() {
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable() || _skipIfInit('feature_flags')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS feature_flags (
       id TEXT PRIMARY KEY,
@@ -1193,7 +1243,7 @@ async function ensureFeatureFlagsTable() {
 }
 
 async function ensureChallengesTable() {
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable() || _skipIfInit('challenges')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS challenges (
       id TEXT PRIMARY KEY,
@@ -1213,7 +1263,7 @@ async function ensureChallengesTable() {
 
 // --- Challenge Completions & User Stats Tables ---
 async function ensureChallengeCompletionsTable() {
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable() || _skipIfInit('challenge_completions')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS challenge_completions (
       id TEXT PRIMARY KEY,
@@ -1234,7 +1284,7 @@ async function ensureChallengeCompletionsTable() {
 }
 
 async function ensureUserChallengeStatsTable() {
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable() || _skipIfInit('user_challenge_stats')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_challenge_stats (
       id TEXT PRIMARY KEY,
@@ -1509,8 +1559,10 @@ fastify.delete('/admin/research-mode-configs/:id', { config: { rateLimit: RATE_L
   return reply.send({ ok: true });
 });
 
-// Fetch merged research flags for a user or movement (public, but only returns enabled features)
+// Fetch merged research flags for a user or movement (authenticated)
 fastify.get('/research-flags', async (request, reply) => {
+  const user = await requireVerifiedUser(request, reply);
+  if (!user) return;
   const { user_id, movement_id } = request.query || {};
   if (!isDbAvailable()) {
     if (hasDatabaseUrl || isProd) return reply.code(503).send({ error: 'Database unavailable' });
@@ -1535,7 +1587,7 @@ fastify.get('/research-flags', async (request, reply) => {
 });
 // --- Research Mode Config Table ---
 async function ensureResearchModeConfigTable() {
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable() || _skipIfInit('research_mode_configs')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS research_mode_configs (
       id TEXT PRIMARY KEY,
@@ -1622,7 +1674,7 @@ fastify.get('/admin/community-health', { config: { rateLimit: RATE_LIMITS.admin 
 // Movement field locks (owner-only)
 const memoryMovementLocks = new Map(); // Map<movementId, { title: bool, description: bool, claims: bool }>
 async function ensureMovementLocksTable() {
-  if (!hasDatabaseUrl) return;
+  if (!hasDatabaseUrl || _skipIfInit('movement_locks')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS movement_locks (
       movement_id TEXT PRIMARY KEY,
@@ -1760,7 +1812,7 @@ fastify.get('/movements/:id/collaborator-actions', async (request, reply) => {
 const memoryCollaboratorActionLogs = [];
 
 async function ensureCollaboratorActionLogTable() {
-  if (!hasDatabaseUrl) return;
+  if (!hasDatabaseUrl || _skipIfInit('collaborator_action_logs')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS collaborator_action_logs (
       id TEXT PRIMARY KEY,
@@ -2170,13 +2222,12 @@ try {
 
 // Comma-separated list of admin emails.
 // Example: ADMIN_EMAILS="admin@example.com,other@example.com"
-const DEFAULT_ADMIN_EMAILS = ['calebscott1892@gmail.com'];
+// NOTE: No hardcoded defaults — all admin emails must come from the ADMIN_EMAILS env var.
 const ADMIN_EMAILS = new Set(
   String(process.env.ADMIN_EMAILS || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean)
-    .concat(DEFAULT_ADMIN_EMAILS.map((e) => String(e).trim().toLowerCase()))
 );
 
 // Comma-separated list of moderator emails.
@@ -2406,19 +2457,18 @@ async function notifyMessageRecipients({ conversation, body, senderEmail }) {
   await Promise.all(optedIn.map((email) => sendReportEmail({ to: email, ...message })));
 }
 
-function buildCollaborationInviteEmail({ movementTitle, inviterEmail, role }) {
+function buildCollaborationInviteEmail({ movementTitle, inviterEmail, inviterName, role }) {
   const safeTitle = escapeHtml(String(movementTitle || 'a movement').slice(0, 140));
   const safeInviter = escapeHtml(String(inviterEmail || '').slice(0, 160));
+  const safeInviterName = inviterName ? escapeHtml(String(inviterName).slice(0, 100)) : null;
   const safeRole = escapeHtml(String(role || 'collaborator').slice(0, 40));
+  const inviterDisplay = safeInviterName || safeInviter || 'Someone';
   const subject = `Collaboration invite: ${safeTitle}`;
-  const text = `You have been invited to collaborate on "${movementTitle || 'a movement'}" as ${role || 'collaborator'}.\n` +
-    (inviterEmail ? `Invited by: ${inviterEmail}\n` : '') +
-    `\nOpen People Power to respond.`;
+  const text = `${inviterName || inviterEmail || 'Someone'} invited you to collaborate on "${movementTitle || 'a movement'}" as ${role || 'collaborator'}.\n\nOpen People Power to respond.`;
   const html = `
     <div style="font-family: Arial, sans-serif; line-height: 1.5;">
-      <p>You have been invited to collaborate on <strong>${safeTitle}</strong>.</p>
+      <p><strong>${inviterDisplay}</strong> invited you to collaborate on <strong>${safeTitle}</strong>.</p>
       <p>Role: <strong>${safeRole}</strong></p>
-      ${safeInviter ? `<p>Invited by: ${safeInviter}</p>` : ''}
       <p>Open People Power to respond.</p>
     </div>
   `;
@@ -2429,7 +2479,12 @@ async function notifyCollaborationInvite({ invitedEmail, inviterEmail, movementT
   if (!canSendReportEmail()) return;
   const recipients = await listEmailNotificationRecipients([invitedEmail]);
   if (!recipients.length) return;
-  const message = buildCollaborationInviteEmail({ movementTitle, inviterEmail, role });
+  let inviterName = null;
+  try {
+    const profiles = await getPublicProfilesByEmail([inviterEmail].filter(Boolean));
+    inviterName = profiles.get(inviterEmail)?.display_name || null;
+  } catch (_) { /* fall back to email */ }
+  const message = buildCollaborationInviteEmail({ movementTitle, inviterEmail, inviterName, role });
   await Promise.all(recipients.map((email) => sendReportEmail({ to: email, ...message })));
 }
 
@@ -3040,7 +3095,7 @@ const IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
 const memoryMigrationLogs = [];
 
 async function ensureMigrationLogTable() {
-  if (!hasDatabaseUrl) return;
+  if (!hasDatabaseUrl || _skipIfInit('migration_logs')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS migration_logs (
       id TEXT PRIMARY KEY,
@@ -3312,6 +3367,7 @@ async function ensureMovementsTable() {
 
 async function ensureReportsTable() {
   if (!hasDatabaseUrl) return;
+  if (_skipIfInit('reports')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reports (
       id BIGSERIAL PRIMARY KEY,
@@ -3343,6 +3399,7 @@ async function ensureReportsTable() {
 
 async function ensureIncidentLogsTable() {
   if (!hasDatabaseUrl) return;
+  if (_skipIfInit('incident_logs')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS incident_logs (
       id TEXT PRIMARY KEY,
@@ -3568,6 +3625,7 @@ async function hasPlatformAcknowledgment(email) {
 
 async function ensureMessagesTables() {
   if (!hasDatabaseUrl) return;
+  if (_skipIfInit('messages')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS conversations (
       id TEXT PRIMARY KEY,
@@ -3737,6 +3795,7 @@ async function ensureUserProfilesTable() {
 
 async function ensureNotificationsTable() {
   if (!hasDatabaseUrl) return;
+  if (_skipIfInit('notifications')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS notifications (
       id TEXT PRIMARY KEY,
@@ -3759,6 +3818,7 @@ async function ensureNotificationsTable() {
 
 async function ensureLeadershipRolesTable() {
   if (!hasDatabaseUrl) return;
+  if (_skipIfInit('leadership_roles')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS leadership_roles (
       id TEXT PRIMARY KEY,
@@ -3882,6 +3942,7 @@ async function doesUserFollow(followerEmail, followingEmail) {
 
 async function ensurePublicKeysTable() {
   if (!hasDatabaseUrl) return;
+  if (_skipIfInit('public_keys')) return;
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_public_keys (
       email TEXT PRIMARY KEY,
@@ -13883,6 +13944,7 @@ async function handlePostMyProfile(request, reply) {
     }
 
     const now = nowIso();
+    let updateResult = null;
     if (existing?.id) {
       fastify.log.info(
         {
@@ -13895,7 +13957,7 @@ async function handlePostMyProfile(request, reply) {
         },
         '[profile] persist start'
       );
-      const updateResult = await dbQueryWithRequestDiagnostics(request, {
+      updateResult = await dbQueryWithRequestDiagnostics(request, {
         sql_label: 'me_profile_update',
         query: {
           text: `UPDATE user_profiles
@@ -13980,12 +14042,13 @@ async function handlePostMyProfile(request, reply) {
         },
         '[profile] persist start'
       );
-      await dbQueryWithRequestDiagnostics(request, {
+      updateResult = await dbQueryWithRequestDiagnostics(request, {
         sql_label: 'me_profile_insert',
         query: {
           text: `INSERT INTO user_profiles
          (id, user_id, user_email, display_name, username, bio, profile_photo_url, banner_url, banner_offset_y, is_private, last_seen_update_version, has_seen_tutorial_v2, location, catchment_radius_km, skills, ai_features_enabled, movement_group_opt_out, email_notifications_opt_in, birthdate, age_verified, onboarding_completed, onboarding_current_step, onboarding_interests, onboarding_completed_tutorials, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25)
+         RETURNING *`,
           values: [
             id,
             userId,

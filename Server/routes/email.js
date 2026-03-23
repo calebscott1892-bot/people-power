@@ -28,8 +28,11 @@ function validEmail(value) {
 /** @param {import('fastify').FastifyInstance} fastify */
 module.exports = async function emailRoutes(fastify) {
 
+  // Rate limit config for unauthenticated email-sending endpoints (5 per hour per IP)
+  const emailRateLimit = { config: { rateLimit: { max: 5, timeWindow: 60 * 60 * 1000 } } };
+
   // ---- POST /api/support ----
-  fastify.post('/api/support', async (request, reply) => {
+  fastify.post('/api/support', emailRateLimit, async (request, reply) => {
     try {
       const body = request.body || {};
 
@@ -56,7 +59,7 @@ module.exports = async function emailRoutes(fastify) {
   });
 
   // ---- POST /api/contact ----
-  fastify.post('/api/contact', async (request, reply) => {
+  fastify.post('/api/contact', emailRateLimit, async (request, reply) => {
     try {
       const body = request.body || {};
 
@@ -82,7 +85,7 @@ module.exports = async function emailRoutes(fastify) {
   });
 
   // ---- POST /api/report ----
-  fastify.post('/api/report', async (request, reply) => {
+  fastify.post('/api/report', emailRateLimit, async (request, reply) => {
     try {
       const body = request.body || {};
 

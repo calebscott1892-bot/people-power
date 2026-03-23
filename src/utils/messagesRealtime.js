@@ -176,8 +176,8 @@ export function connectMessagesRealtime({ accessToken, getAccessToken, onEvent, 
       return;
     }
 
-    const wait = Math.min(15_000, retryMs);
-    retryMs = Math.min(30_000, Math.floor(retryMs * 2));
+    const wait = Math.min(5_000, retryMs);
+    retryMs = Math.min(10_000, Math.floor(retryMs * 1.5));
     retryTimer = setTimeout(() => {
       retryTimer = null;
       connect();

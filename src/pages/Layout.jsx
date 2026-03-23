@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentBackendStatus, subscribeBackendStatus } from '../utils/backendStatus';
 import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { createPageUrl } from '@/utils';
-import { Home, User, MessageCircle, Bell, Shield, Plus, Search, LogOut, Loader2 } from 'lucide-react';
+import { Home, User, MessageCircle, Mail, Bell, Shield, Plus, Search, LogOut, Loader2, MessageSquare } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { cn } from "@/lib/utils";
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher';
@@ -78,6 +78,17 @@ function LayoutContent({ children }) {
   const navigate = useNavigate();
   const { t } = useLanguage();
   const queryClient = useQueryClient();
+
+  const getHttpStatus = (err) => {
+    if (!err) return null;
+    const direct = err?.status ?? err?.statusCode;
+    if (typeof direct === 'number') return direct;
+    const resp = err?.response?.status ?? err?.response?.statusCode;
+    if (typeof resp === 'number') return resp;
+    const cause = err?.cause?.status ?? err?.cause?.statusCode;
+    if (typeof cause === 'number') return cause;
+    return null;
+  };
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [updatesOpen, setUpdatesOpen] = useState(false);
@@ -193,7 +204,7 @@ function LayoutContent({ children }) {
     { name: t('home'), page: 'Home', icon: Home },
     { name: searchName, page: 'Search', icon: Search },
     { name: t('create') || 'Create', page: 'CreateMovement', icon: Plus, variant: 'create' },
-    { name: t('notifications') || 'Notifications', page: 'Notifications', icon: Bell },
+    ...(authUser ? [{ name: 'DMs', page: 'Messages', icon: MessageSquare }] : []),
     { name: t('profile'), page: 'Profile', icon: User },
   ];
 
@@ -326,6 +337,17 @@ function LayoutContent({ children }) {
                   <Bell className="w-4 h-4" />
                   <span className="hidden md:inline text-xs font-bold">Updates</span>
                 </button>
+                {authUser ? (
+                  <Link
+                    to={createPageUrl('Messages')}
+                    className="flex items-center gap-2 px-2 py-2 text-slate-600 hover:text-slate-900 rounded-xl transition-colors"
+                    aria-label="Messages"
+                    title="Messages"
+                  >
+                    <Mail className="w-4 h-4" />
+                    <span className="hidden md:inline text-xs font-bold">Messages</span>
+                  </Link>
+                ) : null}
                 {authUser ? (
                   <button
                     type="button"

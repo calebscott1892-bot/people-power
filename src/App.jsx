@@ -138,14 +138,16 @@ export default function App() {
               <Route path="/report" element={<ReportCenter />} />
               <Route path="/help/report" element={<ReportCenter />} />
 
-              {/* Public home */}
+              {/* Public home (browse only — interactions require auth) */}
               <Route path="/" element={<Home />} />
-              <Route path="/movements/:id" element={<MovementDetails />} />
-              <Route path="/movement/:id" element={<MovementDetails />} />
 
               {/* Protected app routes */}
               <Route element={<RequireAuth />}>
                 <Route path="/welcome" element={<Navigate to="/" replace />} />
+
+                {/* Movement detail — auth required to view/interact */}
+                <Route path="/movements/:id" element={<MovementDetails />} />
+                <Route path="/movement/:id" element={<MovementDetails />} />
                 <Route path="/profile" element={<Profile />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/create-movement" element={<CreateMovement />} />

@@ -1,0 +1,119 @@
+<!--
+  People Power — Reauthentication
+  Supabase: Authentication → Email Templates → Reauthentication (OTP)
+  Subject:  Confirm it's you
+  Variable: {{ .Token }}
+  Note:     Reauthentication uses a 6-digit OTP code, not a URL.
+-->
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>Confirm it's you — People Power</title>
+  <!--[if mso]>
+  <noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript>
+  <![endif]-->
+  <style>
+    body,table,td,a{-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}
+    table,td{mso-table-lspace:0pt;mso-table-rspace:0pt}
+    img{-ms-interpolation-mode:bicubic;border:0;height:auto;line-height:100%;outline:none;text-decoration:none}
+    body{margin:0;padding:0;width:100%!important;height:100%!important}
+
+    @media(prefers-color-scheme:dark){
+      .pp-body{background-color:#131620!important}
+      .pp-card{background-color:#1E2235!important}
+      .pp-header{background-color:#141726!important}
+      .pp-heading{color:#EEEEF2!important}
+      .pp-text{color:#B8BAC8!important}
+      .pp-muted{color:#898B9E!important}
+      .pp-footer{color:#6C6E82!important}
+      .pp-divider{border-color:#2E3148!important}
+      .pp-link{color:#8BABFF!important}
+      .pp-code-box{background-color:#141726!important;border-color:#2E3148!important}
+      .pp-code{color:#EEEEF2!important}
+    }
+    [data-ogsc] .pp-body{background-color:#131620!important}
+    [data-ogsc] .pp-card{background-color:#1E2235!important}
+    [data-ogsc] .pp-header{background-color:#141726!important}
+    [data-ogsc] .pp-heading{color:#EEEEF2!important}
+    [data-ogsc] .pp-text{color:#B8BAC8!important}
+    [data-ogsc] .pp-muted{color:#898B9E!important}
+    [data-ogsc] .pp-footer{color:#6C6E82!important}
+    [data-ogsc] .pp-divider{border-color:#2E3148!important}
+    [data-ogsc] .pp-link{color:#8BABFF!important}
+    [data-ogsc] .pp-code-box{background-color:#141726!important;border-color:#2E3148!important}
+    [data-ogsc] .pp-code{color:#EEEEF2!important}
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#F4F4F7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">Your People Power verification code — enter it to continue securely.&#847;&#847;&#847;&#847;&#847;&#847;&#847;&#847;&#847;&#847;&#847;</div>
+
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="pp-body" style="background-color:#F4F4F7;">
+    <tr>
+      <td align="center" style="padding:40px 16px;">
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" class="pp-card" style="background-color:#FFFFFF;border-radius:8px;max-width:520px;width:100%;">
+
+          <!-- Brand bar -->
+          <tr>
+            <td class="pp-header" style="background-color:#0F172A;border-radius:8px 8px 0 0;padding:22px 32px;text-align:center;">
+              <span style="font-size:18px;font-weight:700;color:#FFFFFF;letter-spacing:.4px;">People Power</span>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:36px 32px 16px;">
+              <h1 class="pp-heading" style="margin:0 0 12px;font-size:22px;font-weight:700;color:#1A1D2E;line-height:1.3;">Reauthenticate your account</h1>
+              <p class="pp-text" style="margin:0 0 24px;font-size:15px;color:#4A4D60;line-height:1.6;">To continue with a sensitive action on your People Power account, enter the verification code below. This code is valid for a short time.</p>
+
+              <!-- OTP code box -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="center" style="padding-bottom:28px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                      <tr>
+                        <td class="pp-code-box" align="center" style="background-color:#F6F6F9;border:2px solid #E6E7EB;border-radius:8px;padding:18px 48px;">
+                          <span class="pp-code" style="font-size:32px;font-weight:700;letter-spacing:8px;color:#1A1D2E;font-family:'Courier New',Courier,monospace;">{{ .Token }}</span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <p class="pp-muted" style="margin:0 0 24px;font-size:13px;color:#71738A;line-height:1.5;text-align:center;">Enter this code in the app to continue securely.</p>
+
+              <!-- Divider -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr><td class="pp-divider" style="border-top:1px solid #E6E7EB;font-size:0;line-height:0;height:1px;">&nbsp;</td></tr>
+              </table>
+
+              <p class="pp-muted" style="margin:20px 0 0;font-size:13px;color:#71738A;line-height:1.5;">If you didn't initiate this request, your account may be at risk. Please change your password immediately.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:24px 32px 32px;">
+              <p class="pp-footer" style="margin:0;font-size:12px;color:#9496A8;line-height:1.5;text-align:center;">This is an automated security email. Do not share this code with anyone.</p>
+            </td>
+          </tr>
+        </table>
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;width:100%;">
+          <tr>
+            <td style="padding:20px 32px;text-align:center;">
+              <p class="pp-footer" style="margin:0;font-size:11px;color:#9496A8;line-height:1.5;">People Power&ensp;·&ensp;Unite&ensp;·&ensp;Act&ensp;·&ensp;Transform</p>
+            </td>
+          </tr>
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

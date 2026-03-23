@@ -8,6 +8,7 @@ import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { fetchPublicKey, upsertMyPublicKey } from '@/api/keysClient';
 import { fetchPublicProfileByUsername } from '@/api/userProfileClient';
 import { logError } from '@/utils/logError';
+import { DM_DISABLED, DM_DISABLED_MESSAGE } from '@/config/clientFeatureGates';
 import {
   Dialog,
   DialogContent,
@@ -72,7 +73,7 @@ export default function ShareButton({ movement, profile, variant = "default", la
   const [recipientUsername, setRecipientUsername] = useState('');
   const [sendingDm, setSendingDm] = useState(false);
   const targetType = movement ? 'movement' : profile ? 'profile' : 'movement';
-  const dmDisabled = true;
+  const dmDisabled = DM_DISABLED;
 
   const e2eePromiseRef = useRef(null);
   const loadE2EE = async () => {
@@ -146,9 +147,7 @@ export default function ShareButton({ movement, profile, variant = "default", la
 
   const handleShareToDm = async () => {
     if (dmDisabled) {
-      toast.message(
-        'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
-      );
+      toast.message(DM_DISABLED_MESSAGE);
       return;
     }
 
@@ -286,9 +285,7 @@ export default function ShareButton({ movement, profile, variant = "default", la
                   return;
                 }
                 if (dmDisabled) {
-                  toast.message(
-                    'Direct Messages are temporarily disabled while we upgrade messaging. Please use movement comments or profile links in the meantime.'
-                  );
+                  toast.message(DM_DISABLED_MESSAGE);
                   return;
                 }
                 setDmOpen(true);

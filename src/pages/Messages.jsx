@@ -308,6 +308,11 @@ function MessagesInner() {
   const [groupAvatarFile, setGroupAvatarFile] = useState(null);
   const [groupAvatarPreview, setGroupAvatarPreview] = useState('');
   const [groupPostMode, setGroupPostMode] = useState('owner_only');
+
+  // Typing indicator state: map of conversationId → { by: email, ts: number }
+  const [typingIndicators, setTypingIndicators] = useState({});
+  const typingTimersRef = useRef({});
+  const lastTypingSentRef = useRef(0);
   const [groupPosterSelection, setGroupPosterSelection] = useState([]);
   const [groupAdminSelection, setGroupAdminSelection] = useState([]);
   const [groupAddUsername, setGroupAddUsername] = useState('');
@@ -530,6 +535,14 @@ function MessagesInner() {
           const isActive = String(selectedIdRef.current || '') === conversationId;
           const visible = typeof document !== 'undefined' ? document.visibilityState === 'visible' : true;
 
+          // Clear typing indicator for this conversation (message arrived = done typing)
+          setTypingIndicators((prev) => {
+            if (!prev[conversationId]) return prev;
+            const next = { ...prev };
+            delete next[conversationId];
+            return next;
+          });
+
           // Ensure the inbox contains this conversation, then update preview + unread counts.
           if (conversation) {
             upsertConversationIntoCache(conversation, (cur) => {
@@ -563,6 +576,9 @@ function MessagesInner() {
 
           if (isActive) {
             upsertMessageIntoCache(message, conversationId);
+          } else {
+            // Pre-invalidate so messages are fresh when the user opens this conversation
+            queryClient.invalidateQueries({ queryKey: ['messages', conversationId, myEmailNormalizedRef.current] });
           }
 
           // Acknowledge delivery/read to enable receipts for the sender.
@@ -629,6 +645,27 @@ function MessagesInner() {
           // Keep it simple: refetch the conversation/messages so read receipts are accurate.
           queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalizedRef.current] });
           queryClient.invalidateQueries({ queryKey: ['messages', conversationId, myEmailNormalizedRef.current] });
+          return;
+        }
+
+        if (type === 'typing') {
+          const conversationId = evt?.conversationId ? String(evt.conversationId) : '';
+          const by = normalizeEmail(evt?.by);
+          if (!conversationId || !by) return;
+          const me = myEmailNormalizedRef.current;
+          if (by === me) return; // ignore own typing echo
+          setTypingIndicators((prev) => ({ ...prev, [conversationId]: { by, ts: Date.now() } }));
+          // Auto-clear after 3 seconds of no typing event
+          if (typingTimersRef.current[conversationId]) {
+            clearTimeout(typingTimersRef.current[conversationId]);
+          }
+          typingTimersRef.current[conversationId] = setTimeout(() => {
+            setTypingIndicators((prev) => {
+              const next = { ...prev };
+              delete next[conversationId];
+              return next;
+            });
+          }, 3000);
         }
       },
     });
@@ -642,6 +679,11 @@ function MessagesInner() {
       }
       realtimeRef.current = null;
       setRealtimeStatus('disconnected');
+      // Clean up typing indicator timers
+      for (const timer of Object.values(typingTimersRef.current)) {
+        clearTimeout(timer);
+      }
+      typingTimersRef.current = {};
     };
   }, [accessToken, myEmailNormalized, queryClient, bumpConversationInCache, upsertConversationIntoCache, upsertMessageIntoCache]);
 
@@ -658,6 +700,26 @@ function MessagesInner() {
       }
     }
   }, [realtimeConnected, myEmailNormalized, queryClient]);
+
+  // Visibility change: when user returns to the tab, immediately mark the
+  // active conversation as read and refetch messages to catch any missed.
+  useEffect(() => {
+    function onVisibilityChange() {
+      if (document.visibilityState !== 'visible') return;
+      const activeId = selectedIdRef.current;
+      const me = myEmailNormalizedRef.current;
+      if (!activeId || !me) return;
+      // Send read receipt via WS if connected
+      if (realtimeRef.current) {
+        realtimeRef.current.send({ type: 'conversation:read', conversationId: activeId });
+      }
+      // Refetch messages + conversations to sync any gap while tab was hidden
+      queryClient.invalidateQueries({ queryKey: ['messages', activeId, me] });
+      queryClient.invalidateQueries({ queryKey: ['conversations', me] });
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [queryClient]);
 
   // Ensure an identity keypair exists locally and publish the public key to the server.
   useEffect(() => {
@@ -1209,7 +1271,8 @@ function MessagesInner() {
     if (Number(selectedConversation?.unread_count || 0) > 0) {
       markReadMutation.mutate(String(selectedConversation.id));
     }
-  }, [selectedConversation?.id, selectedConversation?.unread_count, myEmailNormalized, markReadMutation]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedConversation?.id, selectedConversation?.unread_count, myEmailNormalized]);
 
   useEffect(() => {
     if (messagesError && messagesErrorObj) {
@@ -2153,7 +2216,9 @@ function MessagesInner() {
                                 <div className={cn('text-[11px] font-bold inline-flex items-center gap-1', mine ? 'text-white/80' : 'text-slate-400')}>
                                   {formatTime(m?.created_at)}
                                   {mine ? (
-                                    otherHasRead || otherHasDelivered ? (
+                                    otherHasRead ? (
+                                      <CheckCheck className="w-3.5 h-3.5 text-sky-300" />
+                                    ) : otherHasDelivered ? (
                                       <CheckCheck className="w-3.5 h-3.5" />
                                     ) : (
                                       <Check className="w-3.5 h-3.5" />
@@ -2216,6 +2281,17 @@ function MessagesInner() {
                         );
                       })}
                       <div ref={messagesEndRef} />
+                      {/* Typing indicator */}
+                      {selectedId && typingIndicators[selectedId] ? (
+                        <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-slate-500 font-semibold animate-pulse">
+                          <span className="inline-flex gap-0.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </span>
+                          <span>{typingIndicators[selectedId].by.split('@')[0]} is typing…</span>
+                        </div>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -2318,7 +2394,17 @@ function MessagesInner() {
                     <Input
                       ref={draftInputRef}
                       value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
+                      onChange={(e) => {
+                        setDraft(e.target.value);
+                        // Send typing indicator (throttled: max once per 2s)
+                        if (selectedId && realtimeRef.current) {
+                          const now = Date.now();
+                          if (now - lastTypingSentRef.current > 2000) {
+                            lastTypingSentRef.current = now;
+                            realtimeRef.current.send({ type: 'typing', conversationId: selectedId });
+                          }
+                        }
+                      }}
                       placeholder="Write a message..."
                       className="h-12 rounded-xl border-2"
                       disabled={cannotReply || groupReadOnly}
