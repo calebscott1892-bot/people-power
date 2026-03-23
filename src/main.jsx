@@ -8,6 +8,7 @@ import { AuthProvider } from '@/auth/AuthProvider';
 import '@/i18n';
 import { scrubLegacyCoordinatesFromLocalUserProfiles } from '@/utils/locationPrivacy';
 import { createPeoplePowerQueryClient } from '@/lib/queryClient';
+import { hideSplashScreen, configureKeyboard, setStatusBarDark } from '@/utils/native';
 
 import './index.css';
 
@@ -17,6 +18,11 @@ try {
 } catch {
   // ignore
 }
+
+// Native shell init — safe no-ops in the browser.
+hideSplashScreen();
+configureKeyboard();
+setStatusBarDark();
 
 const queryClient = createPeoplePowerQueryClient();
 

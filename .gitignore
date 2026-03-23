@@ -49,3 +49,11 @@ Server/dev.db-wal
 # Playwright
 /test-results/
 /playwright-report/avatar.png
+
+# Capacitor iOS — keep project structure, ignore build artifacts
+ios/App/App/public/
+ios/App/Pods/
+ios/DerivedData/
+ios/.build/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
