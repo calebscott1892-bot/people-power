@@ -14,7 +14,7 @@ import MovementCard from '@/components/home/MovementCard';
 import LocationPicker from '@/components/profile/LocationPicker';
 import AIMovementAssistant from '@/components/creation/AIMovementAssistant';
 import { uploadFile, uploadMovementMedia } from '@/api/uploadsClient';
-import toast from 'react-hot-toast';
+import { toast } from 'sonner';
 import Filter from 'bad-words';
 import { checkActionAllowed, formatWaitMs } from '@/utils/antiBrigading';
 import { logError } from '@/utils/logError';

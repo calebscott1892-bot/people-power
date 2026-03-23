@@ -102,7 +102,7 @@ function LayoutContent({ children }) {
   const profileEmail = authUser?.email ? String(authUser.email) : null;
   const accessToken = session?.access_token ? String(session.access_token) : null;
 
-  const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching } = useQuery({
+  const { data: userProfile, isLoading: userProfileLoading, isFetching: userProfileFetching, error: userProfileError } = useQuery({
     queryKey: queryKeys.userProfile.me(profileEmail),
     enabled: !!profileEmail && !!accessToken,
     // Profile staleTime is generous: we have manual visibility-change refetch
@@ -136,10 +136,14 @@ function LayoutContent({ children }) {
         }
       }
     },
-    onError: (e) => {
-      toastFriendlyError(e, "Couldn't load your profile");
-    },
   });
+
+  // React Query v5 removed onError from useQuery options — handle via effect.
+  useEffect(() => {
+    if (userProfileError) {
+      toastFriendlyError(userProfileError, "Couldn't load your profile");
+    }
+  }, [userProfileError]);
 
   const hasSeenTutorialV2 = !!userProfile?.has_seen_tutorial_v2;
   const shouldShowTutorialPrompt =
@@ -467,7 +471,7 @@ function LayoutContent({ children }) {
       {/* Fixed bottom nav */}
       {!hideBottomStack ? (
       <div className="fixed inset-x-0 bottom-0 z-50">
-        <nav className="w-full bg-white border-t border-slate-200 shadow-lg">
+        <nav className="w-full bg-white border-t border-slate-200 shadow-lg pb-[env(safe-area-inset-bottom)]">
           <div className="max-w-7xl mx-auto px-4 sm:px-6">
             <div className="flex items-center justify-around px-2 py-2">
               {navItems.map((item) => {

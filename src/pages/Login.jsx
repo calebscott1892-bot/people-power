@@ -194,6 +194,10 @@ export default function Login() {
         setStatus(authErrorMessage || 'Sign-in is temporarily unavailable.');
         return;
       }
+      if (mode === 'signup' && String(password || '').length < 6) {
+        setStatus('Password must be at least 6 characters.');
+        return;
+      }
       if (mode === 'signup' && String(password || '').length > 128) {
         setStatus('Password must be 128 characters or fewer.');
         return;

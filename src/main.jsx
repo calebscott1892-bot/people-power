@@ -8,7 +8,6 @@ import { AuthProvider } from '@/auth/AuthProvider';
 import '@/i18n';
 import { scrubLegacyCoordinatesFromLocalUserProfiles } from '@/utils/locationPrivacy';
 import { createPeoplePowerQueryClient } from '@/lib/queryClient';
-import { SERVER_BASE } from '@/api/serverBase';
 
 import './index.css';
 

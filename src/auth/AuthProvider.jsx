@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { getSupabaseClient, supabaseConfigError } from '@/api/supabaseClient';
-import toast from 'react-hot-toast';
+import { toast } from 'sonner';
 import { SERVER_BASE } from '@/api/serverBase';
 import { fetchMyProfile } from '@/api/userProfileClient';
 import { upsertMyPublicKey } from '@/api/keysClient';

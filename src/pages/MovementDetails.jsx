@@ -1130,16 +1130,13 @@ export default function MovementDetails() {
     return pages.flatMap((p) => (Array.isArray(p) ? p : []));
   }, [evidencePages]);
 
-  const { data: collaboratorRecords = [] } = useQuery({
+  const { data: collaboratorRecords = [], error: collaboratorsError } = useQuery({
     queryKey: ['movementCollaborators', movementId, myEmail],
     enabled: !!movementId && !!accessToken,
     queryFn: async () => {
       return await listMovementCollaborators(movementId, { accessToken });
     },
     retry: 1,
-    onError: (e) => {
-      toastFriendlyError(e, 'Failed to load collaborators');
-    },
   });
 
   const myCollaboratorRole = useMemo(() => {
@@ -1503,17 +1500,22 @@ export default function MovementDetails() {
     return () => window.clearTimeout(t);
   }, [isTeamMember, location?.hash]);
 
-  const { data: userProfile = null } = useQuery({
+  const { data: userProfile = null, error: userProfileError } = useQuery({
     queryKey: queryKeys.userProfile.me(myEmail),
     enabled: !!accessToken,
     retry: 0,
     queryFn: async () => {
       return await fetchMyProfile({ accessToken });
     },
-    onError: (e) => {
-      toastFriendlyError(e, 'Failed to load your profile');
-    },
   });
+
+  // React Query v5 removed onError from useQuery — handle via effects.
+  useEffect(() => {
+    if (collaboratorsError) toastFriendlyError(collaboratorsError, 'Failed to load collaborators');
+  }, [collaboratorsError]);
+  useEffect(() => {
+    if (userProfileError) toastFriendlyError(userProfileError, 'Failed to load your profile');
+  }, [userProfileError]);
 
   const aiOptIn = useMemo(() => {
     if (!myEmail) return false;

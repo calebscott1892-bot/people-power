@@ -228,7 +228,7 @@ export function installAuthFetch() {
         }
       }
 
-      return originalFetch(input, {
+      return originalFetch(url, {
         ...requestInit,
         headers: headersNow,
       });

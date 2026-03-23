@@ -158,6 +158,10 @@ export function connectMessagesRealtime({ accessToken, getAccessToken, onEvent, 
 
     socket.onclose = () => {
       socket = null;
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
       emitStatus('disconnected');
       failures += openedOnce ? 1 : 2;
       scheduleReconnectOrDisable();

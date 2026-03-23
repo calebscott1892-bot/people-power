@@ -1,7 +1,5 @@
 import React, { Suspense } from 'react';
-import './App.css';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { Toaster } from 'react-hot-toast';
 import { Toaster as SonnerToaster } from 'sonner';
 import Layout from '@/pages/Layout';
 import RequireAuth from '@/components/auth/RequireAuth';
@@ -189,7 +187,6 @@ export default function App() {
           </Routes>
         </BackNavProvider>
       </Suspense>
-      <Toaster position="top-right" />
       <SonnerToaster position="top-right" richColors />
     </>
   );

@@ -1720,7 +1720,7 @@ function MessagesInner() {
               </div>
             </div>
 
-            <div className="px-4 pb-4 flex gap-2">
+            <div className="px-4 pb-4 flex gap-2 overflow-x-auto">
               <Button
                 variant={box === 'messages' ? 'default' : 'outline'}
                 className={cn('h-10 rounded-xl font-bold', box === 'messages' && 'bg-[#3A3DFF] hover:bg-[#2A2DDD]')}
@@ -2449,7 +2449,7 @@ function MessagesInner() {
       />
 
       <Dialog open={groupSettingsOpen} onOpenChange={setGroupSettingsOpen}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="sm:max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-xl font-black">Group settings</DialogTitle>
           </DialogHeader>
