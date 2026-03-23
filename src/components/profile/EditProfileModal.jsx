@@ -111,6 +111,22 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   const [exporting, setExporting] = useState(false);
   const queryClient = useQueryClient();
 
+  // True while any async operation is in-flight — blocks accidental close.
+  const isBusy = saving || uploading || uploadingBanner;
+
+  // Guard: prevent Radix Dialog close (X / overlay / Escape) while busy.
+  const handleOpenChange = (nextOpen) => {
+    if (!nextOpen && isBusy) return;          // block close while saving
+    if (!nextOpen) {
+      // User is cancelling — discard pending uploads that haven't been persisted.
+      setPendingPhotoFile(null);
+      setPendingBannerObjectKey(null);
+      onClose();
+      return;
+    }
+    // opening — shouldn't normally happen through this path
+  };
+
   const pendingGuard = usePendingGuard('edit-profile', { timeoutMs: 10_000 });
   const lastBannerFileRef = useRef(null);
 
@@ -219,8 +235,13 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
       }
       setUsernameError('');
       setDebugInfo(null);
-      toast.success('Profile updated!');
-      onClose();
+      setPendingBannerObjectKey(null);
+      setPendingPhotoFile(null);
+      // Only show success + close if the modal is still mounted & open.
+      if (mountedRef.current) {
+        toast.success('Profile updated!');
+        onClose();
+      }
     },
     onError: (err) => {
       if (err?.code === 'USERNAME_TAKEN') {
@@ -479,8 +500,12 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
   };
 
   return (
-    <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-4xl max-h-[90vh] overflow-y-auto">
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent
+        className="sm:max-w-4xl max-h-[90vh] overflow-y-auto"
+        onPointerDownOutside={(e) => { if (isBusy) e.preventDefault(); }}
+        onEscapeKeyDown={(e) => { if (isBusy) e.preventDefault(); }}
+      >
         <DialogHeader>
           <DialogTitle className="text-xl font-black">Edit Profile</DialogTitle>
           <DialogDescription className="text-sm text-slate-600 font-semibold">
@@ -869,9 +894,10 @@ export default function EditProfileModal({ open, onClose, profile, userEmail, us
           <div className="flex gap-3 pt-2">
             <Button
               type="button"
-              onClick={onClose}
+              onClick={() => handleOpenChange(false)}
               variant="outline"
               className="flex-1 font-bold rounded-xl border-2"
+              disabled={isBusy}
             >
               Cancel
             </Button>
