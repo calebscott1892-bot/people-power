@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -116,10 +116,17 @@ async function waitForUrlOk(url, { name, timeoutMs = 40_000, intervalMs = 250 } 
 
 function spawnDetached(command, args, { logFile, env } = {}) {
   const outFd = fs.openSync(logFile, 'a');
-  const child = spawn(command, args, {
+  let spawnCommand = command;
+  let spawnArgs = args;
+  if (process.platform === 'win32' && /\.cmd$/i.test(command)) {
+    spawnCommand = process.env.ComSpec || 'cmd.exe';
+    spawnArgs = ['/d', '/c', command, ...args];
+  }
+  const child = spawn(spawnCommand, spawnArgs, {
     env: { ...process.env, ...(env || {}) },
     stdio: ['ignore', outFd, outFd],
-    detached: true,
+    detached: process.platform !== 'win32',
+    windowsHide: true,
   });
   child.unref();
   return child;
@@ -224,8 +231,12 @@ async function main() {
     for (const child of [frontendChild, backendChild]) {
       if (!child) continue;
       try {
-        // kill process group
-        process.kill(-child.pid, 'SIGTERM');
+        if (process.platform === 'win32') {
+          spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+        } else {
+          // kill process group
+          process.kill(-child.pid, 'SIGTERM');
+        }
       } catch {
         // ignore
       }
@@ -262,7 +273,6 @@ async function main() {
       logFile: backendLog,
       env: {
         PEOPLEPOWER_BACKEND_PORT: BACKEND_PORT,
-        C4_BACKEND_PORT: BACKEND_PORT,
         PORT: BACKEND_PORT,
         VITE_API_BASE_URL: BACKEND_BASE,
         VITE_BACKEND_BASE: BACKEND_BASE,
@@ -281,7 +291,6 @@ async function main() {
       logFile: frontendLog,
       env: {
         PEOPLEPOWER_BACKEND_PORT: BACKEND_PORT,
-        C4_BACKEND_PORT: BACKEND_PORT,
         VITE_BACKEND_PORT: BACKEND_PORT,
         VITE_API_BASE_URL: BACKEND_BASE,
         VITE_BACKEND_BASE: BACKEND_BASE,

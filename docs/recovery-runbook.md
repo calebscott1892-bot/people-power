@@ -143,7 +143,51 @@ Manual two-user test:
 
 Use this only after local proof works.
 
-Backend option:
+Render Blueprint option:
+
+This repo includes `render.yaml` for a Git-backed Render Blueprint:
+
+- `people-power-api`: Fastify backend, health check `/health`.
+- `people-power-web`: static Vite frontend with SPA rewrites.
+
+Blueprint link for this repo:
+
+```text
+https://dashboard.render.com/blueprint/new?repo=https://github.com/calebscott1892-bot/people-power
+```
+
+The Blueprint deliberately does not create a database. Fill these values in the
+Render Dashboard when applying it.
+
+Backend `people-power-api`:
+
+```env
+DATABASE_URL=<postgres connection string>
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=<anon key>
+SUPABASE_SERVICE_ROLE_KEY=<service role key>
+ADMIN_EMAILS=<admin email list>
+ALLOWED_ORIGINS=<frontend origin, comma-separated if needed>
+```
+
+Frontend `people-power-web`:
+
+```env
+VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+VITE_SUPABASE_ANON_KEY=<anon key>
+VITE_API_BASE_URL=https://<backend-service>.onrender.com
+VITE_BACKEND_BASE=https://<backend-service>.onrender.com
+VITE_SITE_URL=https://<frontend-service-or-custom-domain>
+```
+
+After deploy, verify:
+
+```powershell
+curl.exe https://<backend-service>.onrender.com/health
+curl.exe https://<frontend-service-or-custom-domain>/
+```
+
+Manual backend option:
 
 - Render free web service.
 - Root Directory: `Server`

@@ -1086,7 +1086,7 @@ fastify.post('/admin/feature-flags', { config: { rateLimit: RATE_LIMITS.admin } 
   if (!name) return reply.code(400).send({ error: 'Flag name required' });
   await ensureFeatureFlagsTable();
   // Upsert by name
-  const id = uuidv4();
+  const id = randomUUID();
   const now = new Date().toISOString();
   const res = await pool.query(
     `INSERT INTO feature_flags (id, name, enabled, rollout_percentage, description, created_at, updated_at)
@@ -1558,7 +1558,7 @@ fastify.post('/admin/research-mode-configs', { config: { rateLimit: RATE_LIMITS.
   if ((scope === 'user' || scope === 'movement') && !scope_id) return reply.code(400).send({ error: 'scope_id required' });
   await ensureResearchModeConfigTable();
   // Upsert by (scope, scope_id)
-  const id = uuidv4();
+  const id = randomUUID();
   const now = new Date().toISOString();
   const res = await pool.query(
     `INSERT INTO research_mode_configs (id, scope, scope_id, enabled_features, created_at, updated_at)
