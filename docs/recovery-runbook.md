@@ -129,6 +129,18 @@ Expected:
 
 Auth and realtime smoke tests:
 
+One-command proof:
+
+```powershell
+npm run verify:local
+```
+
+This starts disposable local services on free ports, verifies backend/Supabase
+health, runs the SPA auth e2e, and runs a cross-process DM realtime smoke test
+with sender and receiver connected to different backend processes.
+
+Individual checks:
+
 ```powershell
 npm run e2e:auth
 ```

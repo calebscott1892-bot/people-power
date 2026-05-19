@@ -125,7 +125,6 @@ export async function syncUserWithBackend() {
     timeoutMs: 12_000,
     headers: {
       'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
     },
   });
   if (!res.ok) throw new Error('Failed to sync user with backend');
