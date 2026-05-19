@@ -10,9 +10,8 @@ current production infrastructure.
 - The backend `DATABASE_URL` currently points at a Render Postgres host, and local
   connection attempts fail with `Connection terminated unexpectedly`.
 - The configured Supabase project host does not currently resolve from this machine.
-- There is no `render.yaml`, Dockerfile, Procfile, or Supabase config directory in
-  this repo, so hosted infrastructure is controlled mostly from dashboards and env
-  vars.
+- The repo now has `render.yaml` and `supabase/config.toml`, but the hosted Render
+  and Supabase resources still need valid dashboard-side env vars and active services.
 
 ## First Check
 
@@ -42,6 +41,18 @@ Install dependencies:
 npm ci
 npm --prefix Server ci
 ```
+
+Fast path:
+
+```powershell
+npm run dev:local
+```
+
+This starts local Supabase if needed, then starts the backend and frontend with
+process env values from `supabase status -o env`. It does not write keys to
+`.env.local` or `Server/.env`.
+
+Manual path:
 
 Start local Supabase:
 

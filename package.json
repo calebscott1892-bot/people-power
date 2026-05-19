@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "npm run dev:all",
+    "dev:local": "node scripts/dev-local.mjs",
     "dev:server": "npm --prefix Server run dev",
     "dev:client": "sh -lc 'export PEOPLEPOWER_BACKEND_PORT=\"${PEOPLEPOWER_BACKEND_PORT:-3001}\"; export VITE_BACKEND_PORT=\"${PEOPLEPOWER_BACKEND_PORT}\"; export VITE_BACKEND_BASE=\"http://127.0.0.1:${PEOPLEPOWER_BACKEND_PORT}\"; if [ -n \"${C4_PROOF_PACK:-}\" ]; then export VITE_C4_PROOF_PACK=1; fi; exec vite --host 127.0.0.1 --port 5173 --strictPort'",
     "dev:client:worker": "sh -lc 'export VITE_BACKEND_PORT=\"${C4_BACKEND_PORT:-8787}\"; export VITE_BACKEND_BASE=\"http://127.0.0.1:${C4_BACKEND_PORT:-8787}\"; if [ -n \"${C4_PROOF_PACK:-}\" ]; then export VITE_C4_PROOF_PACK=1; fi; exec vite --host 127.0.0.1 --port 5173 --strictPort'",
