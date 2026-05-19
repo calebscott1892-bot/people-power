@@ -438,6 +438,7 @@ export async function fetchConversationsPage(options) {
 
   try {
     const res = await httpFetch(url.toString(), {
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         ...authHeaders(accessToken),
@@ -645,6 +646,7 @@ export async function fetchMessagesPage(conversationId, options) {
 
   try {
     const res = await httpFetch(url.toString(), {
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         ...authHeaders(accessToken),

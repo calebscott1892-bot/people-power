@@ -55,6 +55,28 @@ function shouldTreat401AsExpired(responseText) {
   );
 }
 
+function classifyBackendHtmlError(res, responseText) {
+  const ct = res?.headers?.get?.('content-type') || '';
+  const text = String(responseText || '');
+  const lower = text.toLowerCase();
+  const looksHtml = ct.includes('text/html') || lower.includes('<html') || lower.includes('<!doctype html');
+  if (!looksHtml) return null;
+
+  if (res?.status === 503 && lower.includes('service has been suspended')) {
+    return {
+      name: 'BackendSuspendedError',
+      code: 'BACKEND_SUSPENDED',
+      message: 'Backend service is suspended on Render.',
+    };
+  }
+
+  return {
+    name: 'BackendHtmlError',
+    code: 'BACKEND_HTML_ERROR',
+    message: `Backend returned an HTML error page instead of JSON (HTTP ${res?.status || 'unknown'}).`,
+  };
+}
+
 async function readResponseTextSafe(res) {
   try {
     return await res.clone().text();
@@ -257,6 +279,27 @@ export function httpFetch(input, init) {
     if (requestId) captureRequestId({ endpoint, request_id: requestId });
 
     if (!res.ok) {
+      if (isBackend) {
+        const text = await readResponseTextSafe(res);
+        const classified = classifyBackendHtmlError(res, text);
+        if (classified) {
+          const err = new Error(classified.message);
+          err.name = classified.name;
+          err.code = classified.code;
+          err.status = res.status;
+          captureRequestDebugInfo({
+            label: label || null,
+            endpoint,
+            method,
+            status: res.status,
+            request_id: requestId || null,
+            elapsed_ms: Math.round(Number(elapsedMs) || 0),
+            error_message: classified.message,
+          });
+          throw err;
+        }
+      }
+
       captureRequestDebugInfo({
         label: label || null,
         endpoint,

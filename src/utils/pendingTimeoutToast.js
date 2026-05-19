@@ -2,7 +2,7 @@ import { toast } from 'sonner';
 import { copyRequestDebugInfoToClipboard, getLastRequestDebugInfo } from '@/utils/requestDebug';
 
 export function showPendingTimeoutToast({ retry } = {}) {
-  toast.error("Couldn't sync. Tap to retry.", {
+  toast.message('Still syncing. Tap retry if it does not finish.', {
     action: typeof retry === 'function' ? { label: 'Retry', onClick: retry } : undefined,
     cancel: {
       label: 'Copy debug info',

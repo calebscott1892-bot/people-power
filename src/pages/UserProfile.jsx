@@ -31,7 +31,6 @@ import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { computeBoostsEarned, getSoftTrustMarkers } from '@/utils/trustMarkers';
 import { queryKeys } from '@/lib/queryKeys';
 import { usePendingGuard } from '@/hooks/usePendingGuard';
-import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 import {
   captureRequestDebugInfo,
   copyRequestDebugInfoToClipboard,
@@ -90,7 +89,7 @@ export default function UserProfile() {
   const [showGiftModal, setShowGiftModal] = useState(false);
   const [followListOpen, setFollowListOpen] = useState(false);
   const [followListMode, setFollowListMode] = useState('followers');
-  const followPendingGuard = usePendingGuard('Follow/Unfollow');
+  const followPendingGuard = usePendingGuard('Follow/Unfollow', { timeoutMs: 30_000 });
   const queryClient = useQueryClient();
   const pendingFollowValueRef = useRef(null);
 
@@ -357,24 +356,8 @@ export default function UserProfile() {
     if (followBusy) return;
     pendingFollowValueRef.current = desired;
 
-    const retry = () => submitFollow(desired);
-
     setFollowBusy(true);
-    followPendingGuard.start({
-      retry,
-      onTimeout: () => {
-        setFollowBusy(false);
-        captureRequestDebugInfo({
-          label: 'Follow/Unfollow',
-          endpoint: resolvedProfileEmail ? `/user/${encodeURIComponent(String(resolvedProfileEmail))}/follow` : '/user/:email/follow',
-          method: 'POST',
-          elapsed_ms: followPendingGuard.timeoutMs,
-          error_message: 'Timed out after 20s',
-        });
-        showPendingTimeoutToast({ retry });
-        followPendingGuard.stop();
-      },
-    });
+    followPendingGuard.start();
 
     followMutation.mutate(desired);
   };

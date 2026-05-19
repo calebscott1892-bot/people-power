@@ -621,6 +621,11 @@ const wsClientsByEmail = new Map(); // email -> Set<WebSocket>
 const wsEmailByClient = new WeakMap(); // WebSocket -> email
 let realtimeWss = null;
 let realtimeInitialized = false;
+const REALTIME_PG_CHANNEL = 'people_power_realtime';
+const REALTIME_NODE_ID = `pp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let realtimePgListener = null;
+let realtimePgListenerStarting = false;
+let realtimePgReconnectTimer = null;
 
 function wsSafeSend(ws, payload) {
   try {
@@ -631,14 +636,31 @@ function wsSafeSend(ws, payload) {
   }
 }
 
-function wsBroadcastToEmails(emails, payload) {
+function normalizeRealtimeEmails(emails) {
   const list = Array.isArray(emails) ? emails : [];
-  const unique = Array.from(new Set(list.map((e) => normalizeEmail(e)).filter(Boolean)));
+  return Array.from(new Set(list.map((e) => normalizeEmail(e)).filter(Boolean)));
+}
+
+function wsBroadcastToEmailsLocal(emails, payload) {
+  const unique = normalizeRealtimeEmails(emails);
   for (const email of unique) {
     const set = wsClientsByEmail.get(email);
     if (!set || set.size === 0) continue;
     for (const ws of set) wsSafeSend(ws, payload);
   }
+}
+
+function wsBroadcastToEmails(emails, payload) {
+  const unique = normalizeRealtimeEmails(emails);
+  if (!unique.length || !payload || typeof payload !== 'object') return;
+  wsBroadcastToEmailsLocal(unique, payload);
+  publishRealtimeEventToPg(unique, payload).catch((err) => {
+    try {
+      fastify.log.warn({ err, type: payload?.type }, 'Realtime pg notify failed');
+    } catch {
+      // ignore
+    }
+  });
 }
 
 async function getAuthedEmailFromAccessToken(token) {
@@ -1030,7 +1052,7 @@ const ALLOWED_UPLOAD_MIME_TYPES = [
 const IMAGE_ONLY_UPLOAD_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
 
 // --- Core requires ---
-const { Pool } = require('pg');
+const { Pool, Client } = require('pg');
 const { z } = require('zod');
 const BadWordsFilter = require('bad-words');
 const { createClient } = require('@supabase/supabase-js');
@@ -2851,8 +2873,32 @@ const { connectionString, stripped } = sanitizeDatabaseUrlForPg(process.env.DATA
 
 fastify.log.info({ strippedSslParams: stripped, rejectUnauthorized }, '[storage] pg ssl config');
 
-function createPgPool({ useSsl }) {
+function getPgSslConfig({ useSsl }) {
   const shouldUseSsl = !!useSsl || !!forcePoolerSslConfig;
+  if (!shouldUseSsl) return null;
+
+  // Render Postgres often requires TLS; prefer permissive verification in production.
+  // Local dev can opt back into strict verification via DATABASE_SSL_REJECT_UNAUTHORIZED=true.
+  // Supabase session pooler requires SNI and typically uses a cert that may not validate
+  // in some hosted environments. When targeting the pooler (or sslmode=require), force
+  // permissive verification + servername.
+  if (forcePoolerSslConfig && databaseUrlHostForPgSslServername) {
+    return { rejectUnauthorized: false, servername: databaseUrlHostForPgSslServername };
+  }
+
+  if (rejectUnauthorized && !isProd) {
+    return databaseUrlHostForPgSslServername
+      ? { rejectUnauthorized: true, servername: databaseUrlHostForPgSslServername }
+      : { rejectUnauthorized: true };
+  }
+
+  return databaseUrlHostForPgSslServername
+    ? { rejectUnauthorized: false, servername: databaseUrlHostForPgSslServername }
+    : { rejectUnauthorized: false };
+}
+
+function createPgPool({ useSsl }) {
+  const ssl = getPgSslConfig({ useSsl });
   return new Pool({
     connectionString,
     keepAlive: true,
@@ -2869,30 +2915,20 @@ function createPgPool({ useSsl }) {
       return Number.isFinite(raw) && raw > 0 ? raw : 5;
     })(),
     allowExitOnIdle: true,
-    ...(shouldUseSsl
-      ? {
-          // Render Postgres often requires TLS; prefer permissive verification in production.
-          // Local dev can opt back into strict verification via DATABASE_SSL_REJECT_UNAUTHORIZED=true.
-          ssl: (() => {
-            // Supabase session pooler requires SNI and typically uses a cert that may not validate
-            // in some hosted environments. When targeting the pooler (or sslmode=require), force
-            // permissive verification + servername.
-            if (forcePoolerSslConfig && databaseUrlHostForPgSslServername) {
-              return { rejectUnauthorized: false, servername: databaseUrlHostForPgSslServername };
-            }
+    ...(ssl ? { ssl } : null),
+  });
+}
 
-            if (rejectUnauthorized && !isProd) {
-              return databaseUrlHostForPgSslServername
-                ? { rejectUnauthorized: true, servername: databaseUrlHostForPgSslServername }
-                : { rejectUnauthorized: true };
-            }
-
-            return databaseUrlHostForPgSslServername
-              ? { rejectUnauthorized: false, servername: databaseUrlHostForPgSslServername }
-              : { rejectUnauthorized: false };
-          })(),
-        }
-      : null),
+function createPgClient({ useSsl }) {
+  const ssl = getPgSslConfig({ useSsl });
+  return new Client({
+    connectionString,
+    keepAlive: true,
+    connectionTimeoutMillis: (() => {
+      const raw = Number(process.env.PG_CONNECT_TIMEOUT_MS || 15_000);
+      return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
+    })(),
+    ...(ssl ? { ssl } : null),
   });
 }
 
@@ -2910,6 +2946,166 @@ function wrapPoolQueryGuard(p) {
 }
 
 let pool = wrapPoolQueryGuard(createPgPool({ useSsl: shouldUseSsl }));
+
+function compactRealtimePayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const type = payload?.type ? String(payload.type) : '';
+  const conversationId = payload?.conversationId ? String(payload.conversationId) : null;
+
+  if (type === 'typing') {
+    // Keep typing indicators process-local. Publishing every keypress through
+    // Postgres adds load without affecting message correctness.
+    return null;
+  }
+
+  if (type === 'message:new') {
+    const messageId = payload?.message?.id ? String(payload.message.id) : null;
+    if (!conversationId || !messageId) return null;
+    return { type, conversationId, messageId };
+  }
+
+  if (type === 'message:updated' || type === 'message:reaction') {
+    const messageId = payload?.message?.id ? String(payload.message.id) : (payload?.messageId ? String(payload.messageId) : null);
+    if (!conversationId || !messageId) return null;
+    return { type: 'message:updated', conversationId, messageId };
+  }
+
+  if (type === 'conversation:updated') {
+    if (!conversationId) return null;
+    return { type, conversationId };
+  }
+
+  return payload;
+}
+
+async function hydrateRealtimePayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const type = payload?.type ? String(payload.type) : '';
+
+  if (type === 'message:new') {
+    const conversationId = payload?.conversationId ? String(payload.conversationId) : '';
+    const messageId = payload?.messageId ? String(payload.messageId) : '';
+    if (!conversationId || !messageId || !isDbAvailable()) return null;
+    const [messageRes, convoRes] = await Promise.all([
+      pool.query('SELECT * FROM messages WHERE id = $1 LIMIT 1', [messageId]),
+      pool.query('SELECT * FROM conversations WHERE id = $1 LIMIT 1', [conversationId]),
+    ]);
+    const message = messageRes.rows?.[0] || null;
+    const conversation = convoRes.rows?.[0] || null;
+    if (!message || !conversation) return null;
+    return { type, conversationId, message, conversation };
+  }
+
+  if (type === 'message:updated' || type === 'message:reaction') {
+    const conversationId = payload?.conversationId ? String(payload.conversationId) : '';
+    const messageId = payload?.messageId ? String(payload.messageId) : '';
+    if (!conversationId || !messageId || !isDbAvailable()) return null;
+    const messageRes = await pool.query('SELECT * FROM messages WHERE id = $1 LIMIT 1', [messageId]);
+    const message = messageRes.rows?.[0] || null;
+    if (!message) return null;
+    return { type: 'message:updated', conversationId, message };
+  }
+
+  if (type === 'conversation:updated') {
+    const conversationId = payload?.conversationId ? String(payload.conversationId) : '';
+    if (!conversationId || !isDbAvailable()) return null;
+    const convoRes = await pool.query('SELECT * FROM conversations WHERE id = $1 LIMIT 1', [conversationId]);
+    const conversation = convoRes.rows?.[0] || null;
+    if (!conversation) return null;
+    return { type, conversationId, conversation };
+  }
+
+  return payload;
+}
+
+async function publishRealtimeEventToPg(emails, payload) {
+  if (!hasDatabaseUrl || !dbReady || !isDbAvailable()) return;
+  const unique = normalizeRealtimeEmails(emails);
+  if (!unique.length) return;
+
+  const compact = compactRealtimePayload(payload);
+  if (!compact) return;
+
+  const envelope = {
+    source: REALTIME_NODE_ID,
+    emails: unique,
+    payload: compact,
+  };
+  const text = JSON.stringify(envelope);
+  if (Buffer.byteLength(text, 'utf8') > 7500) {
+    fastify.log.warn({ type: compact?.type }, 'Realtime pg notify payload too large; local WS only');
+    return;
+  }
+
+  await pool.query('SELECT pg_notify($1, $2)', [REALTIME_PG_CHANNEL, text]);
+}
+
+function scheduleRealtimePgReconnect() {
+  if (realtimePgReconnectTimer || !hasDatabaseUrl) return;
+  realtimePgReconnectTimer = setTimeout(() => {
+    realtimePgReconnectTimer = null;
+    startRealtimePgBridge().catch((err) => {
+      fastify.log.warn({ err }, 'Realtime pg bridge reconnect failed');
+    });
+  }, 5000);
+}
+
+async function handleRealtimePgNotification(message) {
+  let envelope = null;
+  try {
+    envelope = JSON.parse(String(message?.payload || ''));
+  } catch {
+    return;
+  }
+
+  if (!envelope || envelope.source === REALTIME_NODE_ID) return;
+  const emails = normalizeRealtimeEmails(envelope.emails);
+  if (!emails.length) return;
+  const payload = await hydrateRealtimePayload(envelope.payload);
+  if (!payload) return;
+  wsBroadcastToEmailsLocal(emails, payload);
+}
+
+async function startRealtimePgBridge() {
+  if (!hasDatabaseUrl || !dbReady || !isDbAvailable()) return;
+  if (realtimePgListener || realtimePgListenerStarting) return;
+
+  realtimePgListenerStarting = true;
+  const client = createPgClient({ useSsl: shouldUseSsl });
+
+  const cleanup = () => {
+    if (realtimePgListener === client) realtimePgListener = null;
+    if (dbReady) scheduleRealtimePgReconnect();
+  };
+
+  client.on('notification', (message) => {
+    handleRealtimePgNotification(message).catch((err) => {
+      fastify.log.warn({ err }, 'Realtime pg notification handling failed');
+    });
+  });
+  client.on('error', (err) => {
+    fastify.log.warn({ err }, 'Realtime pg listener error');
+    cleanup();
+  });
+  client.on('end', cleanup);
+
+  try {
+    await client.connect();
+    await client.query(`LISTEN ${REALTIME_PG_CHANNEL}`);
+    realtimePgListener = client;
+    fastify.log.info({ channel: REALTIME_PG_CHANNEL }, 'Realtime pg bridge listening');
+  } catch (err) {
+    try {
+      await client.end();
+    } catch {
+      // ignore
+    }
+    scheduleRealtimePgReconnect();
+    throw err;
+  } finally {
+    realtimePgListenerStarting = false;
+  }
+}
 
 async function poolQueryOnce(config) {
   return pool.query(config);
@@ -3074,6 +3270,8 @@ function startDbConnectionLoop() {
 
     // On first successful connect, kick off schema init + non-hot-path ensures.
     if (isDbAvailable() && !dbInitPromise) {
+      startRealtimePgBridge().catch((e) => fastify.log.warn({ err: e }, 'Failed to start realtime pg bridge'));
+
       dbInitPromise = initDbSchemaWithRetry().catch((e) => {
         fastify.log.error({ err: e }, 'DB init failed after retries');
         // Keep running; subsequent requests will return 503 via ensureDbReady().
@@ -9330,6 +9528,11 @@ fastify.post('/movements/:id/group-chat', { config: { rateLimit: RATE_LIMITS.con
       group_posters: [],
     });
     if (!created) return reply.code(500).send({ error: 'Failed to create group chat' });
+    wsBroadcastToEmails(participants, {
+      type: 'conversation:updated',
+      conversationId: String(created.id),
+      conversation: created,
+    });
     return reply.code(201).send(created);
   }
 
@@ -9376,7 +9579,13 @@ fastify.post('/movements/:id/group-chat', { config: { rateLimit: RATE_LIMITS.con
         [],
       ]
     );
-    return reply.code(201).send(created.rows?.[0] ?? { id });
+    const newConvo = created.rows?.[0] ?? { id };
+    wsBroadcastToEmails(participants, {
+      type: 'conversation:updated',
+      conversationId: String(newConvo.id),
+      conversation: newConvo,
+    });
+    return reply.code(201).send(newConvo);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create group chat');
     return reply.code(500).send({ error: 'Failed to create group chat' });
@@ -12102,36 +12311,55 @@ fastify.post('/conversations', async (request, reply) => {
   try {
     await ensureMessagesTables();
     const participants = [myEmail, recipient].sort();
+    const client = await pool.connect();
 
-    const existing = await pool.query(
-      `SELECT *
-       FROM conversations
-       WHERE participant_emails @> ARRAY[$1, $2]
-         AND array_length(participant_emails, 1) = 2
-       ORDER BY updated_at DESC
-       LIMIT 1`,
-      [participants[0], participants[1]]
-    );
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`direct:${participants.join(':')}`]);
 
-    if (existing.rows?.[0]) return reply.send(existing.rows[0]);
+      const existing = await client.query(
+        `SELECT *
+         FROM conversations
+         WHERE participant_emails @> ARRAY[$1, $2]
+           AND array_length(participant_emails, 1) = 2
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+        [participants[0], participants[1]]
+      );
 
-    const id = randomUUID();
-    const created = await pool.query(
-      `INSERT INTO conversations (id, participant_emails, is_request, requester_email, request_status)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
-      [id, participants, isRequest, isRequest ? myEmail : null, isRequest ? 'pending' : 'accepted']
-    );
+      if (existing.rows?.[0]) {
+        await client.query('COMMIT');
+        return reply.send(existing.rows[0]);
+      }
 
-    const newConvo = created.rows?.[0] ?? { id };
-    // Notify the recipient so their conversation list updates in real-time.
-    wsBroadcastToEmails([recipient], {
-      type: 'conversation:updated',
-      conversationId: String(newConvo.id),
-      conversation: newConvo,
-    });
+      const id = randomUUID();
+      const created = await client.query(
+        `INSERT INTO conversations (id, participant_emails, is_request, requester_email, request_status)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [id, participants, isRequest, isRequest ? myEmail : null, isRequest ? 'pending' : 'accepted']
+      );
 
-    return reply.code(201).send(newConvo);
+      const newConvo = created.rows?.[0] ?? { id };
+      await client.query('COMMIT');
+      // Notify the recipient so their conversation list updates in real-time.
+      wsBroadcastToEmails([recipient], {
+        type: 'conversation:updated',
+        conversationId: String(newConvo.id),
+        conversation: newConvo,
+      });
+
+      return reply.code(201).send(newConvo);
+    } catch (e) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // ignore
+      }
+      throw e;
+    } finally {
+      client.release();
+    }
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create conversation');
     return reply.code(500).send({ error: 'Failed to create conversation' });
@@ -12192,6 +12420,11 @@ fastify.post('/conversations/group', { config: { rateLimit: RATE_LIMITS.conversa
       group_posters: allowedPosters,
     });
     if (!created) return reply.code(500).send({ error: 'Failed to create group chat' });
+    wsBroadcastToEmails(participants, {
+      type: 'conversation:updated',
+      conversationId: String(created.id),
+      conversation: created,
+    });
     return reply.code(201).send(created);
   }
 
@@ -12230,7 +12463,13 @@ fastify.post('/conversations/group', { config: { rateLimit: RATE_LIMITS.conversa
         allowedPosters,
       ]
     );
-    return reply.code(201).send(created.rows?.[0] ?? { id });
+    const newConvo = created.rows?.[0] ?? { id };
+    wsBroadcastToEmails(participants, {
+      type: 'conversation:updated',
+      conversationId: String(newConvo.id),
+      conversation: newConvo,
+    });
+    return reply.code(201).send(newConvo);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to create group chat');
     return reply.code(500).send({ error: 'Failed to create group chat' });
@@ -12313,7 +12552,13 @@ fastify.patch('/conversations/:id/group', { config: { rateLimit: RATE_LIMITS.con
     if (result?.error) return reply.code(result.code || 400).send({ error: result.error });
     const idx = memoryConversations.findIndex((c) => String(c?.id) === String(conversationId));
     if (idx !== -1) memoryConversations[idx] = { ...result.next, updated_at: nowIso() };
-    return reply.send(memoryConversations[idx] || result.next);
+    const updatedConvo = memoryConversations[idx] || result.next;
+    wsBroadcastToEmails(updatedConvo?.participant_emails, {
+      type: 'conversation:updated',
+      conversationId: String(updatedConvo.id),
+      conversation: updatedConvo,
+    });
+    return reply.send(updatedConvo);
   }
 
   try {
@@ -12347,7 +12592,13 @@ fastify.patch('/conversations/:id/group', { config: { rateLimit: RATE_LIMITS.con
         normalizeEmailList(result.next.group_posters),
       ]
     );
-    return reply.send(updated.rows?.[0] || { ok: true });
+    const updatedConvo = updated.rows?.[0] || { ok: true };
+    wsBroadcastToEmails(updatedConvo?.participant_emails, {
+      type: 'conversation:updated',
+      conversationId: String(conversationId),
+      conversation: updatedConvo,
+    });
+    return reply.send(updatedConvo);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to update group settings');
     return reply.code(500).send({ error: 'Failed to update group settings' });
@@ -12441,7 +12692,16 @@ fastify.post('/conversations/:id/participants', { config: { rateLimit: RATE_LIMI
         updated_at: nowIso(),
       };
     }
-    return reply.send(memoryConversations[idx] || convo);
+    const updatedConvo = memoryConversations[idx] || convo;
+    wsBroadcastToEmails(
+      Array.from(new Set([...normalizeEmailList(convo?.participant_emails), ...normalizeEmailList(updatedConvo?.participant_emails)])),
+      {
+        type: 'conversation:updated',
+        conversationId: String(conversationId),
+        conversation: updatedConvo,
+      }
+    );
+    return reply.send(updatedConvo);
   }
 
   try {
@@ -12466,7 +12726,16 @@ fastify.post('/conversations/:id/participants', { config: { rateLimit: RATE_LIMI
        RETURNING *`,
       [conversationId, result.nextParticipants, result.nextAdmins, result.nextPosters]
     );
-    return reply.send(updated.rows?.[0] || { ok: true });
+    const updatedConvo = updated.rows?.[0] || { ok: true };
+    wsBroadcastToEmails(
+      Array.from(new Set([...normalizeEmailList(convo?.participant_emails), ...normalizeEmailList(updatedConvo?.participant_emails)])),
+      {
+        type: 'conversation:updated',
+        conversationId: String(conversationId),
+        conversation: updatedConvo,
+      }
+    );
+    return reply.send(updatedConvo);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to update group participants');
     return reply.code(500).send({ error: 'Failed to update participants' });
@@ -12789,7 +13058,8 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
       [id, conversationId, myEmail, cleanBody, [myEmail], []]
     );
 
-    await pool.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1', [conversationId]);
+    const updatedConvoRes = await pool.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1 RETURNING *', [conversationId]);
+    const updatedConvo = updatedConvoRes.rows?.[0] || convo;
     notifyMessageRecipients({ conversation: convo, body: cleanBody, senderEmail: myEmail }).catch((err) => {
       fastify.log.warn({ err }, 'Message notification failed');
     });
@@ -12799,7 +13069,7 @@ fastify.post('/conversations/:id/messages', { config: { rateLimit: RATE_LIMITS.m
       wsBroadcastToEmails(convo?.participant_emails, {
         type: 'message:new',
         conversationId: String(conversationId),
-        conversation: convo,
+        conversation: updatedConvo,
         message: row,
       });
     }
@@ -15751,6 +16021,12 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
     }
     const updated = memoryToggleMessageReaction(messageId, myEmail, emoji);
     if (!updated) return reply.code(404).send({ error: 'Message not found' });
+    const convo = getMemoryConversationById(updated.conversation_id);
+    wsBroadcastToEmails(convo?.participant_emails, {
+      type: 'message:updated',
+      conversationId: String(updated.conversation_id),
+      message: updated,
+    });
     return reply.send(updated);
   }
 
@@ -15793,7 +16069,15 @@ fastify.post('/messages/:id/reactions', async (request, reply) => {
       'UPDATE messages SET reactions = $2::jsonb WHERE id = $1 RETURNING *',
       [messageId, JSON.stringify(next)]
     );
-    return reply.send(updated.rows?.[0] || { ok: true });
+    const updatedMessage = updated.rows?.[0] || null;
+    if (updatedMessage) {
+      wsBroadcastToEmails(participants, {
+        type: 'message:updated',
+        conversationId: String(row.conversation_id),
+        message: updatedMessage,
+      });
+    }
+    return reply.send(updatedMessage || { ok: true });
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to toggle reaction');
     return reply.code(500).send({ error: 'Failed to toggle reaction' });

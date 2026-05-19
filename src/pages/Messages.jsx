@@ -78,10 +78,23 @@ function revealKey(messageId) {
 }
 
 function looksLikeConnectivityError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  if (code === 'BACKEND_SUSPENDED' || code === 'BACKEND_HTML_ERROR') return true;
   const msg = String(error?.message || '').toLowerCase();
   if (!msg) return false;
-  return msg.includes('failed to fetch') || msg.includes('network') || msg.includes('load failed') || msg.includes('econnrefused');
+  return (
+    msg.includes('failed to fetch') ||
+    msg.includes('network') ||
+    msg.includes('load failed') ||
+    msg.includes('econnrefused') ||
+    msg.includes('timed out') ||
+    msg.includes('service is suspended') ||
+    msg.includes('service has been suspended')
+  );
 }
+
+const FALLBACK_CONVERSATIONS_REFETCH_MS = 10_000;
+const FALLBACK_MESSAGES_REFETCH_MS = 5_000;
 
 function MediaMessage({ payload, messageId }) {
   const url = String(payload?.url || '');
@@ -511,6 +524,55 @@ function MessagesInner() {
     [queryClient, myEmailNormalized]
   );
 
+  const removeConversationFromCache = useCallback(
+    (conversationId) => {
+      const cid = String(conversationId || '');
+      if (!cid) return;
+      const conversationsKey = ['conversations', myEmailNormalized];
+      queryClient.setQueryData(conversationsKey, (old) => {
+        if (!old || typeof old !== 'object') return old;
+        const pages = Array.isArray(old.pages) ? old.pages : null;
+        const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
+        if (!pages || !pageParams) return old;
+        return {
+          ...old,
+          pages: pages.map((page) =>
+            Array.isArray(page) ? page.filter((c) => String(c?.id || '') !== cid) : page
+          ),
+        };
+      });
+    },
+    [queryClient, myEmailNormalized]
+  );
+
+  const patchMessageInCache = useCallback(
+    (message, conversationIdOverride) => {
+      const cid = conversationIdOverride != null ? String(conversationIdOverride) : String(selectedId || '');
+      const mid = String(message?.id || '');
+      if (!cid || !mid || !message || typeof message !== 'object') return;
+      const messagesKey = ['messages', cid, myEmailNormalized];
+      queryClient.setQueryData(messagesKey, (old) => {
+        if (!old || typeof old !== 'object') return old;
+        const pages = Array.isArray(old.pages) ? old.pages : null;
+        const pageParams = Array.isArray(old.pageParams) ? old.pageParams : null;
+        if (!pages || !pageParams) return old;
+
+        let found = false;
+        const nextPages = pages.map((page) => {
+          if (!Array.isArray(page)) return page;
+          return page.map((m) => {
+            if (String(m?.id || '') !== mid) return m;
+            found = true;
+            return { ...m, ...message };
+          });
+        });
+
+        return found ? { ...old, pages: nextPages } : old;
+      });
+    },
+    [myEmailNormalized, queryClient, selectedId]
+  );
+
   useEffect(() => {
     if (!accessToken || !myEmailNormalized) return;
     if (realtimeRef.current) return;
@@ -631,10 +693,32 @@ function MessagesInner() {
           return;
         }
 
+        if (type === 'message:updated' || type === 'message:reaction') {
+          const conversationId = evt?.conversationId ? String(evt.conversationId) : '';
+          const message = evt?.message && typeof evt.message === 'object' ? evt.message : null;
+          if (!conversationId || !message?.id) return;
+          const isActive = String(selectedIdRef.current || '') === conversationId;
+          if (isActive) {
+            patchMessageInCache(message, conversationId);
+          } else {
+            queryClient.invalidateQueries({ queryKey: ['messages', conversationId, myEmailNormalizedRef.current] });
+          }
+          return;
+        }
+
         if (type === 'conversation:updated') {
           const conversationId = evt?.conversationId ? String(evt.conversationId) : '';
           const conversation = evt?.conversation && typeof evt.conversation === 'object' ? evt.conversation : null;
           if (!conversationId || !conversation) return;
+          const participants = Array.isArray(conversation?.participant_emails)
+            ? conversation.participant_emails.map(normalizeEmail).filter(Boolean)
+            : [];
+          const me = myEmailNormalizedRef.current;
+          if (me && participants.length && !participants.includes(me)) {
+            removeConversationFromCache(conversationId);
+            if (String(selectedIdRef.current || '') === conversationId) setSelectedId(null);
+            return;
+          }
           upsertConversationIntoCache(conversation);
           return;
         }
@@ -685,7 +769,16 @@ function MessagesInner() {
       }
       typingTimersRef.current = {};
     };
-  }, [accessToken, myEmailNormalized, queryClient, bumpConversationInCache, upsertConversationIntoCache, upsertMessageIntoCache]);
+  }, [
+    accessToken,
+    myEmailNormalized,
+    queryClient,
+    bumpConversationInCache,
+    patchMessageInCache,
+    removeConversationFromCache,
+    upsertConversationIntoCache,
+    upsertMessageIntoCache,
+  ]);
 
   // Gap-fill: when WS reconnects after a disconnect, refetch conversations and
   // the active conversation's messages so nothing is lost during the gap.
@@ -768,7 +861,8 @@ function MessagesInner() {
       if (lastPage.length < CONVERSATIONS_PAGE_SIZE) return undefined;
       return allPages.length * CONVERSATIONS_PAGE_SIZE;
     },
-    refetchInterval: realtimeConnected ? false : 2500,
+    refetchInterval: realtimeConnected ? false : FALLBACK_CONVERSATIONS_REFETCH_MS,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     throwOnError: false,
   });
@@ -1193,7 +1287,8 @@ function MessagesInner() {
       if (lastPage.length < MESSAGES_PAGE_SIZE) return undefined;
       return allPages.length * MESSAGES_PAGE_SIZE;
     },
-    refetchInterval: realtimeConnected ? false : (selectedId ? 1500 : false),
+    refetchInterval: realtimeConnected ? false : (selectedId ? FALLBACK_MESSAGES_REFETCH_MS : false),
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     throwOnError: false,
   });
@@ -1375,7 +1470,7 @@ function MessagesInner() {
         updated_at: new Date().toISOString(),
       });
       // Also refetch conversation list so sidebar reflects the latest message immediately.
-      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      queryClient.invalidateQueries({ queryKey: ['conversations', myEmailNormalized] });
     },
     onError: (e, _vars, context) => {
       if (context?.clientId) {
@@ -1396,8 +1491,12 @@ function MessagesInner() {
     mutationFn: async ({ messageId, emoji }) => {
       return toggleMessageReaction(messageId, emoji, { accessToken, myEmail });
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['messages', selectedId, myEmailNormalized] });
+    onSuccess: (updated) => {
+      if (updated?.id && selectedId) {
+        patchMessageInCache(updated, selectedId);
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['messages', selectedId, myEmailNormalized] });
+      }
     },
     onError: (e) => toast.error(getInteractionErrorMessage(e, 'Failed to react')),
   });

@@ -6,12 +6,11 @@ import { fetchMovementVotes, voteMovement } from '@/api/movementsClient';
 import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { queryKeys } from '@/lib/queryKeys';
 import { usePendingGuard } from '@/hooks/usePendingGuard';
-import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
 
 export default function VoteButtons({ movementId, movement, className = '' }) {
   const { session } = useAuth();
   const queryClient = useQueryClient();
-  const pendingGuard = usePendingGuard('vote');
+  const pendingGuard = usePendingGuard('vote', { timeoutMs: 30_000 });
   const [voteBusy, setVoteBusy] = React.useState(false);
 
   const id = useMemo(
@@ -120,13 +119,7 @@ export default function VoteButtons({ movementId, movement, className = '' }) {
   const runVote = React.useCallback(
     async (nextValue) => {
       setVoteBusy(true);
-      pendingGuard.start({
-        retry: () => runVote(nextValue),
-        onTimeout: ({ retry }) => {
-          setVoteBusy(false);
-          showPendingTimeoutToast({ retry });
-        },
-      });
+      pendingGuard.start();
 
       try {
         await mutation.mutateAsync(nextValue);

@@ -33,8 +33,6 @@ import { upsertNotification } from '@/api/notificationsClient';
 import { queryKeys } from '@/lib/queryKeys';
 import { isDebugUiEnabledForUser } from '@/utils/requestDebug';
 import { usePendingGuard } from '@/hooks/usePendingGuard';
-import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
-import { captureRequestDebugInfo } from '@/utils/requestDebug';
 import { newIdempotencyKey } from '@/utils/idempotencyKey';
 
 function getMovementOwnerEmail(movement) {
@@ -86,7 +84,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
   const { user, session } = useAuth();
   const queryClient = useQueryClient();
 
-  const postPendingGuard = usePendingGuard('Post comment');
+  const postPendingGuard = usePendingGuard('Post comment', { timeoutMs: 30_000 });
   const [postBusy, setPostBusy] = useState(false);
   const lastPostTextRef = useRef('');
   const lastPostMovementIdRef = useRef('');
@@ -377,21 +375,7 @@ export default function CommentSection({ movementId, movement, canModerate = fal
     }
 
     setPostBusy(true);
-    postPendingGuard.start({
-      retry: () => submitPost(clean),
-      onTimeout: () => {
-        setPostBusy(false);
-        captureRequestDebugInfo({
-          label: 'Post comment',
-          endpoint: safeMovementId ? `/movements/${encodeURIComponent(String(safeMovementId))}/comments` : '/movements/:id/comments',
-          method: 'POST',
-          elapsed_ms: postPendingGuard.timeoutMs,
-          error_message: 'Timed out after 10s',
-        });
-        showPendingTimeoutToast({ retry: () => submitPost(clean) });
-        postPendingGuard.stop();
-      },
-    });
+    postPendingGuard.start();
 
     postMutation.mutate({ text: clean, idempotencyKey: postIdempotencyKeyRef.current });
   };

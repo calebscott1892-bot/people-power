@@ -9,8 +9,6 @@ import { getInteractionErrorMessage } from '@/utils/interactionErrors';
 import { upsertNotification } from '@/api/notificationsClient';
 import { queryKeys } from '@/lib/queryKeys';
 import { usePendingGuard } from '@/hooks/usePendingGuard';
-import { showPendingTimeoutToast } from '@/utils/pendingTimeoutToast';
-import { captureRequestDebugInfo } from '@/utils/requestDebug';
 
 function getMovementOwnerEmail(movement) {
   const candidates = [
@@ -45,7 +43,7 @@ export default function BoostButtons({
 
   const accessToken = session?.access_token ? String(session.access_token) : null;
 
-  const votePendingGuard = usePendingGuard('Boost/Vote');
+  const votePendingGuard = usePendingGuard('Boost/Vote', { timeoutMs: 30_000 });
   const [voteBusy, setVoteBusy] = useState(false);
   const pendingVoteRef = useRef(null);
 
@@ -218,21 +216,7 @@ export default function BoostButtons({
     pendingVoteRef.current = pendingValue;
     setVoteBusy(true);
 
-    votePendingGuard.start({
-      retry: () => startVoteAttempt(pendingValue),
-      onTimeout: () => {
-        setVoteBusy(false);
-        captureRequestDebugInfo({
-          label: 'Boost/Vote',
-          endpoint: id ? `/movements/${encodeURIComponent(String(id))}/vote` : '/movements/:id/vote',
-          method: 'POST',
-          elapsed_ms: votePendingGuard.timeoutMs,
-          error_message: 'Timed out after 10s',
-        });
-        showPendingTimeoutToast({ retry: () => startVoteAttempt(pendingValue) });
-        votePendingGuard.stop();
-      },
-    });
+    votePendingGuard.start();
 
     mutation.mutate(pendingValue, {
       onSettled: () => {
