@@ -89,7 +89,10 @@ async function tcpStatus(hostname, port) {
   });
 }
 
+let failedChecks = 0;
+
 function printCheck(name, status, details = '') {
+  if (!status) failedChecks += 1;
   const label = status ? 'PASS' : 'FAIL';
   const suffix = details ? ` - ${details}` : '';
   console.log(`[${label}] ${name}${suffix}`);
@@ -146,4 +149,9 @@ if (!db) {
   printCheck('database DNS', dns.ok, dns.ok ? dns.addresses.join(', ') : dns.error);
   const tcp = await tcpStatus(db.hostname, port);
   printCheck('database TCP', tcp.ok, tcp.ok ? `${db.hostname}:${port}` : tcp.error);
+}
+
+if (failedChecks > 0) {
+  console.error(`People Power doctor found ${failedChecks} failing check${failedChecks === 1 ? '' : 's'}.`);
+  process.exitCode = 1;
 }

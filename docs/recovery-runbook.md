@@ -21,6 +21,9 @@ Run:
 npm run doctor
 ```
 
+The doctor exits non-zero if any check fails, so it can be used in scripts and
+deployment gates without masking an unhealthy backend or Supabase project.
+
 This checks dependency folders, backend health, backend DB status, Supabase DNS,
 Supabase auth health, and the database host. It redacts secrets.
 
