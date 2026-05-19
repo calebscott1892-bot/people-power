@@ -18,16 +18,17 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(ROOT);
 
 const BACKEND_HOST = '127.0.0.1';
-const BACKEND_PORT = '3001';
+const BACKEND_PORT = process.env.E2E_BACKEND_PORT || process.env.PEOPLEPOWER_BACKEND_PORT || process.env.C4_BACKEND_PORT || '3001';
 const FRONTEND_HOST = '127.0.0.1';
-const FRONTEND_PORT = '5173';
+const FRONTEND_PORT = process.env.E2E_FRONTEND_PORT || process.env.VITE_DEV_PORT || '5173';
 
 const BACKEND_BASE = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 const FRONTEND_BASE = `http://${FRONTEND_HOST}:${FRONTEND_PORT}`;
@@ -122,6 +123,10 @@ function spawnDetached(command, args, { logFile, env } = {}) {
   });
   child.unref();
   return child;
+}
+
+function bin(name) {
+  return process.platform === 'win32' ? `${name}.cmd` : name;
 }
 
 function getServiceRoleKey() {
@@ -253,7 +258,16 @@ async function main() {
     safeLog(`[e2e] backend already up: ${BACKEND_BASE}`);
   } catch {
     safeLog(`[e2e] starting backend: ${BACKEND_BASE}`);
-    backendChild = spawnDetached('npm', ['run', 'dev:server'], { logFile: backendLog, env: { PEOPLEPOWER_BACKEND_PORT: BACKEND_PORT, C4_BACKEND_PORT: BACKEND_PORT } });
+    backendChild = spawnDetached(bin('npm'), ['run', 'dev:server'], {
+      logFile: backendLog,
+      env: {
+        PEOPLEPOWER_BACKEND_PORT: BACKEND_PORT,
+        C4_BACKEND_PORT: BACKEND_PORT,
+        PORT: BACKEND_PORT,
+        VITE_API_BASE_URL: BACKEND_BASE,
+        VITE_BACKEND_BASE: BACKEND_BASE,
+      },
+    });
     await waitForUrlOk(`${BACKEND_BASE}/__health`, { name: 'backend' });
   }
 
@@ -263,7 +277,16 @@ async function main() {
     safeLog(`[e2e] frontend already up: ${FRONTEND_BASE}`);
   } catch {
     safeLog(`[e2e] starting frontend: ${FRONTEND_BASE}`);
-    frontendChild = spawnDetached('npm', ['run', 'dev:client'], { logFile: frontendLog, env: { PEOPLEPOWER_BACKEND_PORT: BACKEND_PORT, C4_BACKEND_PORT: BACKEND_PORT } });
+    frontendChild = spawnDetached(bin('npx'), ['vite', '--host', FRONTEND_HOST, '--port', FRONTEND_PORT, '--strictPort'], {
+      logFile: frontendLog,
+      env: {
+        PEOPLEPOWER_BACKEND_PORT: BACKEND_PORT,
+        C4_BACKEND_PORT: BACKEND_PORT,
+        VITE_BACKEND_PORT: BACKEND_PORT,
+        VITE_API_BASE_URL: BACKEND_BASE,
+        VITE_BACKEND_BASE: BACKEND_BASE,
+      },
+    });
     await waitForUrlOk(`${FRONTEND_BASE}/`, { name: 'frontend' });
   }
 

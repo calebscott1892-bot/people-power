@@ -95,8 +95,8 @@ function printCheck(name, status, details = '') {
   console.log(`[${label}] ${name}${suffix}`);
 }
 
-const rootEnv = mergeEnv(ROOT_ENV_FILES);
-const serverEnv = mergeEnv(SERVER_ENV_FILES);
+const rootEnv = { ...mergeEnv(ROOT_ENV_FILES), ...process.env };
+const serverEnv = { ...mergeEnv(SERVER_ENV_FILES), ...process.env };
 
 const backendBase =
   rootEnv.VITE_API_BASE_URL ||

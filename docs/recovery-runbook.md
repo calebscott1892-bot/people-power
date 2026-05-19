@@ -50,6 +50,9 @@ supabase start
 supabase status
 ```
 
+The repo includes `supabase/config.toml` for local development. It is safe to
+commit because it contains local ports and settings, not hosted project secrets.
+
 Copy these values from `supabase status`:
 
 - API URL
@@ -91,6 +94,11 @@ $env:VITE_BACKEND_BASE="http://127.0.0.1:3001"
 npx vite --host 127.0.0.1 --port 5173
 ```
 
+If you do not want to write env files yet, set the same values only in the
+current PowerShell session before starting each process. `scripts/doctor.mjs`
+allows process env to override `.env` files, so local checks can target the
+temporary stack without changing saved secrets.
+
 Verify:
 
 ```powershell
@@ -104,6 +112,21 @@ Expected:
 - `/health` returns HTTP 200.
 - `/__db` shows `dbReady:true`.
 - `npm run doctor` reports backend and Supabase as reachable.
+
+Auth and realtime smoke tests:
+
+```powershell
+npm run e2e:auth
+```
+
+For cross-process DM sync, start a second backend on another local port against
+the same local Supabase database, then point the smoke at both origins:
+
+```powershell
+$env:E2E_SENDER_BACKEND_BASE="http://127.0.0.1:3001"
+$env:E2E_RECEIVER_BACKEND_BASE="http://127.0.0.1:3012"
+npm run smoke:realtime
+```
 
 Manual two-user test:
 

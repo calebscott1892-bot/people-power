@@ -25,6 +25,7 @@
     "ios:livereload": "npx cap run ios --livereload --external",
     "proof:stability": "bash scripts/c4-proof-pack-stability.sh",
     "smoke:auth": "bash scripts/smoke-auth.sh",
+    "smoke:realtime": "node scripts/realtime-smoke.mjs",
     "e2e:auth": "node scripts/e2e-auth.mjs",
     "verify:no-direct-fetch": "node c4-proof-pack/verify-no-direct-fetch.mjs"
   },
