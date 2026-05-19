@@ -16,6 +16,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "node Server/index.js",
+    "doctor": "node scripts/doctor.mjs",
     "dev:cf": "wrangler pages dev dist --binding SUPABASE_URL=<your-supabase-url> --binding SUPABASE_ANON_KEY=<your-supabase-anon-key>",
     "deploy:cf": "npm run build && wrangler pages publish dist",
     "ios:build": "npm run build && npx cap sync ios",
