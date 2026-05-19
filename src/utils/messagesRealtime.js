@@ -42,7 +42,7 @@ function isOnline() {
   }
 }
 
-export function connectMessagesRealtime({ accessToken, getAccessToken, onEvent, onStatus }) {
+export function connectMessagesRealtime({ accessToken, getAccessToken, onEvent, onStatus, onOpen }) {
   // Each fresh call resets the disabled flag so WS can retry after failures.
   wsDisabledForSession = false;
 
@@ -71,6 +71,14 @@ export function connectMessagesRealtime({ accessToken, getAccessToken, onEvent, 
   function safeEmitEvent(evt) {
     try {
       if (typeof onEvent === 'function') onEvent(evt);
+    } catch {
+      // ignore
+    }
+  }
+
+  function safeEmitOpen(send) {
+    try {
+      if (typeof onOpen === 'function') onOpen(send);
     } catch {
       // ignore
     }
@@ -140,6 +148,7 @@ export function connectMessagesRealtime({ accessToken, getAccessToken, onEvent, 
       } catch {
         // ignore
       }
+      safeEmitOpen(send);
     };
 
     socket.onmessage = (ev) => {

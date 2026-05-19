@@ -85,6 +85,7 @@ import { useFeatureFlag } from '@/utils/featureFlags';
 import { DM_DISABLED, DM_DISABLED_MESSAGE } from '@/config/clientFeatureGates';
 import { getPageCache, setPageCache } from '@/utils/pageCache';
 import { queryKeys } from '@/lib/queryKeys';
+import { connectMessagesRealtime } from '@/utils/messagesRealtime';
 import {
   ALLOWED_IMAGE_WITH_GIF_MIME_TYPES,
   ALLOWED_UPLOAD_MIME_TYPES,
@@ -666,6 +667,98 @@ export default function MovementDetails() {
     setOfflineMovement(null);
     setShowOfflineLabel(false);
   }, [backendStatus, movementCacheKey, allowOfflineMovementCache]);
+
+  useEffect(() => {
+    if (!movementId || !accessToken) return undefined;
+
+    const patchMovementRecord = (patch) => (record) => {
+      if (!record || typeof record !== 'object') return record;
+      const idValue = String(record?.id ?? record?._id ?? '').trim();
+      if (!idValue || idValue !== String(movementId)) return record;
+      return { ...record, ...patch };
+    };
+
+    const patchMovementLists = (patch) => {
+      const patchRecord = patchMovementRecord(patch);
+      const patchAnyList = (old) => {
+        if (old && typeof old === 'object' && Array.isArray(old.pages)) {
+          return {
+            ...old,
+            pages: old.pages.map((page) => (Array.isArray(page) ? page.map(patchRecord) : page)),
+          };
+        }
+        if (Array.isArray(old)) return old.map(patchRecord);
+        return old;
+      };
+
+      queryClient.setQueryData(queryKeys.movements.detail(movementId), (old) => patchRecord(old));
+      queryClient.setQueriesData({ queryKey: ['movements'] }, patchAnyList);
+      queryClient.setQueriesData({ queryKey: ['myMovements'] }, patchAnyList);
+      queryClient.setQueriesData({ queryKey: ['followedMovements'] }, patchAnyList);
+      queryClient.setQueriesData({ queryKey: ['searchMovements'] }, patchAnyList);
+      queryClient.setQueriesData({ queryKey: ['userMovements'] }, patchAnyList);
+      queryClient.setQueriesData({ queryKey: ['participatedMovements'] }, patchAnyList);
+    };
+
+    const handleMovementEvent = (event) => {
+      const eventMovementId = normalizeId(event?.movementId);
+      if (!eventMovementId || eventMovementId !== String(movementId)) return;
+
+      if (event?.type === 'movement:comment:new') {
+        queryClient.invalidateQueries({ queryKey: queryKeys.movements.comments(movementId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.movements.commentsCount(movementId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.movements.detail(movementId) });
+        return;
+      }
+
+      if (event?.type === 'movement:follow:updated') {
+        const count = Number(event?.followers_count);
+        if (!Number.isFinite(count)) return;
+        queryClient.setQueryData(queryKeys.movements.followersCount(movementId), count);
+        patchMovementLists({ followers_count: count });
+        return;
+      }
+
+      if (event?.type === 'movement:vote:updated') {
+        const votes = event?.votes && typeof event.votes === 'object' ? event.votes : {};
+        const upvotes = Number(votes.upvotes);
+        const downvotes = Number(votes.downvotes);
+        const score = Number(votes.score);
+        const patch = {};
+        if (Number.isFinite(upvotes)) {
+          patch.upvotes = upvotes;
+          patch.boosts_count = upvotes;
+        }
+        if (Number.isFinite(downvotes)) patch.downvotes = downvotes;
+        if (Number.isFinite(score)) patch.score = score;
+        if (!Object.keys(patch).length) return;
+
+        queryClient.setQueryData(queryKeys.movements.votes(movementId), (old) => ({
+          ...(old && typeof old === 'object' ? old : {}),
+          ...patch,
+        }));
+        patchMovementLists(patch);
+      }
+    };
+
+    const connection = connectMessagesRealtime({
+      accessToken,
+      getAccessToken: () => accessToken,
+      onEvent: handleMovementEvent,
+      onOpen: (send) => {
+        send({ type: 'movement:subscribe', movementId });
+      },
+    });
+
+    return () => {
+      try {
+        connection?.send?.({ type: 'movement:unsubscribe', movementId });
+      } catch {
+        // ignore
+      }
+      connection?.close?.();
+    };
+  }, [movementId, accessToken, queryClient]);
 
   // Prefer last-known-good data when offline.
   const movement = (allowOfflineMovementCache && offlineMovement) ? offlineMovement : movementData;

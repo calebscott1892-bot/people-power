@@ -335,6 +335,13 @@ try {
     E2E_RECEIVER_BACKEND_BASE: secondaryBackendBase,
   });
 
+  await runStep('cross-process movement engagement realtime smoke', commandFor('npm'), ['run', 'smoke:movement-realtime'], {
+    ...sharedEnv,
+    E2E_BACKEND_BASE: primaryBackendBase,
+    E2E_SENDER_BACKEND_BASE: primaryBackendBase,
+    E2E_RECEIVER_BACKEND_BASE: secondaryBackendBase,
+  });
+
   await runStep('SPA auth e2e', commandFor('npm'), ['run', 'e2e:auth'], {
     ...sharedEnv,
     E2E_BACKEND_PORT: String(primaryPort),

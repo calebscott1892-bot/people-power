@@ -619,6 +619,8 @@ const GROUP_POST_MODES = new Set(['owner_only', 'admins', 'selected', 'all']);
 // Best-effort realtime: clients still fall back to HTTP refetch.
 const wsClientsByEmail = new Map(); // email -> Set<WebSocket>
 const wsEmailByClient = new WeakMap(); // WebSocket -> email
+const wsClientsByMovement = new Map(); // movementId -> Set<WebSocket>
+const wsMovementsByClient = new WeakMap(); // WebSocket -> Set<movementId>
 let realtimeWss = null;
 let realtimeInitialized = false;
 const REALTIME_PG_CHANNEL = 'people_power_realtime';
@@ -641,6 +643,11 @@ function normalizeRealtimeEmails(emails) {
   return Array.from(new Set(list.map((e) => normalizeEmail(e)).filter(Boolean)));
 }
 
+function normalizeRealtimeMovementId(value) {
+  const id = value == null ? '' : String(value).trim();
+  return id || null;
+}
+
 function wsBroadcastToEmailsLocal(emails, payload) {
   const unique = normalizeRealtimeEmails(emails);
   for (const email of unique) {
@@ -657,6 +664,68 @@ function wsBroadcastToEmails(emails, payload) {
   publishRealtimeEventToPg(unique, payload).catch((err) => {
     try {
       fastify.log.warn({ err, type: payload?.type }, 'Realtime pg notify failed');
+    } catch {
+      // ignore
+    }
+  });
+}
+
+function wsSubscribeToMovement(ws, movementId) {
+  const id = normalizeRealtimeMovementId(movementId);
+  if (!id) return false;
+
+  const byClient = wsMovementsByClient.get(ws) || new Set();
+  byClient.add(id);
+  wsMovementsByClient.set(ws, byClient);
+
+  const byMovement = wsClientsByMovement.get(id) || new Set();
+  byMovement.add(ws);
+  wsClientsByMovement.set(id, byMovement);
+  return true;
+}
+
+function wsUnsubscribeFromMovement(ws, movementId) {
+  const id = normalizeRealtimeMovementId(movementId);
+  if (!id) return false;
+
+  const byClient = wsMovementsByClient.get(ws);
+  if (byClient) byClient.delete(id);
+
+  const byMovement = wsClientsByMovement.get(id);
+  if (byMovement) {
+    byMovement.delete(ws);
+    if (byMovement.size === 0) wsClientsByMovement.delete(id);
+  }
+  return true;
+}
+
+function wsUnsubscribeFromAllMovements(ws) {
+  const ids = wsMovementsByClient.get(ws);
+  if (!ids) return;
+  for (const id of ids) {
+    const byMovement = wsClientsByMovement.get(id);
+    if (!byMovement) continue;
+    byMovement.delete(ws);
+    if (byMovement.size === 0) wsClientsByMovement.delete(id);
+  }
+  wsMovementsByClient.delete(ws);
+}
+
+function wsBroadcastToMovementLocal(movementId, payload) {
+  const id = normalizeRealtimeMovementId(movementId);
+  if (!id || !payload || typeof payload !== 'object') return;
+  const set = wsClientsByMovement.get(id);
+  if (!set || set.size === 0) return;
+  for (const ws of set) wsSafeSend(ws, payload);
+}
+
+function wsBroadcastToMovement(movementId, payload) {
+  const id = normalizeRealtimeMovementId(movementId);
+  if (!id || !payload || typeof payload !== 'object') return;
+  wsBroadcastToMovementLocal(id, payload);
+  publishRealtimeMovementEventToPg(id, payload).catch((err) => {
+    try {
+      fastify.log.warn({ err, type: payload?.type, movementId: id }, 'Realtime movement pg notify failed');
     } catch {
       // ignore
     }
@@ -750,6 +819,23 @@ function initRealtimeServer() {
 
       if (type === 'ping') {
         wsSafeSend(ws, { type: 'pong', ts: Date.now() });
+        return;
+      }
+
+      if (type === 'movement:subscribe') {
+        const movementId = normalizeRealtimeMovementId(msg?.movementId);
+        if (!movementId) return;
+        if (wsSubscribeToMovement(ws, movementId)) {
+          wsSafeSend(ws, { type: 'movement:subscribed', movementId, ts: Date.now() });
+        }
+        return;
+      }
+
+      if (type === 'movement:unsubscribe') {
+        const movementId = normalizeRealtimeMovementId(msg?.movementId);
+        if (!movementId) return;
+        wsUnsubscribeFromMovement(ws, movementId);
+        wsSafeSend(ws, { type: 'movement:unsubscribed', movementId, ts: Date.now() });
         return;
       }
 
@@ -948,11 +1034,14 @@ function initRealtimeServer() {
     ws.on('close', () => {
       ws.__ppAlive = false; // prevent heartbeat from acting on closed sockets
       const e = normalizeEmail(wsEmailByClient.get(ws));
-      if (!e) return;
-      const set2 = wsClientsByEmail.get(e);
-      if (!set2) return;
-      set2.delete(ws);
-      if (set2.size === 0) wsClientsByEmail.delete(e);
+      if (e) {
+        const set2 = wsClientsByEmail.get(e);
+        if (set2) {
+          set2.delete(ws);
+          if (set2.size === 0) wsClientsByEmail.delete(e);
+        }
+      }
+      wsUnsubscribeFromAllMovements(ws);
 
       fastify.log.info({ path: '/ws' }, 'ws client disconnected');
     });
@@ -987,6 +1076,7 @@ function initRealtimeServer() {
             if (set.size === 0) wsClientsByEmail.delete(email);
           }
         }
+        wsUnsubscribeFromAllMovements(ws);
         continue;
       }
       ws.__ppAlive = false;
@@ -3040,6 +3130,28 @@ async function publishRealtimeEventToPg(emails, payload) {
   await pool.query('SELECT pg_notify($1, $2)', [REALTIME_PG_CHANNEL, text]);
 }
 
+async function publishRealtimeMovementEventToPg(movementId, payload) {
+  if (!hasDatabaseUrl || !dbReady || !isDbAvailable()) return;
+  const id = normalizeRealtimeMovementId(movementId);
+  if (!id || !payload || typeof payload !== 'object') return;
+
+  const compact = compactRealtimePayload({ ...payload, movementId: id });
+  if (!compact) return;
+
+  const envelope = {
+    source: REALTIME_NODE_ID,
+    movementIds: [id],
+    payload: compact,
+  };
+  const text = JSON.stringify(envelope);
+  if (Buffer.byteLength(text, 'utf8') > 7500) {
+    fastify.log.warn({ type: compact?.type, movementId: id }, 'Realtime movement pg notify payload too large; local WS only');
+    return;
+  }
+
+  await pool.query('SELECT pg_notify($1, $2)', [REALTIME_PG_CHANNEL, text]);
+}
+
 function scheduleRealtimePgReconnect() {
   if (realtimePgReconnectTimer || !hasDatabaseUrl) return;
   realtimePgReconnectTimer = setTimeout(() => {
@@ -3059,11 +3171,18 @@ async function handleRealtimePgNotification(message) {
   }
 
   if (!envelope || envelope.source === REALTIME_NODE_ID) return;
-  const emails = normalizeRealtimeEmails(envelope.emails);
-  if (!emails.length) return;
   const payload = await hydrateRealtimePayload(envelope.payload);
   if (!payload) return;
-  wsBroadcastToEmailsLocal(emails, payload);
+
+  const emails = normalizeRealtimeEmails(envelope.emails);
+  if (emails.length) wsBroadcastToEmailsLocal(emails, payload);
+
+  const movementIds = Array.isArray(envelope.movementIds)
+    ? Array.from(new Set(envelope.movementIds.map((id) => normalizeRealtimeMovementId(id)).filter(Boolean)))
+    : [];
+  for (const movementId of movementIds) {
+    wsBroadcastToMovementLocal(movementId, payload);
+  }
 }
 
 async function startRealtimePgBridge() {
@@ -6817,8 +6936,10 @@ function buildInsertForMovements(columns, payload) {
 
   const claims = payload.claims != null ? payload.claims : null;
   const visibility = normalizeMovementVisibility(payload.visibility);
+  const id = randomUUID();
 
   const candidates = {
+    id,
     title,
     description,
     summary: description,
@@ -8273,7 +8394,15 @@ fastify.post('/movements/:id/follow', async (request, reply) => {
     if (following) set.add(email);
     else set.delete(email);
     memoryMovementFollows.set(key, set);
-    return reply.send({ following: set.has(email), followers_count: set.size });
+    const responseBody = { following: set.has(email), followers_count: set.size };
+    wsBroadcastToMovement(id, {
+      type: 'movement:follow:updated',
+      movementId: String(id),
+      followers_count: responseBody.followers_count,
+      actor_email: email,
+      following: responseBody.following,
+    });
+    return reply.send(responseBody);
   }
 
   try {
@@ -8293,7 +8422,15 @@ fastify.post('/movements/:id/follow', async (request, reply) => {
       String(id),
     ]);
     const followers_count = countRes.rows?.[0]?.count ?? 0;
-    return reply.send({ following, followers_count });
+    const responseBody = { following, followers_count };
+    wsBroadcastToMovement(id, {
+      type: 'movement:follow:updated',
+      movementId: String(id),
+      followers_count,
+      actor_email: email,
+      following,
+    });
+    return reply.send(responseBody);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to update follow state');
     return reply.code(500).send({ error: 'Failed to update follow state' });
@@ -8717,6 +8854,11 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
       statusCode: 201,
       responseJson: responseBody,
     });
+    wsBroadcastToMovement(id, {
+      type: 'movement:comment:new',
+      movementId: String(id),
+      commentId: String(comment.id),
+    });
     return reply.code(201).send(responseBody);
   }
 
@@ -8803,6 +8945,11 @@ fastify.post('/movements/:id/comments', { config: { rateLimit: RATE_LIMITS.comme
       bodyHash: hashBodyForIdempotency(request.body ?? {}),
       statusCode: 201,
       responseJson: responseBody,
+    });
+    wsBroadcastToMovement(id, {
+      type: 'movement:comment:new',
+      movementId: String(id),
+      commentId: String(responseBody.comment?.id || created?.id || comment.id),
     });
     return reply.code(201).send(responseBody);
   } catch (e) {
@@ -10642,7 +10789,18 @@ fastify.post('/movements/:id/vote', async (request, reply) => {
       },
       '[audit] movement_vote'
     );
-    return reply.send(getMemoryVoteSummary(movementId, voterEmail));
+    const summary = getMemoryVoteSummary(movementId, voterEmail);
+    wsBroadcastToMovement(id, {
+      type: 'movement:vote:updated',
+      movementId: String(id),
+      votes: {
+        upvotes: summary.upvotes,
+        downvotes: summary.downvotes,
+        score: summary.score,
+      },
+      actor_email: normalizeEmail(voterEmail),
+    });
+    return reply.send(summary);
   }
 
   try {
@@ -10676,6 +10834,16 @@ fastify.post('/movements/:id/vote', async (request, reply) => {
       },
       '[audit] movement_vote'
     );
+    wsBroadcastToMovement(id, {
+      type: 'movement:vote:updated',
+      movementId: String(id),
+      votes: {
+        upvotes: summary.upvotes,
+        downvotes: summary.downvotes,
+        score: summary.score,
+      },
+      actor_email: normalizeEmail(voterEmail),
+    });
     return reply.send(summary);
   } catch (e) {
     fastify.log.error({ err: e }, 'Failed to apply vote');

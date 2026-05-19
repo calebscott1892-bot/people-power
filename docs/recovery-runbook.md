@@ -136,13 +136,15 @@ npm run verify:local
 ```
 
 This starts disposable local services on free ports, verifies backend/Supabase
-health, runs the SPA auth e2e, and runs a cross-process DM realtime smoke test
-with sender and receiver connected to different backend processes.
+health, runs the SPA auth e2e, runs a cross-process DM realtime smoke test, and
+runs a cross-process movement engagement smoke test for comments, boosts, and
+follows.
 
 Individual checks:
 
 ```powershell
 npm run e2e:auth
+npm run smoke:movement-realtime
 ```
 
 For cross-process DM sync, start a second backend on another local port against
